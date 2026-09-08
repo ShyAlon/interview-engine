@@ -8,15 +8,25 @@ from vmodel_contracts import IntentModel as RealIntentModel
 
 from interview_engine import cli, model_config
 
-INTENT = {
-    "session_id": "s", "problem_statement": "p", "target_users": ["u"],
-    "core_value_proposition": "v",
-    "stakeholder_needs": [
-        {"need_id": "SN-1", "statement": "founders need specs", "kind": "functional", "source_turns": [0]},
-    ],
+NEEDS_REPLY = {"stakeholder_needs": [
+    {"need_id": "SN-1", "statement": "founders need specs", "kind": "functional", "source_turns": [0]},
+], "assumptions": []}
+
+SCOPE_REPLY = {
+    "problem_statement": "p", "target_users": ["u"], "core_value_proposition": "v",
     "in_scope": ["a"], "out_of_scope": ["b"],
     "external_integrations": [], "constraints": [], "open_questions": [],
     "source_turns": {},
+}
+
+PREVIEW_REPLY = [{"need_id": "SN-1", "kind": "functional",
+                  "statement": "The system shall emit a spec.", "example_criterion": "spec file exists"}]
+
+INTENT = {
+    "session_id": "s",
+    "stakeholder_needs": NEEDS_REPLY["stakeholder_needs"],
+    "assumptions": [],
+    **SCOPE_REPLY,
 }
 
 
@@ -52,7 +62,7 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
 
     models = {
         "probing": FakeModel(["What is the goal?", "[INTERVIEW COMPLETE]"]),
-        "distillation": FakeModel([json.dumps(INTENT)]),
+        "distillation": FakeModel([json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)]),
         "scope_tiebreak": FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']),
     }
     monkeypatch.setattr(model_config, "build_chat_model", lambda stage: models[stage])
