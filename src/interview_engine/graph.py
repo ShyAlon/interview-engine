@@ -92,7 +92,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from vmodel_contracts import IntentModel
 
         from .errors import UserFacingError, translate_json_error
-        from .repair import coerce_for_model
+        from .repair import coerce_for_model, normalize_enums
 
         transcript = "\n".join(
             f"[{i}] {getattr(m, 'type', '?')}: {getattr(m, 'content', '')}"
@@ -111,7 +111,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 except _json.JSONDecodeError as e:
                     raise translate_json_error(e, "distillation") from e
                 data.setdefault("session_id", state["submission"]["submission_id"])
-                data = coerce_for_model(data, IntentModel)
+                data = normalize_enums(coerce_for_model(data, IntentModel), IntentModel)
                 try:
                     intent = IntentModel.model_validate(data)
                     return {"intent_model": intent.model_dump(mode="json")}
