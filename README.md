@@ -16,10 +16,21 @@ spent here on purpose (see ARCHITECTURE.md in `vmodel-spec-app`, ADR-0004).
    modes, privacy obligations, acceptance criteria. Hard stop at 60 turns.
 3. **Distillation** - transcript condenses into an `IntentModel`
    (vmodel-contracts), every field traced to transcript turns, open questions
-   carried, never silently resolved.
+   carried, never silently resolved. Validated INSIDE the graph: mechanical
+   shape drift is repaired, anything else gets one retry with the schema
+   error fed back to the model (ADR-0011).
 4. **Founder review gate** - the intent model renders to markdown for
    approval/edit before any generation. Cheapest place to catch a
    misunderstanding.
+
+## Running, progress, and crash-resume
+
+`python -m interview_engine.cli "your idea"` prints a live progress line per
+stage (`-> Interviewing (turn 3)...` / `ok ... [12.4s]`) driven by structured
+`ProgressEvent`s (progress.py) - the same stream the UI will consume
+(ADR-0010). Checkpoints persist to `out/<session>/checkpoints.sqlite`: if
+anything crashes, `python -m interview_engine.cli --session <id>` resumes
+exactly where it stopped - completed stages are never re-paid (ADR-0011).
 
 ## Model routing
 
