@@ -15,10 +15,12 @@ spent here on purpose (see ARCHITECTURE.md in `vmodel-spec-app`, ADR-0004).
    interviewer persona (`prompts.py`) chases what founders forget: failure
    modes, privacy obligations, acceptance criteria. Hard stop at 60 turns.
 3. **Distillation** - transcript condenses into an `IntentModel`
-   (vmodel-contracts), every field traced to transcript turns, open questions
-   carried, never silently resolved. Validated INSIDE the graph: mechanical
-   shape drift is repaired, anything else gets one retry with the schema
-   error fed back to the model (ADR-0011).
+   (vmodel-contracts) in four visible phases: extract needs -> build scope ->
+   requirement preview -> assemble/validate (ADR-0013). Every field traced to
+   transcript turns; open questions carried, never silently resolved; founder
+   assertions captured as assumptions, not needs. Each phase validates
+   independently with mechanical shape-drift repair + one schema-feedback
+   retry (ADR-0011).
 4. **Founder review gate** - the intent model renders to markdown for
    approval/edit before any generation. Cheapest place to catch a
    misunderstanding.
