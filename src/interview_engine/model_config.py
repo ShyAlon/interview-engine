@@ -1,10 +1,17 @@
 """Per-stage model routing. THE model-agnostic layer: swapping providers is a
-config change here, never a refactor. DeepSeek first (demo prices), any
-OpenAI-compatible or Anthropic model after.
+config change here, never a refactor. Providers:
+
+- deepseek  (default - demo prices, OpenAI-compatible)
+- openai
+- anthropic
+- ollama    (LOCAL: offline test runs at $0 - no API key, no data leaves the
+             machine. Needs a running Ollama server + a pulled model.)
 
 Every stage's choice is deliberate (see ARCHITECTURE.md, ADR-0004):
 - probing / distillation earn the strong model - they are the moat.
 - phrasing / tiebreaks can drop to a cheaper tier without visible quality loss.
+Local Ollama runs are for development and tests; judge demo quality on the
+real provider before showing founders.
 """
 from __future__ import annotations
 
@@ -14,15 +21,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class StageModel:
-    provider: str          # 'deepseek' | 'openai' | 'anthropic'
+    provider: str          # 'deepseek' | 'openai' | 'anthropic' | 'ollama'
     model: str
     temperature: float = 0.4
     max_tokens: int = 2048
 
 
-# Defaults: DeepSeek everywhere at demo prices. 'strong'/'cheap' split exists
-# so a later quality pass can move probing/distillation to Sonnet-class by
-# editing two lines, not two modules.
 _STAGE_DEFAULTS: dict[str, StageModel] = {
     "probing":       StageModel("deepseek", "deepseek-chat", temperature=0.5),
     "distillation":  StageModel("deepseek", "deepseek-chat", temperature=0.2),
@@ -33,11 +37,13 @@ _STAGE_DEFAULTS: dict[str, StageModel] = {
 _BASE_URLS = {
     "deepseek": "https://api.deepseek.com",
     "openai": None,  # SDK default
+    "ollama": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
 }
 _API_KEY_ENV = {
     "deepseek": "DEEPSEEK_API_KEY",
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "ollama": None,  # no key; ChatOpenAI just needs a non-empty string
 }
 
 
@@ -45,7 +51,7 @@ def for_stage(stage: str) -> StageModel:
     if stage not in _STAGE_DEFAULTS:
         raise KeyError(f"unknown stage {stage!r}; add it explicitly - silent fallback models are how budgets leak")
     cfg = _STAGE_DEFAULTS[stage]
-    # Env override: INTERVIEW_ENGINE_MODEL_PROBING=openai:gpt-5 etc. Config, not code.
+    # Env override: INTERVIEW_ENGINE_MODEL_PROBING=ollama:qwen2.5-coder:14b etc.
     override = os.environ.get(f"INTERVIEW_ENGINE_MODEL_{stage.upper()}")
     if override:
         provider, _, model = override.partition(":")
@@ -57,15 +63,16 @@ def build_chat_model(stage: str):
     """Return a LangChain chat model for the stage. Import-time lazy so the
     deterministic parts of the module never pay for SDK imports."""
     cfg = for_stage(stage)
-    if cfg.provider in ("deepseek", "openai"):
+    if cfg.provider in ("deepseek", "openai", "ollama"):
         from langchain_openai import ChatOpenAI
 
+        env = _API_KEY_ENV[cfg.provider]
         return ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             base_url=_BASE_URLS[cfg.provider],
-            api_key=os.environ.get(_API_KEY_ENV[cfg.provider], ""),
+            api_key=(os.environ.get(env, "") if env else "") or "ollama",
         )
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
