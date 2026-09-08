@@ -57,6 +57,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None):
     def node_interview_turn(state: InterviewState) -> dict:
         from langchain_core.messages import AIMessage, SystemMessage
 
+        last = state["messages"][-1] if state.get("messages") else None
+        if last is not None and "[INTERVIEW COMPLETE]" in getattr(last, "content", ""):
+            return {}  # marker already emitted: let routing reach distill without burning a call
+
         history = state["messages"]
         resp = probing_model.invoke([SystemMessage(content=INTERVIEWER_SYSTEM), *history])
         usage_log.record("probing", "config", model_config.for_stage("probing").model,
