@@ -59,10 +59,40 @@ def for_stage(stage: str) -> StageModel:
     return cfg
 
 
+def _preflight(cfg: "StageModel", stage: str) -> None:
+    """Fail BEFORE the call, with the fix named. An empty remote key would
+    otherwise surface as a raw SDK 401 ten calls deep."""
+    from .errors import UserFacingError
+
+    env = _API_KEY_ENV.get(cfg.provider)
+    if env and not os.environ.get(env):
+        raise UserFacingError(
+            f"stage '{cfg.model}' is routed to provider '{cfg.provider}', but {env} is not set.",
+            "no API key in the environment.",
+            f"export {env}=... or run this stage offline via Ollama: "
+            f"INTERVIEW_ENGINE_MODEL_{stage.upper()}=ollama:qwen2.5-coder:7b (see README 'Local runs with Ollama').",
+        )
+
+
+def invoke_checked(chat_model, messages, stage: str):
+    """chat_model.invoke with the known pains translated to human language."""
+    from .errors import UserFacingError, translate_llm_error
+
+    cfg = for_stage(stage)
+    try:
+        return chat_model.invoke(messages)
+    except Exception as e:  # noqa: BLE001 - translated or re-raised
+        friendly = translate_llm_error(e, stage, cfg.provider, cfg.model, _BASE_URLS.get(cfg.provider))
+        if friendly is not None:
+            raise friendly from e
+        raise
+
+
 def build_chat_model(stage: str):
     """Return a LangChain chat model for the stage. Import-time lazy so the
     deterministic parts of the module never pay for SDK imports."""
     cfg = for_stage(stage)
+    _preflight(cfg, stage)
     if cfg.provider in ("deepseek", "openai", "ollama"):
         from langchain_openai import ChatOpenAI
 
