@@ -30,7 +30,9 @@ PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 
-def price_for(model: str) -> tuple[float, float]:
+def price_for(model: str, provider: str = "") -> tuple[float, float]:
+    if provider == "ollama":
+        return (0.0, 0.0)  # local compute: $0 marginal, logged for the record
     if model not in PRICES_USD_PER_MTOK:
         raise KeyError(f"no price for {model!r} in table v{PRICE_TABLE_VERSION} - add it; unpriced calls are unbudgeted calls")
     return PRICES_USD_PER_MTOK[model]
@@ -55,7 +57,7 @@ class UsageLog:
         self.sink = sink
 
     def record(self, stage: str, provider: str, model: str, usage: dict) -> StageTokenUsage:
-        pin, pout = price_for(model)
+        pin, pout = price_for(model, provider)
         rec = StageTokenUsage(
             session_id=self.session_id,
             stage=stage,
