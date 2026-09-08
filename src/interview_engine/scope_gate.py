@@ -85,13 +85,19 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> Scope
     is mixed or silent - ambiguous wording is a semantic problem, pay for it."""
     import json as _json
 
-    resp = chat_model.invoke(TIE_BREAK_PROMPT.format(text=sub.free_text))
+    from .errors import translate_json_error
+    from .model_config import invoke_checked
+
+    resp = invoke_checked(chat_model, TIE_BREAK_PROMPT.format(text=sub.free_text), "scope_tiebreak")
     if usage_log is not None:
         usage_log.record("scope_tiebreak", getattr(resp, "response_metadata", {}).get("model_provider", "unknown"),
                          getattr(resp, "response_metadata", {}).get("model_name", "unknown"),
                          getattr(resp, "usage_metadata", {}) or {})
-    data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
-    accepted = bool(data["is_web_app"])
+    try:
+        data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
+        accepted = bool(data["is_web_app"])
+    except (_json.JSONDecodeError, KeyError, TypeError) as e:
+        raise translate_json_error(e, "scope_tiebreak") from e
     return ScopeVerdict(
         submission_id=sub.submission_id,
         accepted=accepted,
