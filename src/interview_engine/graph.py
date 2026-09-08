@@ -32,6 +32,7 @@ class InterviewState(TypedDict, total=False):
     submission: dict          # IntakeSubmission as dict
     verdict: dict             # ScopeVerdict as dict
     intent_model: dict        # IntentModel as dict, after distillation
+    requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
     turn_count: int
 
 
@@ -79,63 +80,122 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return "await_founder"  # interrupt point: founder's reply arrives, graph resumes
 
     def node_distill(state: InterviewState) -> dict:
-        """Validate INSIDE the node: a contract-invalid intent model never
-        leaves the graph. Shape drift is repaired mechanically (repair.py);
-        anything else gets ONE retry with the validation error fed back to
-        the model, then a human-readable failure. Root cause of the first
-        field crash: a small model emitted `source_turns: {}`-style drift and
-        validation only happened later in the CLI, outside any retry loop."""
+        """PHASED distillation (ADR-0011): needs -> scope -> preview -> assemble/validate.
+        Four visible steps instead of one black box; each LLM phase is small enough
+        for a local 14B, validated on its own, and retried once with schema feedback.
+        The preview is presentation-only (graceful degrade); needs/scope/assembly are
+        the system of record and fail loudly."""
         import json as _json
 
         from langchain_core.messages import HumanMessage, SystemMessage
         from pydantic import ValidationError
-        from vmodel_contracts import IntentModel
+        from vmodel_contracts import IntentModel, IntentNeed
 
         from .errors import UserFacingError, translate_json_error
+        from .progress import ProgressEvent
+        from .prompts import DISTILL_NEEDS_SYSTEM, DISTILL_PREVIEW_SYSTEM, DISTILL_SCOPE_SYSTEM
         from .repair import coerce_for_model, normalize_enums
 
         transcript = "\n".join(
             f"[{i}] {getattr(m, 'type', '?')}: {getattr(m, 'content', '')}"
             for i, m in enumerate(state["messages"])
         )
-        messages = [SystemMessage(content=DISTILL_SYSTEM + "\n\n" + transcript)]
-        last_err: Exception | None = None
-        with track(progress, "distill_intent", "Distilling intent model"):
-            for attempt in (1, 2):  # first try, then ONE retry with the validation error as feedback
-                resp = model_config.invoke_checked(distill_model, messages, "distillation")
-                usage_log.record("distillation", model_config.for_stage("distillation").provider,
-                                 model_config.for_stage("distillation").model,
-                                 (getattr(resp, "usage_metadata", None) or {}))
-                try:
-                    data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
-                except _json.JSONDecodeError as e:
-                    raise translate_json_error(e, "distillation") from e
-                data.setdefault("session_id", state["submission"]["submission_id"])
-                data = normalize_enums(coerce_for_model(data, IntentModel), IntentModel)
-                try:
-                    intent = IntentModel.model_validate(data)
-                    return {"intent_model": intent.model_dump(mode="json")}
-                except ValidationError as e:
-                    last_err = e
-                    if attempt == 2:
-                        raise UserFacingError(
-                            "the distillation produced an intent model that fails the contract schema, and the retry did not fix it.",
-                            f"validation detail: {last_err}",
-                            "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model: "
-                            "INTERVIEW_ENGINE_MODEL_DISTILLATION=... The intent model is the system of record; it must validate.",
-                        ) from e
-                    if attempt == 1:
+
+        def _call(system: str, extra: str, feedback: str | None = None):
+            messages = [SystemMessage(content=system + "\n\n" + extra)]
+            if feedback:
+                messages.append(HumanMessage(content=feedback))
+            resp = model_config.invoke_checked(distill_model, messages, "distillation")
+            usage_log.record("distillation", model_config.for_stage("distillation").provider,
+                             model_config.for_stage("distillation").model,
+                             (getattr(resp, "usage_metadata", None) or {}))
+            return resp, _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
+
+        def _phase(stage, label, detail, system, extra, validate):
+            """One LLM phase: call -> repair -> validate -> ONE retry with the error as feedback."""
+            last_err: Exception | None = None
+            with track(progress, stage, label, detail):
+                fb = None
+                for attempt in (1, 2):
+                    try:
+                        resp, data = _call(system, extra, fb)
+                        if not isinstance(data, dict):
+                            raise ValueError(f"expected a JSON object, got {type(data).__name__}")
+                        return validate(coerce_for_model(data, IntentModel))
+                    except _json.JSONDecodeError as e:
+                        raise translate_json_error(e, stage) from e
+                    except (ValidationError, ValueError, KeyError, TypeError) as e:
+                        last_err = e
+                        if attempt == 2:
+                            raise UserFacingError(
+                                f"distillation phase '{label}' produced output that fails validation, and the retry did not fix it.",
+                                f"validation detail: {str(e)[:300]}",
+                                "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model: "
+                                "INTERVIEW_ENGINE_MODEL_DISTILLATION=...",
+                            ) from e
                         if progress is not None:
-                            from .progress import ProgressEvent
                             import time as _t
-                            progress.emit(ProgressEvent("distill_intent", "Distilling intent model",
-                                                        "started", _t.time(), None,
+                            progress.emit(ProgressEvent(stage, label, "started", _t.time(), None,
                                                         "retrying with schema feedback"))
-                        messages = [*messages, resp, HumanMessage(content=(
-                            "Your previous output failed contract validation:\n"
-                            + "\n".join(f"- {err['loc']}: {err['msg']}" for err in e.errors()[:8])
-                            + "\nReturn the corrected JSON only, matching the schema exactly."
-                        ))]
+                        fb = ("Your previous output failed validation:\n" + str(e)[:400]
+                              + "\nReturn the corrected JSON only, matching the schema exactly.")
+
+        def _valid_needs(data):
+            needs = data.get("stakeholder_needs") or []
+            if not needs:
+                raise ValueError("stakeholder_needs must not be empty - an intent model with no needs is not an intent model")
+            fixed = normalize_enums({"stakeholder_needs": needs}, IntentModel)["stakeholder_needs"]
+            validated = [IntentNeed.model_validate(n) for n in fixed]
+            return {"stakeholder_needs": [n.model_dump(mode="json") for n in validated],
+                    "assumptions": data.get("assumptions") or []}
+
+        def _valid_scope(data):
+            required_str = ("problem_statement", "core_value_proposition")
+            required_list = ("target_users", "in_scope", "out_of_scope")
+            for k in required_str:
+                if not isinstance(data.get(k), str) or not data[k].strip():
+                    raise ValueError(f"{k} must be a non-empty string")
+            for k in required_list:
+                if not isinstance(data.get(k), list):
+                    raise ValueError(f"{k} must be a list")
+            if not data["out_of_scope"]:
+                raise ValueError("out_of_scope is empty - derive at least one exclusion from the conversation")
+            keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "source_turns")
+            return {k: data.get(k) for k in keep}
+
+        parts = _phase("distill_needs", "Extracting stakeholder needs", "phase 1/4",
+                       DISTILL_NEEDS_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_needs)
+        parts.update(_phase("distill_scope", "Building scope and framing", "phase 2/4",
+                            DISTILL_SCOPE_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_scope))
+        parts["session_id"] = state["submission"]["submission_id"]
+
+        # phase 3: requirement PREVIEW (presentation-only; never blocks the run)
+        preview: list[dict] = []
+        with track(progress, "distill_preview", "Drafting requirement preview", "phase 3/4"):
+            try:
+                _, raw = _call(DISTILL_PREVIEW_SYSTEM, "NEEDS:\n" + _json.dumps(parts["stakeholder_needs"]))
+                if isinstance(raw, list):
+                    preview = [p for p in raw
+                               if isinstance(p, dict) and isinstance(p.get("statement"), str)][:3]
+            except Exception:  # noqa: BLE001 - decoration, not the system of record
+                preview = []
+        if not preview and progress is not None:
+            import time as _t
+            progress.emit(ProgressEvent("distill_preview", "Requirement preview", "completed", _t.time(), 0.0,
+                                        "unavailable from this model - the full set derives in spec-generator"))
+
+        # phase 4: deterministic assembly + full contract validation
+        with track(progress, "distill_validate", "Validating intent model", "phase 4/4"):
+            data = normalize_enums(coerce_for_model(parts, IntentModel), IntentModel)
+            try:
+                intent = IntentModel.model_validate(data)
+            except ValidationError as e:
+                raise UserFacingError(
+                    "the assembled intent model fails the contract schema.",
+                    f"validation detail: {str(e)[:300]}",
+                    "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model.",
+                ) from e
+        return {"intent_model": intent.model_dump(mode="json"), "requirement_preview": preview}
 
     g = StateGraph(InterviewState)
     g.add_node("scope_gate", node_scope_gate)
