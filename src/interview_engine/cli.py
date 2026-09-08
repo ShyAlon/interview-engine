@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from vmodel_contracts import IntakeSubmission, IntentModel
 
+from .errors import UserFacingError, run_cli, translate_json_error
 from .graph import build_graph
 from .telemetry import UsageLog, jsonl_sink
 
@@ -68,7 +69,14 @@ def main() -> None:
         reply = input("You: ")
         state = {**result, "messages": [HumanMessage(content=reply)]}
 
-    intent = IntentModel.model_validate(result["intent_model"])
+    try:
+        intent = IntentModel.model_validate(result["intent_model"])
+    except Exception as e:
+        raise UserFacingError(
+            "the distillation produced an intent model that fails the contract schema.",
+            f"validation detail: {type(e).__name__}",
+            "retry - or route distillation to a stronger model (the intent model is the system of record).",
+        ) from e
     (outdir / "intent_model.json").write_text(intent.model_dump_json(indent=2))
     md = render_intent_markdown(intent)
     (outdir / "intent_model.md").write_text(md)
@@ -84,4 +92,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_cli(main)
