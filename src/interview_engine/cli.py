@@ -48,17 +48,36 @@ def render_intent_markdown(intent: IntentModel) -> str:
         *([f"- **{n.need_id}** {n.statement}" for n in non_functional] or ["- (none captured)"]),
         "\n## Scope",
         "**In scope**", *[f"- {s}" for s in intent.in_scope],
-        "\n**Out of scope**", *[f"- {s}" for s in intent.out_of_scope],
+        "\n**Out of scope**",
+        *([f"- {s}" for s in intent.out_of_scope] or ["- (none identified - boundary unverified, press the interviewer next run)"]),
     ]
     if intent.external_integrations:
         lines += ["\n## External integrations", *[f"- {s}" for s in intent.external_integrations]]
     if intent.constraints:
         lines += ["\n## Constraints", *[f"- {s}" for s in intent.constraints]]
+    if intent.assumptions:
+        lines += ["\n## Assumptions (asserted by you - validated later, not built)",
+                  *[f"- {a}" for a in intent.assumptions]]
     if intent.open_questions:
         lines += ["\n## Open questions (never silently resolved)", *[f"- {q}" for q in intent.open_questions]]
     lines += ["\n---",
               "_Approving intent (needs + scope). Verifiable requirements - shall-statements, "
               "functional and non-functional - are derived from this in the spec-generator stage._"]
+    return "\n".join(lines)
+
+
+def render_preview_markdown(preview: list[dict]) -> str:
+    """Sample SN -> R derivations for the approval gate (option B, 2026-09-08).
+    Presentation-only: the full requirement set derives in spec-generator."""
+    if not preview:
+        return ""
+    lines = ["\n## Preview: how needs become requirements (samples)"]
+    for i, p in enumerate(preview, 1):
+        kind = p.get("kind", "?")
+        lines.append(f"- **{p.get('need_id', 'SN-?')} -> R-p{i}** ({kind}): {p.get('statement')}")
+        if p.get("example_criterion"):
+            lines.append(f"  - check: {p['example_criterion']}")
+    lines.append("_Illustrative only - the full, traceable requirement set is derived in spec-generator._")
     return "\n".join(lines)
 
 
@@ -164,6 +183,10 @@ def main() -> None:
         ) from e
     (outdir / "intent_model.json").write_text(intent.model_dump_json(indent=2))
     md = render_intent_markdown(intent)
+    preview = result.get("requirement_preview") or []
+    if preview:
+        (outdir / "requirement_preview.json").write_text(json.dumps(preview, indent=2))
+        md += "\n" + render_preview_markdown(preview)
     (outdir / "intent_model.md").write_text(md)
 
     # The review gate: cheapest place to catch a misunderstanding (scoping doc, step 2).
