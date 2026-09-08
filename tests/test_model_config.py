@@ -47,3 +47,54 @@ def test_unpriced_remote_model_still_hard_fails():
     log = UsageLog("test-session")
     with pytest.raises(KeyError):
         log.record("probing", "openai", "gpt-9000-turbo", {"input_tokens": 1, "output_tokens": 1})
+
+
+# ---- error handling ----
+
+def test_preflight_names_missing_remote_key(monkeypatch):
+    from interview_engine.errors import UserFacingError
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(UserFacingError) as ei:
+        model_config.build_chat_model("probing")
+    msg = ei.value.render()
+    assert "DEEPSEEK_API_KEY" in msg and "ollama" in msg.lower()
+
+
+def test_ollama_connection_refused_is_friendly():
+    import httpx
+
+    from interview_engine.errors import translate_llm_error
+
+    e = translate_llm_error(httpx.ConnectError("connection refused"), "probing", "ollama",
+                            "qwen2.5-coder:7b", "http://localhost:11434/v1")
+    assert e is not None and "ollama serve" in e.render()
+
+
+def test_ollama_model_not_pulled_is_friendly():
+    from openai import NotFoundError
+
+    from interview_engine.errors import translate_llm_error
+
+    exc = NotFoundError("model 'qwen2.5-coder:7b' not found", response=None, body=None) \
+        if False else type("NotFoundError", (Exception,), {})("404 model not found")
+    # name-based mapping: synthesize with the real class name
+    exc.__class__.__name__ = "NotFoundError"
+    e = translate_llm_error(exc, "probing", "ollama", "qwen2.5-coder:7b", "http://localhost:11434/v1")
+    assert e is not None and "ollama pull qwen2.5-coder:7b" in e.render()
+
+
+def test_unknown_llm_error_returns_none():
+    from interview_engine.errors import translate_llm_error
+
+    assert translate_llm_error(ValueError("weird"), "probing", "deepseek", "deepseek-chat", None) is None
+
+
+def test_json_error_names_stage_and_fix():
+    import json as j
+
+    from interview_engine.errors import translate_json_error
+
+    e = translate_json_error(j.JSONDecodeError("x", "doc", 0), "distillation")
+    r = e.render()
+    assert "distillation" in r and "stronger model" in r
