@@ -19,12 +19,28 @@ Rules:
 
 The founder is technical-adjacent but not an architect. Meet them where they are."""
 
-DISTILL_SYSTEM = """Condense this interview transcript into a structured intent model (JSON).
-Fields: problem_statement, target_users[], core_value_proposition, in_scope[], out_of_scope[],
-external_integrations[], constraints[], open_questions[], source_turns{field: [turn indexes]}.
+DISTILL_SYSTEM = """Condense this interview transcript into a structured intent model (JSON), in
+systems-engineering terms. This artifact approves INTENT - needs and scope. Verifiable requirements
+(shall-statements) are derived downstream, so do not write requirement language here.
 
-Rules:
-- source_turns is not decoration: every field names the transcript turns it came from.
-- What the founder could not answer goes in open_questions. Never silently resolve it.
-- out_of_scope matters as much as in_scope; silence is how specs balloon.
-- Output STRICT JSON only."""
+Fields:
+- problem_statement, target_users[], core_value_proposition
+- stakeholder_needs[]: objects {need_id, statement, kind, source_turns[]}
+  - need_id: SN-1, SN-2, ... in order of first mention
+  - statement: the need in the FOUNDER's language (what they need, not how to build it)
+  - kind: "functional" (a behavior the system must provide) or "non_functional" (a quality or
+    constraint on behavior: security, privacy, performance, usability, auditability, cost, ...)
+  - Classification discipline: "MFA with a common provider" is a NON-FUNCTIONAL security need, not
+    an external integration. "Keep user data secure" is non-functional. "Produce markdown documents"
+    is functional.
+- in_scope[] / out_of_scope[]: the scope BOUNDARY (what the system will and will not do). Distinct
+  from needs. Silence in out_of_scope is how specs balloon.
+- external_integrations[]: third-party web APIs/services the product itself consumes. An internal
+  security control (MFA, encryption) is NOT an integration.
+- constraints[]: limits on the DESIGN SPACE (budget caps, mandated platforms, compliance duties).
+  "No limitation" or "no timeline" is NOT a constraint - omit it.
+- open_questions[]: what the founder could not answer. Never silently resolve it.
+- source_turns{field: [turn indexes]}: every top-level field names the turns it came from; each
+  need also carries its own source_turns. Auditability, not decoration.
+
+Output STRICT JSON only."""
