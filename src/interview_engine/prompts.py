@@ -12,6 +12,10 @@ Rules:
   who the users actually are, what happens when two users collide, what must NEVER happen.
 - When the founder answers vaguely, drill into the specific answer they just gave - never
   move to the next topic while a load-bearing answer is mush.
+- When the founder waves away a conflict/consistency/accuracy question ("these can't conflict",
+  "that won't happen"), press ONCE more with a concrete counterexample ("if the internal ETA
+  and the port data disagree, which one wins?"). If they still dismiss it, note it as an
+  assumption and move on - do not relitigate.
 - Track coverage mentally: product goal, target users, core flows, data model, integrations,
   non-functionals (security, privacy, scale), constraints. Steer toward uncovered ground.
 - When coverage is sufficient and answers are concrete, end the interview by emitting
@@ -19,28 +23,54 @@ Rules:
 
 The founder is technical-adjacent but not an architect. Meet them where they are."""
 
-DISTILL_SYSTEM = """Condense this interview transcript into a structured intent model (JSON), in
-systems-engineering terms. This artifact approves INTENT - needs and scope. Verifiable requirements
-(shall-statements) are derived downstream, so do not write requirement language here.
+DISTILL_NEEDS_SYSTEM = """From this interview transcript, extract the stakeholder needs (systems
+engineering, JSON). This is INTENT - founder language. Verifiable requirements are derived
+downstream; do not write requirement ("shall") language here.
 
 Fields:
-- problem_statement, target_users[], core_value_proposition
 - stakeholder_needs[]: objects {need_id, statement, kind, source_turns[]}
   - need_id: SN-1, SN-2, ... in order of first mention
   - statement: the need in the FOUNDER's language (what they need, not how to build it)
   - kind: "functional" (a behavior the system must provide) or "non_functional" (a quality or
-    constraint on behavior: security, privacy, performance, usability, auditability, cost, ...)
+    constraint on behavior: security, privacy, performance, usability, auditability, cost, SLA)
   - Classification discipline: "MFA with a common provider" is a NON-FUNCTIONAL security need, not
-    an external integration. "Keep user data secure" is non-functional. "Produce markdown documents"
-    is functional.
-- in_scope[] / out_of_scope[]: the scope BOUNDARY (what the system will and will not do). Distinct
-  from needs. Silence in out_of_scope is how specs balloon.
-- external_integrations[]: third-party web APIs/services the product itself consumes. An internal
-  security control (MFA, encryption) is NOT an integration.
-- constraints[]: limits on the DESIGN SPACE (budget caps, mandated platforms, compliance duties).
-  "No limitation" or "no timeline" is NOT a constraint - omit it.
-- open_questions[]: what the founder could not answer. Never silently resolve it.
-- source_turns{field: [turn indexes]}: every top-level field names the turns it came from; each
-  need also carries its own source_turns. Auditability, not decoration.
+    an external integration and not a constraint. "Keep user data secure" is non-functional.
+    "Produce markdown documents" is functional.
+- assumptions[]: things the founder ASSERTED without evidence ("these sources can't conflict",
+  "users will always have connectivity"). An assumption is NOT a need - it gets validated later,
+  needs get built. Capture the assertion, short and verbatim-flavored.
 
 Output STRICT JSON only."""
+
+DISTILL_SCOPE_SYSTEM = """From this interview transcript, extract the framing fields of the intent
+model (JSON): problem_statement, target_users[], core_value_proposition, in_scope[], out_of_scope[],
+external_integrations[], constraints[], open_questions[], source_turns{field: [turn indexes]}.
+
+Rules:
+- in_scope / out_of_scope are the scope BOUNDARY (what the system will and will not do).
+- out_of_scope must NOT be empty: derive at least one exclusion from things the founder framed as
+  future / not-now / not-this-product. An empty boundary is an unverified boundary.
+- external_integrations: third-party web APIs/services the product consumes. An internal security
+  control (MFA, encryption, audit logging) is NOT an integration.
+- constraints limit the DESIGN SPACE only: mandated budget caps, mandated stack/platform, hard
+  deadlines, team size limits, compliance duties imposed from outside. A quality the system must
+  HAVE (security, privacy, SLA, MFA) is a non-functional NEED, not a constraint - no statement
+  appears in two sections. "No limitation" / "no timeline" is not a constraint: omit it.
+- open_questions: what the founder could not answer. Never silently resolve it.
+- source_turns: every field names the transcript turns it came from. Auditability, not decoration.
+
+Output STRICT JSON only."""
+
+DISTILL_PREVIEW_SYSTEM = """Given these stakeholder needs from an approved-intent interview, draft a
+PREVIEW of 2-3 sample system requirements showing how needs become verifiable requirements. These
+are illustrative - the full set is derived downstream in the spec-generator.
+
+Output a STRICT JSON array only:
+[{"need_id": "SN-x", "kind": "functional|non_functional",
+  "statement": "The system shall ...", "example_criterion": "machine-checkable check, e.g. 'GET /health returns 200'"}]
+
+Pick the highest-value needs - at least one functional and one non-functional if both exist.
+Statements are verifiable shall-statements; criteria are checks a machine can run."""
+
+# kept for backward reference by old checkpoints' error messages
+DISTILL_SYSTEM = DISTILL_NEEDS_SYSTEM + "\n\n" + DISTILL_SCOPE_SYSTEM
