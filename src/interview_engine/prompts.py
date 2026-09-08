@@ -74,3 +74,17 @@ Statements are verifiable shall-statements; criteria are checks a machine can ru
 
 # kept for backward reference by old checkpoints' error messages
 DISTILL_SYSTEM = DISTILL_NEEDS_SYSTEM + "\n\n" + DISTILL_SCOPE_SYSTEM
+
+
+# --- Method pack (tier-a knowledge augmentation, vmodel-contracts >= 0.3.1) ---
+# Static SE knowledge restated from the IEEE SWEBOK Guide v4.0a. Each stage
+# takes ONLY the sections it needs: context tokens on a local 14B are the
+# scarce resource. The pack shapes questions and quality bar; it never answers
+# for the founder (see pack header).
+from vmodel_contracts.method_pack import load_method_pack
+
+INTERVIEWER_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
+DISTILL_NEEDS_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
+DISTILL_SCOPE_SYSTEM += "\n\n" + load_method_pack(["4"])
+DISTILL_PREVIEW_SYSTEM += "\n\n" + load_method_pack(["3"])
+DISTILL_SYSTEM = DISTILL_NEEDS_SYSTEM + "\n\n" + DISTILL_SCOPE_SYSTEM
