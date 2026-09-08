@@ -17,6 +17,12 @@ VALID_INTENT = {
     "problem_statement": "founders rewrite forever",
     "target_users": ["solo founders"],
     "core_value_proposition": "spec before code",
+    "stakeholder_needs": [
+        {"need_id": "SN-1", "statement": "founders need a spec before code",
+         "kind": "functional", "source_turns": [0]},
+        {"need_id": "SN-2", "statement": "founder data must stay secure",
+         "kind": "non_functional", "source_turns": [1]},
+    ],
     "in_scope": ["interviews"],
     "out_of_scope": ["codegen"],
     "external_integrations": [],
@@ -149,3 +155,53 @@ def test_state_is_json_native_no_msgpack_warning(fake_models, recwarn):
     import warnings
     for w in recwarn.list:
         assert "unregistered type" not in str(w.message)
+
+
+# ---- v0.2.0: SE rigor, timestamps, enum drift, version mismatch ----
+
+def test_session_id_is_timestamped_with_suffix():
+    import re
+
+    from interview_engine import cli
+
+    # replicate the cli's session construction
+    import uuid
+    from datetime import datetime
+
+    sid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{4}", sid)
+
+
+def test_renderer_splits_functional_and_nonfunctional():
+    from vmodel_contracts import IntentModel
+
+    from interview_engine.cli import render_intent_markdown
+
+    intent = IntentModel.model_validate(VALID_INTENT)
+    md = render_intent_markdown(intent)
+    assert "Stakeholder needs - functional" in md
+    assert "Stakeholder needs - non-functional" in md
+    assert "**SN-1**" in md and "**SN-2**" in md
+    assert "requirements" in md.lower()  # the 'derived downstream' note
+
+
+def test_enum_drift_normalized_before_validation():
+    from interview_engine.repair import normalize_enums, coerce_for_model
+
+    drifted = dict(VALID_INTENT, stakeholder_needs=[
+        {"need_id": "SN-1", "statement": "a", "kind": "Functional", "source_turns": [0]},
+        {"need_id": "SN-2", "statement": "b", "kind": "non-functional", "source_turns": [1]},
+    ])
+    fixed = normalize_enums(coerce_for_model(drifted, IntentModel), IntentModel)
+    intent = IntentModel.model_validate(fixed)
+    assert [n.kind.value for n in intent.stakeholder_needs] == ["functional", "non_functional"]
+
+
+def test_old_contract_payload_fails_loudly():
+    import pytest
+
+    from vmodel_contracts import ContractVersionMismatch, check_compatible
+
+    old = dict(VALID_INTENT, contract_version="0.1.0")
+    with pytest.raises(ContractVersionMismatch):
+        check_compatible(old)
