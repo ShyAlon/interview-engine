@@ -14,6 +14,7 @@ import json
 import sqlite3
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
@@ -28,21 +29,36 @@ from .telemetry import UsageLog, jsonl_sink
 
 
 def render_intent_markdown(intent: IntentModel) -> str:
-    """Human-readable rendering for the founder review gate (scoping doc, step 2)."""
+    """Human-readable rendering for the founder review gate (scoping doc, step 2),
+    in systems-engineering terms: needs (functional / non-functional) distinct
+    from scope, constraints, and open questions. Requirements (verifiable
+    shall-statements) are derived downstream - this gate approves intent."""
+    from vmodel_contracts import RequirementKind
+
+    functional = [n for n in intent.stakeholder_needs if n.kind == RequirementKind.FUNCTIONAL]
+    non_functional = [n for n in intent.stakeholder_needs if n.kind == RequirementKind.NON_FUNCTIONAL]
     lines = [
         f"# What we understood\n",
         f"**Problem.** {intent.problem_statement}\n",
         f"**For.** {', '.join(intent.target_users)}\n",
         f"**Core value.** {intent.core_value_proposition}\n",
-        "\n**In scope**", *[f"- {s}" for s in intent.in_scope],
+        "\n## Stakeholder needs - functional",
+        *([f"- **{n.need_id}** {n.statement}" for n in functional] or ["- (none captured)"]),
+        "\n## Stakeholder needs - non-functional",
+        *([f"- **{n.need_id}** {n.statement}" for n in non_functional] or ["- (none captured)"]),
+        "\n## Scope",
+        "**In scope**", *[f"- {s}" for s in intent.in_scope],
         "\n**Out of scope**", *[f"- {s}" for s in intent.out_of_scope],
     ]
     if intent.external_integrations:
-        lines += ["\n**Integrations**", *[f"- {s}" for s in intent.external_integrations]]
+        lines += ["\n## External integrations", *[f"- {s}" for s in intent.external_integrations]]
     if intent.constraints:
-        lines += ["\n**Constraints**", *[f"- {s}" for s in intent.constraints]]
+        lines += ["\n## Constraints", *[f"- {s}" for s in intent.constraints]]
     if intent.open_questions:
-        lines += ["\n**Open questions (never silently resolved)**", *[f"- {q}" for q in intent.open_questions]]
+        lines += ["\n## Open questions (never silently resolved)", *[f"- {q}" for q in intent.open_questions]]
+    lines += ["\n---",
+              "_Approving intent (needs + scope). Verifiable requirements - shall-statements, "
+              "functional and non-functional - are derived from this in the spec-generator stage._"]
     return "\n".join(lines)
 
 
@@ -53,7 +69,8 @@ def main() -> None:
     args = ap.parse_args()
 
     resuming = args.session is not None
-    session = args.session or str(uuid.uuid4())
+    # human-readable session id: local timestamp + short collision suffix
+    session = args.session or (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4])
     outdir = Path("out") / session
     outdir.mkdir(parents=True, exist_ok=True)
     db_path = outdir / "checkpoints.sqlite"
@@ -125,6 +142,17 @@ def main() -> None:
     # The graph validated the intent model in-node; write the raw artifact
     # BEFORE re-validating so a future contract bump can never strand a run.
     (outdir / "intent_model.raw.json").write_text(json.dumps(result["intent_model"], indent=2))
+    from vmodel_contracts import ContractVersionMismatch, check_compatible
+
+    try:
+        check_compatible(result["intent_model"])
+    except ContractVersionMismatch as e:
+        raise UserFacingError(
+            f"this session's intent model is from an older contracts version ({e.have}).",
+            "the interview ran before a contract upgrade; the transcript is preserved in the checkpoint.",
+            "run the distillation again against the current contracts: start a fresh session "
+            "(the interview is the cheap part to redo) - or pin the old vmodel-contracts to read it.",
+        ) from e
     try:
         intent = IntentModel.model_validate(result["intent_model"])
     except Exception as e:
