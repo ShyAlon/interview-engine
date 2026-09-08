@@ -55,12 +55,17 @@ Output crosses to `spec-generator` only as an `IntentModel` payload.
 For development and tests without an API key. Needs a running Ollama server
 and a pulled model:
 
+Model size: `qwen2.5-coder:7b` is the default recommendation and runs fine on
+a 16GB machine. `qwen2.5-coder:14b` is better but wants 32GB+ RAM. Set
+`OLLAMA_NUM_PARALLEL=1` so Ollama never loads two models at once (the chat
+model plus `nomic-embed-text` would otherwise compete for RAM).
+
 ```bash
-ollama pull qwen2.5-coder:14b   # or any chat model you like
-export INTERVIEW_ENGINE_MODEL_PROBING=ollama:qwen2.5-coder:14b
-export INTERVIEW_ENGINE_MODEL_DISTILLATION=ollama:qwen2.5-coder:14b
-export INTERVIEW_ENGINE_MODEL_PHRASING=ollama:qwen2.5-coder:14b
-export INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK=ollama:qwen2.5-coder:14b
+ollama pull qwen2.5-coder:7b   # or any chat model you like
+export INTERVIEW_ENGINE_MODEL_PROBING=ollama:qwen2.5-coder:7b
+export INTERVIEW_ENGINE_MODEL_DISTILLATION=ollama:qwen2.5-coder:7b
+export INTERVIEW_ENGINE_MODEL_PHRASING=ollama:qwen2.5-coder:7b
+export INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK=ollama:qwen2.5-coder:7b
 python -m interview_engine.cli "a marketplace for surf lessons"
 ```
 
