@@ -31,8 +31,11 @@ PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
 
 
 def price_for(model: str, provider: str = "") -> tuple[float, float]:
-    if provider == "ollama":
-        return (0.0, 0.0)  # local compute: $0 marginal, logged for the record
+    # Local by construction, not by table lookup: any ollama-routed call is $0.
+    # The hard-fail below is reserved for UNPRICED REMOTE calls - a missing
+    # price for a paid model means an unbudgeted call, and that must crash loudly.
+    if provider == "ollama" or model.startswith("ollama:") or model.startswith("ollama/"):
+        return (0.0, 0.0)
     if model not in PRICES_USD_PER_MTOK:
         raise KeyError(f"no price for {model!r} in table v{PRICE_TABLE_VERSION} - add it; unpriced calls are unbudgeted calls")
     return PRICES_USD_PER_MTOK[model]
