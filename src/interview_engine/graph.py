@@ -62,7 +62,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None):
             return {}  # marker already emitted: let routing reach distill without burning a call
 
         history = state["messages"]
-        resp = probing_model.invoke([SystemMessage(content=INTERVIEWER_SYSTEM), *history])
+        resp = model_config.invoke_checked(probing_model, [SystemMessage(content=INTERVIEWER_SYSTEM), *history], "probing")
         usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
                          (getattr(resp, "usage_metadata", None) or {}))
         return {"messages": [resp], "turn_count": state.get("turn_count", 0) + 1}
@@ -81,11 +81,17 @@ def build_graph(usage_log: UsageLog, checkpointer=None):
             f"[{i}] {getattr(m, 'type', '?')}: {getattr(m, 'content', '')}"
             for i, m in enumerate(state["messages"])
         )
-        resp = distill_model.invoke([SystemMessage(content=DISTILL_SYSTEM + "\n\n" + transcript)])
+        resp = model_config.invoke_checked(distill_model, [SystemMessage(content=DISTILL_SYSTEM + "\n\n" + transcript)], "distillation")
         usage_log.record("distillation", model_config.for_stage("distillation").provider, model_config.for_stage("distillation").model,
                          (getattr(resp, "usage_metadata", None) or {}))
         import json as _json
-        data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
+
+        from .errors import translate_json_error
+
+        try:
+            data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
+        except _json.JSONDecodeError as e:
+            raise translate_json_error(e, "distillation") from e
         data.setdefault("session_id", state["submission"]["submission_id"])
         return {"intent_model": data}
 
