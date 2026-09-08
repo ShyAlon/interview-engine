@@ -10,7 +10,11 @@ from interview_engine import cli, model_config
 
 INTENT = {
     "session_id": "s", "problem_statement": "p", "target_users": ["u"],
-    "core_value_proposition": "v", "in_scope": ["a"], "out_of_scope": ["b"],
+    "core_value_proposition": "v",
+    "stakeholder_needs": [
+        {"need_id": "SN-1", "statement": "founders need specs", "kind": "functional", "source_turns": [0]},
+    ],
+    "in_scope": ["a"], "out_of_scope": ["b"],
     "external_integrations": [], "constraints": [], "open_questions": [],
     "source_turns": {},
 }
@@ -41,8 +45,10 @@ def run_cli_with_inputs(inputs, argv):
 
 def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
-    session = "11111111-2222-3333-4444-555555555555"
-    monkeypatch.setattr(cli.uuid, "uuid4", lambda: session)
+    # timestamped session id with collision suffix: 20260908-181530-a3f9
+    monkeypatch.setattr(cli.uuid, "uuid4", lambda: type("U", (), {"hex": "deadbeefcafe"})())
+    monkeypatch.setattr(cli, "datetime", type("D", (), {"now": staticmethod(lambda: type("T", (), {"strftime": lambda self, f: "20260908-181530"})())}))
+    session = "20260908-181530-dead"
 
     models = {
         "probing": FakeModel(["What is the goal?", "[INTERVIEW COMPLETE]"]),
