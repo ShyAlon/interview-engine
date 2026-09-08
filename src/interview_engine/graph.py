@@ -63,7 +63,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None):
 
         history = state["messages"]
         resp = probing_model.invoke([SystemMessage(content=INTERVIEWER_SYSTEM), *history])
-        usage_log.record("probing", "config", model_config.for_stage("probing").model,
+        usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
                          (getattr(resp, "usage_metadata", None) or {}))
         return {"messages": [resp], "turn_count": state.get("turn_count", 0) + 1}
 
@@ -82,7 +82,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None):
             for i, m in enumerate(state["messages"])
         )
         resp = distill_model.invoke([SystemMessage(content=DISTILL_SYSTEM + "\n\n" + transcript)])
-        usage_log.record("distillation", "config", model_config.for_stage("distillation").model,
+        usage_log.record("distillation", model_config.for_stage("distillation").provider, model_config.for_stage("distillation").model,
                          (getattr(resp, "usage_metadata", None) or {}))
         import json as _json
         data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
