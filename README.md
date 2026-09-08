@@ -49,3 +49,21 @@ Artifacts land in `out/<session>/`: `intent_model.json`, `intent_model.md`,
 
 Imports `vmodel-contracts` (pinned release) and nothing from sibling modules.
 Output crosses to `spec-generator` only as an `IntentModel` payload.
+
+## Local runs with Ollama (offline, $0)
+
+For development and tests without an API key. Needs a running Ollama server
+and a pulled model:
+
+```bash
+ollama pull qwen2.5-coder:14b   # or any chat model you like
+export INTERVIEW_ENGINE_MODEL_PROBING=ollama:qwen2.5-coder:14b
+export INTERVIEW_ENGINE_MODEL_DISTILLATION=ollama:qwen2.5-coder:14b
+export INTERVIEW_ENGINE_MODEL_PHRASING=ollama:qwen2.5-coder:14b
+export INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK=ollama:qwen2.5-coder:14b
+python -m interview_engine.cli "a marketplace for surf lessons"
+```
+
+Ollama calls are logged at $0.00 in `usage.jsonl` (local compute). Quality
+note: the interview IS the moat - judge demo quality on the real provider
+before showing founders; Ollama is for the dev loop.
