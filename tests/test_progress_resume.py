@@ -275,14 +275,60 @@ def test_needs_phase_fails_loudly_after_retry(fake_models):
     assert "stakeholder needs" in ei.value.render().lower() or "Extracting stakeholder needs" in ei.value.render()
 
 
-def test_assumptions_captured_not_built_as_needs(fake_models):
+def test_legacy_flat_assumptions_dropped_as_ungrounded(fake_models):
     needs = dict(NEEDS_REPLY, assumptions=["internal and external data cannot conflict"])
     fake_models["distillation"] = FakeModel([json.dumps(needs), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)])
     g = build_graph(UsageLog("t1"))
     r = run_one_turn(g, {"configurable": {"thread_id": "pa"}})
     intent = IntentModel.model_validate(r["intent_model"])
-    assert intent.assumptions == ["internal and external data cannot conflict"]
+    assert intent.assumptions == [] and intent.assumption_items == []
     assert all("conflict" not in n.statement for n in intent.stakeholder_needs)
+
+
+def test_grounded_assumption_survives(fake_models):
+    needs = dict(NEEDS_REPLY,
+                 assumption_items=[{"statement": "customers always book through schools",
+                                    "source_turns": [0]}])
+    needs.pop("assumptions", None)
+    fake_models["distillation"] = FakeModel([json.dumps(needs), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)])
+    g = build_graph(UsageLog("t1"))
+    r = run_one_turn(g, {"configurable": {"thread_id": "pg"}})
+    intent = IntentModel.model_validate(r["intent_model"])
+    assert [a.statement for a in intent.assumption_items] == ["customers always book through schools"]
+
+
+def test_prompt_echo_assumption_dropped_in_graph(fake_models):
+    # run-3 defect: the model echoed the prompt's own example assertions
+    needs = dict(NEEDS_REPLY,
+                 assumption_items=[{"statement": "these sources can't conflict", "source_turns": [0]},
+                                   {"statement": "users will always have connectivity", "source_turns": [0]}])
+    needs.pop("assumptions", None)
+    fake_models["distillation"] = FakeModel([json.dumps(needs), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)])
+    g = build_graph(UsageLog("t1"))
+    r = run_one_turn(g, {"configurable": {"thread_id": "pe"}})
+    intent = IntentModel.model_validate(r["intent_model"])
+    assert intent.assumption_items == []
+
+
+def test_duplicate_constraints_dropped_in_graph(fake_models):
+    scope = dict(SCOPE_REPLY, constraints=["founder data must stay secure", "$0 budget cap"])
+    fake_models["distillation"] = FakeModel(
+        [json.dumps(NEEDS_REPLY), json.dumps(scope), json.dumps(PREVIEW_REPLY)])
+    g = build_graph(UsageLog("t1"))
+    r = run_one_turn(g, {"configurable": {"thread_id": "pd"}})
+    intent = IntentModel.model_validate(r["intent_model"])
+    assert intent.constraints == ["$0 budget cap"]
+
+
+def test_preview_solution_language_stripped(fake_models):
+    bad = [{"need_id": "SN-1", "kind": "functional",
+            "statement": "The system shall flag conflicts.",
+            "example_criterion": "GET /dashboard returns a JSON response"}]
+    fake_models["distillation"] = FakeModel(
+        [json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(bad)])
+    g = build_graph(UsageLog("t1"))
+    r = run_one_turn(g, {"configurable": {"thread_id": "ps"}})
+    assert r["requirement_preview"][0].get("example_criterion") is None
 
 
 def test_renderer_shows_unverified_boundary_when_out_of_scope_empty():

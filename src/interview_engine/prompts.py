@@ -36,9 +36,21 @@ Fields:
   - Classification discipline: "MFA with a common provider" is a NON-FUNCTIONAL security need, not
     an external integration and not a constraint. "Keep user data secure" is non-functional.
     "Produce markdown documents" is functional.
-- assumptions[]: things the founder ASSERTED without evidence ("these sources can't conflict",
-  "users will always have connectivity"). An assumption is NOT a need - it gets validated later,
-  needs get built. Capture the assertion, short and verbatim-flavored.
+- assumption_items[]: objects {statement, source_turns[]} - things the founder ASSERTED about
+  the world without evidence. An assumption is NOT a need - it gets validated later, needs get
+  built. GROUNDING RULE: an assumption may only contain something the founder literally said in
+  THIS transcript, and source_turns must name the turn(s) where they said it. Anything you
+  invent, generalize, or remember from other contexts will be mechanically detected and
+  discarded - when in doubt, emit nothing.
+- done_criteria[]: the founder's acceptance conditions ("I'll know this works when...").
+  NOT needs - they feed validation later.
+- operational_concepts[]: operational/support processes the founder described (e.g. a support
+  team handling failures, field operators resolving conflicts). NOT system needs or NFRs -
+  capture them here so they are not lost.
+
+Classification reminders: a done-criterion is not a need. A human/operational process is not a
+non-functional need. If the system itself must behave differently because of them (e.g. degraded
+mode when a feed dies), THAT system behavior is the need.
 
 Output STRICT JSON only."""
 
@@ -50,6 +62,11 @@ Rules:
 - in_scope / out_of_scope are the scope BOUNDARY (what the system will and will not do).
 - out_of_scope must NOT be empty: derive at least one exclusion from things the founder framed as
   future / not-now / not-this-product. An empty boundary is an unverified boundary.
+- scope_exclusions[]: objects {item, source_turns[], explicit} - the auditable form of
+  out_of_scope. explicit=true ONLY when the founder said the exclusion in the transcript (name
+  the turn). Inferred items are explicit=false candidates for confirmation. NEVER exclude
+  anything that contradicts the problem_statement or core_value_proposition - an exclusion
+  that fights the headline value is a bug, not a boundary.
 - external_integrations: third-party web APIs/services the product consumes. An internal security
   control (MFA, encryption, audit logging) is NOT an integration.
 - constraints limit the DESIGN SPACE only: mandated budget caps, mandated stack/platform, hard
@@ -70,7 +87,10 @@ Output a STRICT JSON array only:
   "statement": "The system shall ...", "example_criterion": "machine-checkable check, e.g. 'GET /health returns 200'"}]
 
 Pick the highest-value needs - at least one functional and one non-functional if both exist.
-Statements are verifiable shall-statements; criteria are checks a machine can run."""
+Statements are verifiable shall-statements. Criteria are OBSERVABLE outcomes a check can see
+("a seeded disagreement produces exactly one alert within the refresh cycle") - NEVER
+implementation mechanics: no HTTP verbs, no endpoints or URL paths, no status codes, no JSON
+shapes, no database or UI-widget references."""
 
 # kept for backward reference by old checkpoints' error messages
 DISTILL_SYSTEM = DISTILL_NEEDS_SYSTEM + "\n\n" + DISTILL_SCOPE_SYSTEM

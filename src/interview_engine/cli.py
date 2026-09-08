@@ -35,6 +35,8 @@ def render_intent_markdown(intent: IntentModel) -> str:
     shall-statements) are derived downstream - this gate approves intent."""
     from vmodel_contracts import RequirementKind
 
+    from .distill_qa import content_words, _shared
+
     functional = [n for n in intent.stakeholder_needs if n.kind == RequirementKind.FUNCTIONAL]
     non_functional = [n for n in intent.stakeholder_needs if n.kind == RequirementKind.NON_FUNCTIONAL]
     lines = [
@@ -48,16 +50,44 @@ def render_intent_markdown(intent: IntentModel) -> str:
         *([f"- **{n.need_id}** {n.statement}" for n in non_functional] or ["- (none captured)"]),
         "\n## Scope",
         "**In scope**", *[f"- {s}" for s in intent.in_scope],
-        "\n**Out of scope**",
-        *([f"- {s}" for s in intent.out_of_scope] or ["- (none identified - boundary unverified, press the interviewer next run)"]),
     ]
+    core_words = content_words(" ".join(
+        [intent.problem_statement, intent.core_value_proposition, *intent.in_scope]))
+
+    def _flag(item: str) -> str:
+        # deterministic contradiction flag (run-3): an exclusion fighting the headline value
+        shared = _shared(content_words(item), core_words)
+        return f"  ⚠ mentions {sorted(shared)} - confirm this is not the core value" if shared else ""
+
+    if intent.scope_exclusions:
+        explicit = [x for x in intent.scope_exclusions if x.explicit]
+        candidates = [x for x in intent.scope_exclusions if not x.explicit]
+        lines += ["\n**Out of scope**",
+                  *([f"- {x.item}{_flag(x.item)}" for x in explicit] or ["- (none stated explicitly)"])]
+        if candidates:
+            lines += ["\n**Candidate exclusions - inferred, confirm before relying**",
+                      *[f"- {x.item}{_flag(x.item)}" for x in candidates]]
+    else:
+        lines += ["\n**Out of scope**",
+                  *([f"- {s}{_flag(s)}" for s in intent.out_of_scope]
+                    or ["- (none identified - boundary unverified, press the interviewer next run)"])]
     if intent.external_integrations:
         lines += ["\n## External integrations", *[f"- {s}" for s in intent.external_integrations]]
     if intent.constraints:
         lines += ["\n## Constraints", *[f"- {s}" for s in intent.constraints]]
-    if intent.assumptions:
+    if intent.assumption_items:
+        lines += ["\n## Assumptions (asserted by you - validated later, not built)",
+                  *[f"- {a.statement} (turn {', '.join(str(t) for t in a.source_turns)})"
+                    for a in intent.assumption_items]]
+    elif intent.assumptions:
         lines += ["\n## Assumptions (asserted by you - validated later, not built)",
                   *[f"- {a}" for a in intent.assumptions]]
+    if intent.done_criteria:
+        lines += ["\n## Done criteria (your acceptance conditions - checked at delivery, not built as needs)",
+                  *[f"- {d}" for d in intent.done_criteria]]
+    if intent.operational_concepts:
+        lines += ["\n## Operational concepts (people/processes around the system - not requirements)",
+                  *[f"- {o}" for o in intent.operational_concepts]]
     if intent.open_questions:
         lines += ["\n## Open questions (never silently resolved)", *[f"- {q}" for q in intent.open_questions]]
     lines += ["\n---",

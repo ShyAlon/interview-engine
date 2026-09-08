@@ -91,6 +91,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from pydantic import ValidationError
         from vmodel_contracts import IntentModel, IntentNeed
 
+        from .distill_qa import dedup_constraints, ground_assumptions, is_solution_language
         from .errors import UserFacingError, translate_json_error
         from .progress import ProgressEvent
         from .prompts import DISTILL_NEEDS_SYSTEM, DISTILL_PREVIEW_SYSTEM, DISTILL_SCOPE_SYSTEM
@@ -146,7 +147,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 raise ValueError("stakeholder_needs must not be empty - an intent model with no needs is not an intent model")
             fixed = normalize_enums({"stakeholder_needs": needs}, IntentModel)["stakeholder_needs"]
             validated = [IntentNeed.model_validate(n) for n in fixed]
+            from vmodel_contracts import Assumption
+            items = data.get("assumption_items") or []
             return {"stakeholder_needs": [n.model_dump(mode="json") for n in validated],
+                    "assumption_items": [Assumption.model_validate(a).model_dump(mode="json") for a in items],
+                    "done_criteria": [str(d) for d in (data.get("done_criteria") or [])],
+                    "operational_concepts": [str(o) for o in (data.get("operational_concepts") or [])],
                     "assumptions": data.get("assumptions") or []}
 
         def _valid_scope(data):
@@ -160,8 +166,13 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     raise ValueError(f"{k} must be a list")
             if not data["out_of_scope"]:
                 raise ValueError("out_of_scope is empty - derive at least one exclusion from the conversation")
+            from vmodel_contracts import ScopeExclusion
+            exclusions = [ScopeExclusion.model_validate(x).model_dump(mode="json")
+                          for x in (data.get("scope_exclusions") or [])]
             keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "source_turns")
-            return {k: data.get(k) for k in keep}
+            out = {k: data.get(k) for k in keep}
+            out["scope_exclusions"] = exclusions
+            return out
 
         parts = _phase("distill_needs", "Extracting stakeholder needs", "phase 1/4",
                        DISTILL_NEEDS_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_needs)
@@ -177,6 +188,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 if isinstance(raw, list):
                     preview = [p for p in raw
                                if isinstance(p, dict) and isinstance(p.get("statement"), str)][:3]
+                    for p in preview:
+                        if p.get("example_criterion") and is_solution_language(str(p["example_criterion"])):
+                            p.pop("example_criterion")  # implementation mechanics are not a check (method pack 3)
             except Exception:  # noqa: BLE001 - decoration, not the system of record
                 preview = []
         if not preview and progress is not None:
@@ -186,6 +200,29 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
 
         # phase 4: deterministic assembly + full contract validation
         with track(progress, "distill_validate", "Validating intent model", "phase 4/4"):
+            # mechanical QA (ADR-0015): grounding and dedup are ENFORCED, not prompted.
+            import time as _t2
+            turns = [str(getattr(m, "content", "")) for m in state["messages"]]
+            grounded, dropped_a = ground_assumptions(
+                parts.get("assumption_items") or [], turns,
+                [DISTILL_NEEDS_SYSTEM, DISTILL_SCOPE_SYSTEM])
+            parts["assumption_items"] = grounded
+            # legacy flat assumptions from older prompts have no provenance - drop them too.
+            if parts.get("assumptions"):
+                dropped_a += [f"{a[:60]} (legacy ungrounded field)" for a in parts["assumptions"]]
+                parts["assumptions"] = []
+            kept_c, dropped_c = dedup_constraints(
+                parts.get("constraints") or [],
+                [n["statement"] for n in parts["stakeholder_needs"]])
+            parts["constraints"] = kept_c
+            if progress is not None:
+                for d in dropped_a:
+                    progress.emit(ProgressEvent("distill_validate", "Dropped ungrounded assumption",
+                                                "completed", _t2.time(), 0.0, d))
+                for d in dropped_c:
+                    progress.emit(ProgressEvent("distill_validate", "Dropped duplicate constraint",
+                                                "completed", _t2.time(), 0.0,
+                                                d[:70] + " (already a classified need)"))
             data = normalize_enums(coerce_for_model(parts, IntentModel), IntentModel)
             try:
                 intent = IntentModel.model_validate(data)
