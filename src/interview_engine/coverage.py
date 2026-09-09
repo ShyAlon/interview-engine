@@ -125,3 +125,21 @@ def extract_turn_json(text: str) -> dict | None:
         except ValueError:
             pass
     return None
+
+
+_NUM_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(%|percent|ms|s(?:ec)?|seconds|minutes|hours|users|req(?:uests)?/?s|"
+    r"events?/?s|rps|qps|tps|gb|mb|tb|k\b|m\b|million|thousand|nines|9s|uptime|latency)",
+    re.IGNORECASE)
+_NO_NUMBERS_RE = re.compile(
+    r"\b(no|don't have|do not have|without|skip) (the )?numbers?\b"
+    r"|\bno (metrics|quantification|targets?|slas)\b"
+    r"|\bnot applicable\b|\bdemo (only|mode|purposes)\b|\bjust a demo\b",
+    re.IGNORECASE)
+
+
+def nfr_quantified(founder_text: str) -> bool:
+    """The 'quantified NFRs' area may close only on numbers in the founder's own
+    words, or an explicit founder acknowledgment that there are none (demo).
+    'Strict security' and a model's confidence are not quantification."""
+    return bool(_NUM_RE.search(founder_text) or _NO_NUMBERS_RE.search(founder_text))

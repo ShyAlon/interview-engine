@@ -7,6 +7,7 @@ pluggable: delivery-api subscribes over its API; the CLI demo appends JSONL.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -30,15 +31,34 @@ PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 
+def _load_price_table() -> dict[str, tuple[float, float]]:
+    """Built-in defaults, overridable without a code change: point
+    VMODEL_PRICE_TABLE at a JSON file {"model": [input_per_mtok, output_per_mtok], ...}.
+    The built-in table's prices are unverified snapshots (see note above) - the
+    operator's file WINS on conflict, so correcting a price is a config edit,
+    not a release."""
+    table = dict(PRICES_USD_PER_MTOK)
+    path = os.environ.get("VMODEL_PRICE_TABLE")
+    if path:
+        with open(path) as f:
+            override = json.load(f)
+        for model, pair in override.items():
+            if not (isinstance(pair, list) and len(pair) == 2):
+                raise ValueError(f"VMODEL_PRICE_TABLE entry {model!r} must be [input, output] per MTok")
+            table[model] = (float(pair[0]), float(pair[1]))
+    return table
+
+
 def price_for(model: str, provider: str = "") -> tuple[float, float]:
     # Local by construction, not by table lookup: any ollama-routed call is $0.
     # The hard-fail below is reserved for UNPRICED REMOTE calls - a missing
     # price for a paid model means an unbudgeted call, and that must crash loudly.
     if provider == "ollama" or model.startswith("ollama:") or model.startswith("ollama/"):
         return (0.0, 0.0)
-    if model not in PRICES_USD_PER_MTOK:
-        raise KeyError(f"no price for {model!r} in table v{PRICE_TABLE_VERSION} - add it; unpriced calls are unbudgeted calls")
-    return PRICES_USD_PER_MTOK[model]
+    table = _load_price_table()
+    if model not in table:
+        raise KeyError(f"no price for {model!r} in table v{PRICE_TABLE_VERSION} - add it via VMODEL_PRICE_TABLE; unpriced calls are unbudgeted calls")
+    return table[model]
 
 
 Sink = Callable[[StageTokenUsage], None]
@@ -57,9 +77,11 @@ class UsageLog:
     def __init__(self, session_id: str, sink: Sink | None = None):
         self.session_id = session_id
         self.records: list[StageTokenUsage] = []
+        self.durations: list[float | None] = []
         self.sink = sink
 
-    def record(self, stage: str, provider: str, model: str, usage: dict) -> StageTokenUsage:
+    def record(self, stage: str, provider: str, model: str, usage: dict,
+               duration_s: float | None = None) -> StageTokenUsage:
         pin, pout = price_for(model, provider)
         rec = StageTokenUsage(
             session_id=self.session_id,
@@ -73,9 +95,33 @@ class UsageLog:
             price_per_mtok_completion_usd=pout,
         )
         self.records.append(rec)
+        self.durations.append(duration_s)
         if self.sink:
             self.sink(rec)
         return rec
 
     def total_usd(self) -> float:
         return sum(r.cost_usd for r in self.records)
+
+    def summary(self) -> dict:
+        """Per-stage rollup: calls, tokens, LLM seconds, cost. The end-of-run
+        artifact and CLI table both render from this."""
+        stages: dict[str, dict] = {}
+        for rec, dur in zip(self.records, self.durations):
+            s = stages.setdefault(rec.stage, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                              "seconds": 0.0, "cost_usd": 0.0, "models": set()})
+            s["calls"] += 1
+            s["prompt_tokens"] += rec.prompt_tokens
+            s["completion_tokens"] += rec.completion_tokens
+            s["seconds"] += dur or 0.0
+            s["cost_usd"] += rec.cost_usd
+            s["models"].add(f"{rec.provider}:{rec.model}")
+        for s in stages.values():
+            s["models"] = sorted(s["models"])
+        return {"session_id": self.session_id,
+                "stages": stages,
+                "total_seconds": sum(s["seconds"] for s in stages.values()),
+                "total_cost_usd": self.total_usd()}
+
+    def write_summary(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(self.summary(), indent=2))

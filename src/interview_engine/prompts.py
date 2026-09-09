@@ -97,7 +97,10 @@ Pick the highest-value needs - at least one functional and one non-functional if
 Statements are verifiable shall-statements. Criteria are OBSERVABLE outcomes a check can see
 ("a seeded disagreement produces exactly one alert within the refresh cycle") - NEVER
 implementation mechanics: no HTTP verbs, no endpoints or URL paths, no status codes, no JSON
-shapes, no database or UI-widget references."""
+shapes, no database or UI-widget references, no named technologies or algorithms (AES-256,
+OAuth, Kafka - "encrypted in transit" is the check, the cipher is a design decision). Criteria
+may only use facts the founder actually stated - NEVER invent artifacts, features, or numbers
+(no "portfolio of case studies" unless the founder said those words)."""
 
 
 

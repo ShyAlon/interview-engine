@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Annotated, TypedDict
 
+import time as _time
+
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
@@ -22,8 +24,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
-from .coverage import (apply_reply, extract_turn_json, founder_control, initial_coverage,
-                         next_area, progress_line, status_block)
+from .coverage import (COVERED, THIN, apply_reply, extract_turn_json, founder_control,
+                         initial_coverage, next_area, nfr_quantified, progress_line, status_block)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
 from .telemetry import UsageLog
@@ -85,9 +87,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
             history = state["messages"]
             system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + "\n\n" + STRUCTURED_TURN_FORMAT
+            _t0 = _time.time()
             resp = model_config.invoke_checked(probing_model, [SystemMessage(content=system), *history], "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
-                             (getattr(resp, "usage_metadata", None) or {}))
+                             (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
 
         # structured reply (option a): {question, covered, thin, skipped, complete}.
         # Tolerant parse (fences/prose-wrapped JSON); on failure ONE retry with
@@ -106,10 +109,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                           AIMessage(content=resp.content),
                           HumanMessage(content="Your reply was not valid JSON. Reply with ONLY the JSON object, "
                                                "no prose: " + STRUCTURED_TURN_FORMAT)]
+            _t0 = _time.time()
             resp2 = model_config.invoke_checked(probing_model, retry_msgs, "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider,
                              model_config.for_stage("probing").model,
-                             (getattr(resp2, "usage_metadata", None) or {}))
+                             (getattr(resp2, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
             parsed = extract_turn_json(resp2.content)
             if parsed is None and progress is not None:
                 progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
@@ -117,6 +121,20 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         question, complete = resp.content, False
         if parsed is not None:
             coverage = apply_reply(coverage, parsed)
+            # Quantified-NFR guard (run-5): the model may not close "quantified
+            # NFRs" while the founder's own words contain no numbers - unless the
+            # founder explicitly said there are none (demo mode). Coded guardrail,
+            # not prompt discipline.
+            if coverage.get("nfrs") == COVERED and (parsed.get("covered") or []) and "nfrs" in (parsed.get("covered") or []):
+                founder_text = "\n".join(getattr(m, "content", "") for m in history
+                                          if getattr(m, "type", "") == "human")
+                if not nfr_quantified(founder_text):
+                    coverage["nfrs"] = THIN
+                    if progress is not None:
+                        progress.emit(ProgressEvent(
+                            "interview_turn", "Coverage", "completed", _t.time(), 0.0,
+                            "NFRs claimed covered with no numbers given - holding thin; "
+                            "say 'no numbers for the demo' to close it honestly"))
             question = parsed["question"].strip()
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
@@ -154,7 +172,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from pydantic import ValidationError
         from vmodel_contracts import IntentModel, IntentNeed
 
-        from .distill_qa import dedup_constraints, ground_assumptions, is_solution_language
+        from .distill_qa import dedup_constraints, ground_assumptions, grounded_in, is_solution_language
         from .errors import UserFacingError, translate_json_error
         from .progress import ProgressEvent
         from .prompts import DISTILL_NEEDS_SYSTEM, DISTILL_PREVIEW_SYSTEM, DISTILL_SCOPE_SYSTEM
@@ -169,10 +187,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             messages = [SystemMessage(content=system + "\n\n" + extra)]
             if feedback:
                 messages.append(HumanMessage(content=feedback))
+            _t0 = _time.time()
             resp = model_config.invoke_checked(distill_model, messages, "distillation")
             usage_log.record("distillation", model_config.for_stage("distillation").provider,
                              model_config.for_stage("distillation").model,
-                             (getattr(resp, "usage_metadata", None) or {}))
+                             (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
             return resp, _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
 
         def _phase(stage, label, detail, system, extra, validate):
@@ -204,6 +223,17 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         fb = ("Your previous output failed validation:\n" + str(e)[:400]
                               + "\nReturn the corrected JSON only, matching the schema exactly.")
 
+        def _op_concepts(items):
+            # run-5 drift: the model emits {statement, source_turns} objects; the
+            # contract carries plain strings. Keep the statement, not str(dict).
+            out = []
+            for o in items:
+                if isinstance(o, dict) and isinstance(o.get("statement"), str):
+                    out.append(o["statement"])
+                else:
+                    out.append(str(o))
+            return out
+
         def _valid_needs(data):
             needs = data.get("stakeholder_needs") or []
             if not needs:
@@ -212,10 +242,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             validated = [IntentNeed.model_validate(n) for n in fixed]
             from vmodel_contracts import Assumption
             items = data.get("assumption_items") or []
-            return {"stakeholder_needs": [n.model_dump(mode="json") for n in validated],
+            return {"_glossary": data.get("glossary") if isinstance(data.get("glossary"), dict) else None,
+                    "stakeholder_needs": [n.model_dump(mode="json") for n in validated],
                     "assumption_items": [Assumption.model_validate(a).model_dump(mode="json") for a in items],
                     "done_criteria": [str(d) for d in (data.get("done_criteria") or [])],
-                    "operational_concepts": [str(o) for o in (data.get("operational_concepts") or [])],
+                    "operational_concepts": _op_concepts(data.get("operational_concepts") or []),
                     "assumptions": data.get("assumptions") or []}
 
         def _as_str_list(v):
@@ -248,13 +279,24 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                           for x in (data.get("scope_exclusions") or [])]
             keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "glossary", "source_turns")
             out = {k: data.get(k) for k in keep}
+            # glossary drift: {term: meaning} sometimes arrives as [{term, meaning}, ...]
+            gl = out.get("glossary")
+            if isinstance(gl, list):
+                fixed = {}
+                for g in gl:
+                    if isinstance(g, dict) and isinstance(g.get("term"), str) and isinstance(g.get("meaning"), str):
+                        fixed[g["term"]] = g["meaning"]
+                out["glossary"] = fixed
             out["scope_exclusions"] = exclusions
             return out
 
         parts = _phase("distill_needs", "Extracting stakeholder needs", "phase 1/4",
                        DISTILL_NEEDS_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_needs)
+        _needs_glossary = parts.pop("_glossary", None)
         parts.update(_phase("distill_scope", "Building scope and framing", "phase 2/4",
                             DISTILL_SCOPE_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_scope))
+        if not parts.get("glossary") and isinstance(_needs_glossary, dict):
+            parts["glossary"] = _needs_glossary
         parts["session_id"] = state["submission"]["submission_id"]
 
         # phase 3: requirement PREVIEW (presentation-only; never blocks the run)
@@ -265,9 +307,22 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 if isinstance(raw, list):
                     preview = [p for p in raw
                                if isinstance(p, dict) and isinstance(p.get("statement"), str)][:3]
+                    turns_text = [str(getattr(m, "content", "")) for m in state["messages"]
+                                  if getattr(m, "type", "") == "human"]
                     for p in preview:
-                        if p.get("example_criterion") and is_solution_language(str(p["example_criterion"])):
-                            p.pop("example_criterion")  # implementation mechanics are not a check (method pack 3)
+                        crit = str(p.get("example_criterion") or "")
+                        if not crit:
+                            continue
+                        if is_solution_language(crit):
+                            p.pop("example_criterion")  # implementation mechanics/named tech are not a check
+                            if progress is not None:
+                                progress.emit(ProgressEvent("distill_preview", "Dropped invented-tech criterion",
+                                                            "completed", _time.time(), 0.0, crit[:70]))
+                        elif not grounded_in(crit, turns_text):
+                            p.pop("example_criterion")  # invented artifact - not from stakeholder language
+                            if progress is not None:
+                                progress.emit(ProgressEvent("distill_preview", "Dropped ungrounded criterion",
+                                                            "completed", _time.time(), 0.0, crit[:70]))
             except Exception:  # noqa: BLE001 - decoration, not the system of record
                 preview = []
         if not preview and progress is not None:
@@ -300,6 +355,13 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     progress.emit(ProgressEvent("distill_validate", "Dropped duplicate constraint",
                                                 "completed", _t2.time(), 0.0,
                                                 d[:70] + " (already a classified need)"))
+            if (state.get("coverage") or {}).get("glossary") == "covered" and not parts.get("glossary"):
+                import time as _t3
+                if progress is not None:
+                    progress.emit(ProgressEvent(
+                        "distill_validate", "Glossary gap", "completed", _t3.time(), 0.0,
+                        "founder defined terms in the interview but distillation captured none - "
+                        "the intent model has no glossary; re-run or add terms manually"))
             data = normalize_enums(coerce_for_model(parts, IntentModel), IntentModel)
             try:
                 intent = IntentModel.model_validate(data)

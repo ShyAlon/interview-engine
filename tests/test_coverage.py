@@ -108,7 +108,8 @@ def test_complete_appends_marker_and_stops(monkeypatch):
     probing = FakeModel([structured("Got it all.", covered=[k for k, _, _ in AREAS], complete=True)])
     fake_models(monkeypatch, probing)
     g = build_graph(UsageLog("t1"))
-    r = start(g, thread="c2")
+    # "5000" keeps the NFR guard honest: closing "quantified NFRs" needs numbers
+    r = start(g, text="a saas web app for surf schools, booking, logins, 5000 users", thread="c2")
     assert any("[INTERVIEW COMPLETE]" in getattr(m, "content", "") for m in r["messages"])
     assert "intent_model" in r  # same invoke flowed through distillation
 

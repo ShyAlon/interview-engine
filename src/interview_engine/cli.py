@@ -54,10 +54,20 @@ def render_intent_markdown(intent: IntentModel) -> str:
     core_words = content_words(" ".join(
         [intent.problem_statement, intent.core_value_proposition, *intent.in_scope]))
 
+    _GENERIC = {"application", "app", "system", "product", "platform", "software", "solution",
+                "web", "service", "tool", "website", "site", "mobile", "mission-critical",
+                "mission", "critical", "use", "using", "used", "users", "user", "new", "via"}
+
     def _flag(item: str) -> str:
-        # deterministic contradiction flag (run-3): an exclusion fighting the headline value
+        # deterministic contradiction flag (run-3): an exclusion fighting the headline value.
+        # Run-5: "mission-critical application" flagged on 'application' - generic product
+        # vocabulary is not overlap. Require a NON-GENERIC shared word, or 2+ shared.
         shared = _shared(content_words(item), core_words)
-        return f"  ⚠ mentions {sorted(shared)} - confirm this is not the core value" if shared else ""
+        signal = {w for w in shared if w not in _GENERIC}
+        if not signal and len(shared) < 2:
+            return ""
+        shown = sorted(signal or shared)
+        return f"  ⚠ mentions {shown} - confirm this is not the core value"
 
     if intent.scope_exclusions:
         explicit = [x for x in intent.scope_exclusions if x.explicit]
@@ -135,6 +145,20 @@ def render_preview_markdown(preview: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _print_usage_table(log) -> None:
+    s = log.summary()
+    if not s["stages"]:
+        return
+    print("\nLLM usage (per stage):", file=sys.stderr)
+    for stage, st in s["stages"].items():
+        print(f"  {stage:<14} {st['calls']:>3} calls  {st['prompt_tokens']:>7} in / "
+              f"{st['completion_tokens']:>6} out tok  {st['seconds']:>6.1f}s  ${st['cost_usd']:.4f}  "
+              f"({', '.join(st['models'])})", file=sys.stderr)
+    print(f"  {'TOTAL':<14} {sum(st['calls'] for st in s['stages'].values()):>3} calls  "
+          f"{'':>7} {'':>6} {'':>3} {s['total_seconds']:>6.1f}s  ${s['total_cost_usd']:.4f}",
+          file=sys.stderr)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("idea", nargs="*", help="the product idea (omit with --session to resume)")
@@ -180,7 +204,7 @@ def main() -> None:
     cfg = {"configurable": {"thread_id": session}}
 
     if resuming:
-        print(f"Resuming session {session} from checkpoint.", file=sys.stderr)
+        print(f"Resuming session {session} from {db_path.resolve()}", file=sys.stderr)
         current = graph.get_state(cfg)
         if not current.values:
             raise UserFacingError(
@@ -265,7 +289,9 @@ def main() -> None:
     if ok != "y":
         print("Rejected - nothing generated. The interview can resume with corrections.")
         return
-    print(f"\nApproved. Artifacts in {outdir}/  |  LLM cost so far: ${log.total_usd():.4f}")
+    log.write_summary(outdir / "usage_summary.json")
+    _print_usage_table(log)
+    print(f"\nApproved. Artifacts in {outdir.resolve()}/")
     print("Next: hand intent_model.json to spec-generator.")
 
 
