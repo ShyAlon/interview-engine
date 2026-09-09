@@ -1,17 +1,20 @@
 """Per-stage model routing. THE model-agnostic layer: swapping providers is a
 config change here, never a refactor. Providers:
 
-- deepseek  (default - demo prices, OpenAI-compatible)
-- openai
-- anthropic
-- ollama    (LOCAL: offline test runs at $0 - no API key, no data leaves the
-             machine. Needs a running Ollama server + a pulled model.)
+- ollama    (DEFAULT - local-first, the product owner's standing call:
+             "It should all be ollama by default. We'll change it once we go
+             to production." $0, no API key, no data leaves the machine.
+             Needs a running Ollama server + a pulled model.)
+- deepseek  (opt-in - demo prices, OpenAI-compatible)
+- openai    (opt-in)
+- anthropic (opt-in)
 
-Every stage's choice is deliberate (see ARCHITECTURE.md, ADR-0004):
-- probing / distillation earn the strong model - they are the moat.
+Every stage's override is deliberate (see ARCHITECTURE.md, ADR-0004):
+- probing / distillation earn the strong model for founder-facing runs -
+  they are the moat: INTERVIEW_ENGINE_MODEL_PROBING=deepseek:deepseek-chat etc.
 - phrasing / tiebreaks can drop to a cheaper tier without visible quality loss.
-Local Ollama runs are for development and tests; judge demo quality on the
-real provider before showing founders.
+Local Ollama is the default until production (ADR-0018); judge demo quality on
+the real provider before showing founders.
 """
 from __future__ import annotations
 
@@ -28,10 +31,10 @@ class StageModel:
 
 
 _STAGE_DEFAULTS: dict[str, StageModel] = {
-    "probing":       StageModel("deepseek", "deepseek-chat", temperature=0.5),
-    "distillation":  StageModel("deepseek", "deepseek-chat", temperature=0.2),
-    "phrasing":      StageModel("deepseek", "deepseek-chat", temperature=0.7),
-    "scope_tiebreak": StageModel("deepseek", "deepseek-chat", temperature=0.0),
+    "probing":       StageModel("ollama", "qwen2.5-coder:7b", temperature=0.5),
+    "distillation":  StageModel("ollama", "qwen2.5-coder:7b", temperature=0.2),
+    "phrasing":      StageModel("ollama", "qwen2.5-coder:7b", temperature=0.7),
+    "scope_tiebreak": StageModel("ollama", "qwen2.5-coder:7b", temperature=0.0),
 }
 
 _BASE_URLS = {
@@ -69,8 +72,8 @@ def _preflight(cfg: "StageModel", stage: str) -> None:
         raise UserFacingError(
             f"stage '{cfg.model}' is routed to provider '{cfg.provider}', but {env} is not set.",
             "no API key in the environment.",
-            f"export {env}=... or run this stage offline via Ollama: "
-            f"INTERVIEW_ENGINE_MODEL_{stage.upper()}=ollama:qwen2.5-coder:7b (see README 'Local runs with Ollama').",
+            f"export {env}=... - remote providers are opt-in (the default is local Ollama); "
+            f"or route this stage back to local: INTERVIEW_ENGINE_MODEL_{stage.upper()}=ollama:qwen2.5-coder:7b.",
         )
 
 

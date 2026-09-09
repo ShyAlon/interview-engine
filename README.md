@@ -38,8 +38,9 @@ exactly where it stopped - completed stages are never re-paid (ADR-0011).
 
 `model_config.py` is the model-agnostic layer: per-stage provider+model,
 env-overridable (`INTERVIEW_ENGINE_MODEL_PROBING=openai:gpt-5`). Default is
-DeepSeek (demo prices). Swapping providers is a config change, never a
-refactor (ADR-0003).
+LOCAL Ollama ($0, no key) - the product owner's standing call until production
+(ADR-0018); DeepSeek/OpenAI/Anthropic are opt-in per stage. Swapping providers
+is a config change, never a refactor (ADR-0003).
 
 ## Telemetry
 
@@ -51,9 +52,13 @@ until these records exist.
 
 ```bash
 pip install -e .[dev]
-export DEEPSEEK_API_KEY=...
+ollama pull qwen2.5-coder:7b   # default model; qwen2.5-coder:14b is the upgrade
+export OLLAMA_NUM_PARALLEL=1   # never load two models at once on 16GB
 python -m interview_engine.cli "a marketplace for surf lessons in Tel Aviv"
 ```
+
+Remote providers are opt-in per stage, e.g.
+`INTERVIEW_ENGINE_MODEL_PROBING=deepseek:deepseek-chat` + `export DEEPSEEK_API_KEY=...`.
 
 Artifacts land in `out/<session>/`: `intent_model.json`, `intent_model.md`,
 `usage.jsonl`.
@@ -63,23 +68,17 @@ Artifacts land in `out/<session>/`: `intent_model.json`, `intent_model.md`,
 Imports `vmodel-contracts` (pinned release) and nothing from sibling modules.
 Output crosses to `spec-generator` only as an `IntentModel` payload.
 
-## Local runs with Ollama (offline, $0)
+## Model size
 
-For development and tests without an API key. Needs a running Ollama server
-and a pulled model:
-
-Model size: `qwen2.5-coder:7b` is the default recommendation and runs fine on
-a 16GB machine. `qwen2.5-coder:14b` is better but wants 32GB+ RAM. Set
-`OLLAMA_NUM_PARALLEL=1` so Ollama never loads two models at once (the chat
-model plus `nomic-embed-text` would otherwise compete for RAM).
+`qwen2.5-coder:7b` is the default and runs fine on 16GB. `qwen2.5-coder:14b`
+is better and runs on a 16GB M4 (proven) with `OLLAMA_NUM_PARALLEL=1` set -
+upgrade per stage:
 
 ```bash
-ollama pull qwen2.5-coder:7b   # or any chat model you like
-export INTERVIEW_ENGINE_MODEL_PROBING=ollama:qwen2.5-coder:7b
-export INTERVIEW_ENGINE_MODEL_DISTILLATION=ollama:qwen2.5-coder:7b
-export INTERVIEW_ENGINE_MODEL_PHRASING=ollama:qwen2.5-coder:7b
-export INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK=ollama:qwen2.5-coder:7b
-python -m interview_engine.cli "a marketplace for surf lessons"
+for s in PROBING DISTILLATION PHRASING SCOPE_TIEBREAK; do
+  export INTERVIEW_ENGINE_MODEL_$s=ollama:qwen2.5-coder:14b
+done
+```
 ```
 
 Ollama calls are logged at $0.00 in `usage.jsonl` (local compute). Quality

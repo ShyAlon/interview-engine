@@ -13,9 +13,11 @@ def test_ollama_override_routes(monkeypatch):
     assert cfg.provider == "ollama" and cfg.model == "qwen2.5-coder:14b"
 
 
-def test_default_is_deepseek():
-    cfg = model_config.for_stage("distillation")
-    assert cfg.provider == "deepseek"
+def test_default_is_local_ollama(monkeypatch):
+    # ADR-0018: local-first until production - no stage defaults to a paid provider
+    for stage in ("probing", "distillation", "phrasing", "scope_tiebreak"):
+        monkeypatch.delenv(f"INTERVIEW_ENGINE_MODEL_{stage.upper()}", raising=False)
+        assert model_config.for_stage(stage).provider == "ollama", stage
 
 
 def test_unknown_stage_raises():
@@ -55,6 +57,7 @@ def test_preflight_names_missing_remote_key(monkeypatch):
     from interview_engine.errors import UserFacingError
 
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-chat")  # remote is opt-in
     with pytest.raises(UserFacingError) as ei:
         model_config.build_chat_model("probing")
     msg = ei.value.render()
