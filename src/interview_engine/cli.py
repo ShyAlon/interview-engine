@@ -262,8 +262,9 @@ def main() -> None:
         raise UserFacingError(
             f"this session's intent model is from an older contracts version ({e.have}).",
             "the interview ran before a contract upgrade; the transcript is preserved in the checkpoint.",
-            "run the distillation again against the current contracts: start a fresh session "
-            "(the interview is the cheap part to redo) - or pin the old vmodel-contracts to read it.",
+            "if the schema is otherwise compatible, re-stamp the raw artifact: "
+            "python -m vmodel_contracts.migrate <path-to-intent_model.raw.json> (validates first, refuses on real drift); "
+            "otherwise start a fresh session (the interview is the cheap part to redo).",
         ) from e
     try:
         intent = IntentModel.model_validate(result["intent_model"])
