@@ -17,7 +17,9 @@ def test_default_is_local_ollama(monkeypatch):
     # ADR-0018: local-first until production - no stage defaults to a paid provider
     for stage in ("probing", "distillation", "phrasing", "scope_tiebreak"):
         monkeypatch.delenv(f"INTERVIEW_ENGINE_MODEL_{stage.upper()}", raising=False)
-        assert model_config.for_stage(stage).provider == "ollama", stage
+        cfg = model_config.for_stage(stage)
+        assert cfg.provider == "ollama", stage
+        assert cfg.model == "qwen2.5-coder:14b", stage  # his standing default; 7b is the lighter fallback
 
 
 def test_unknown_stage_raises():

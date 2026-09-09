@@ -31,10 +31,10 @@ class StageModel:
 
 
 _STAGE_DEFAULTS: dict[str, StageModel] = {
-    "probing":       StageModel("ollama", "qwen2.5-coder:7b", temperature=0.5),
-    "distillation":  StageModel("ollama", "qwen2.5-coder:7b", temperature=0.2),
-    "phrasing":      StageModel("ollama", "qwen2.5-coder:7b", temperature=0.7),
-    "scope_tiebreak": StageModel("ollama", "qwen2.5-coder:7b", temperature=0.0),
+    "probing":       StageModel("ollama", "qwen2.5-coder:14b", temperature=0.5),
+    "distillation":  StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
+    "phrasing":      StageModel("ollama", "qwen2.5-coder:14b", temperature=0.7),
+    "scope_tiebreak": StageModel("ollama", "qwen2.5-coder:14b", temperature=0.0),
 }
 
 _BASE_URLS = {
@@ -73,7 +73,7 @@ def _preflight(cfg: "StageModel", stage: str) -> None:
             f"stage '{cfg.model}' is routed to provider '{cfg.provider}', but {env} is not set.",
             "no API key in the environment.",
             f"export {env}=... - remote providers are opt-in (the default is local Ollama); "
-            f"or route this stage back to local: INTERVIEW_ENGINE_MODEL_{stage.upper()}=ollama:qwen2.5-coder:7b.",
+            f"or route this stage back to local: INTERVIEW_ENGINE_MODEL_{stage.upper()}.=ollama:qwen2.5-coder:14b.",
         )
 
 

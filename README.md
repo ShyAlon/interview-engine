@@ -52,7 +52,7 @@ until these records exist.
 
 ```bash
 pip install -e .[dev]
-ollama pull qwen2.5-coder:7b   # default model; qwen2.5-coder:14b is the upgrade
+ollama pull qwen2.5-coder:14b   # the default model (qwen2.5-coder:7b is the lighter fallback)
 export OLLAMA_NUM_PARALLEL=1   # never load two models at once on 16GB
 python -m interview_engine.cli "a marketplace for surf lessons in Tel Aviv"
 ```
@@ -70,13 +70,13 @@ Output crosses to `spec-generator` only as an `IntentModel` payload.
 
 ## Model size
 
-`qwen2.5-coder:7b` is the default and runs fine on 16GB. `qwen2.5-coder:14b`
-is better and runs on a 16GB M4 (proven) with `OLLAMA_NUM_PARALLEL=1` set -
-upgrade per stage:
+`qwen2.5-coder:14b` is the standing default - proven on a 16GB M4 with
+`OLLAMA_NUM_PARALLEL=1` set. `qwen2.5-coder:7b` is the lighter fallback for
+tighter machines - downgrade per stage:
 
 ```bash
 for s in PROBING DISTILLATION PHRASING SCOPE_TIEBREAK; do
-  export INTERVIEW_ENGINE_MODEL_$s=ollama:qwen2.5-coder:14b
+  export INTERVIEW_ENGINE_MODEL_$s=ollama:qwen2.5-coder:7b
 done
 ```
 ```
