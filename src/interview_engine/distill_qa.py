@@ -6,35 +6,20 @@ twice (run 2, run 3) - these checks are MECHANICAL, not instructions to the mode
    EXAMPLE assertions - "these sources can't conflict" - as founder statements).
 2. dedup_constraints: a constraint whose fact is already a classified need is
    dropped (constraints limit the design space; they restate nothing).
-3. is_solution_language: preview checks must be implementation-agnostic
-   observable criteria, not API calls.
+3. is_solution_language / names_technology / grounded_in: SHARED from
+   vmodel_contracts.text_qa (v0.6.0) - one implementation, both engines.
 """
 from __future__ import annotations
 
 import re
 
-_STOP = {
-    "the", "and", "for", "with", "must", "shall", "should", "will", "would", "have", "has",
-    "this", "that", "these", "those", "from", "into", "your", "their", "them", "they",
-    "when", "what", "which", "keep", "make", "made", "need", "needs", "able", "about",
-    "over", "such", "than", "then", "them", "also", "only", "very", "more", "most",
-    "some", "any", "all", "each", "other", "there", "here", "where", "while", "being",
-    "been", "are", "was", "were", "not", "can", "could", "may", "might", "per", "via", "out", "off", "way", "easily", "easy",
-}
-
-
-def content_words(text: str) -> set[str]:
-    words = re.findall(r"[a-z0-9\-]+", text.lower())
-    return {w for w in words if len(w) > 2 and w not in _STOP}
-
-
-def _shared(a: set[str], b: set[str]) -> set[str]:
-    """Overlap with light stemming: 'predict' catches 'predictive'."""
-    out = set()
-    for w in a:
-        if w in b or any(len(w) >= 5 and (x.startswith(w) or w.startswith(x)) for x in b if len(x) >= 5):
-            out.add(w)
-    return out
+from vmodel_contracts.text_qa import (
+    content_words,
+    grounded_in,
+    is_solution_language,
+    names_technology,
+    shared_words as _shared,
+)
 
 
 def ground_assumptions(
@@ -95,43 +80,3 @@ def dedup_constraints(constraints: list[str], need_statements: list[str]) -> tup
         else:
             kept.append(c)
     return kept, dropped
-
-
-_SOLUTION_RE = re.compile(
-    r"\b(GET|POST|PUT|PATCH|DELETE)\s+/|\bHTTP\b|\b[1-5]\d\d\s+(Unauthorized|OK|Found|Error|Created)"
-    r"|/api/|endpoint|json response|status code|\bSQL\b|database table|button|text field|click",
-    re.IGNORECASE,
-)
-
-# Run-5 audit: the model also invents NAMED TECHNOLOGIES ("AES-256") and whole
-# ARTIFACTS ("a portfolio of case studies") that were never said. A criterion is
-# an observable check on stakeholder language - not a design document.
-_TECH_RE = re.compile(
-    r"\b[A-Z]{2,}[-]?\d{2,}\b"  # AES-256, SHA256, RSA-2048, TLS1.3-style cipher/version names
-    r"|\b(oauth|jwt|bcrypt|scrypt|argon2|saml|openid|postgres(?:ql)?|mysql|mongodb|redis|kafka|"
-    r"rabbitmq|kubernetes|docker|graphql|grpc|websocket|elasticsearch|spark|hadoop|snowflake)\b",
-    re.IGNORECASE,
-)
-
-
-def names_technology(text: str) -> bool:
-    """True when a criterion names a specific technology/algorithm instead of
-    an observable property ('encrypted' is a check; 'AES-256' is a design)."""
-    return bool(_TECH_RE.search(text))
-
-
-def is_solution_language(text: str) -> bool:
-    """True when a 'machine-checkable criterion' names an implementation
-    (endpoint, status code, UI widget) instead of observable behavior."""
-    return bool(_SOLUTION_RE.search(text)) or names_technology(text)
-
-
-def grounded_in(text: str, source_texts: list[str]) -> bool:
-    """True when the text shares at least one content word with the founder's
-    own language. Invented details ('portfolio of completed projects') share
-    none - that is the tell."""
-    sw = content_words(text)
-    if not sw:
-        return True  # nothing to ground - too generic to flag
-    src = content_words(" ".join(source_texts))
-    return bool(_shared(sw, src))
