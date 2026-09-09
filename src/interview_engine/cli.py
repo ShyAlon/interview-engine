@@ -82,6 +82,9 @@ def render_intent_markdown(intent: IntentModel) -> str:
     elif intent.assumptions:
         lines += ["\n## Assumptions (asserted by you - validated later, not built)",
                   *[f"- {a}" for a in intent.assumptions]]
+    if intent.glossary:
+        lines += ["\n## Glossary (your terms, as you used them)",
+                  *[f"- **{t}** - {m}" for t, m in intent.glossary.items()]]
     if intent.done_criteria:
         lines += ["\n## Done criteria (your acceptance conditions - checked at delivery, not built as needs)",
                   *[f"- {d}" for d in intent.done_criteria]]
@@ -93,6 +96,27 @@ def render_intent_markdown(intent: IntentModel) -> str:
     lines += ["\n---",
               "_Approving intent (needs + scope). Verifiable requirements - shall-statements, "
               "functional and non-functional - are derived from this in the spec-generator stage._"]
+    return "\n".join(lines)
+
+
+def render_coverage_markdown(coverage: dict[str, str]) -> str:
+    """The interview's coverage map for the approval gate (ADR-0016) - honest
+    about what was covered, skipped by the founder, or left thin."""
+    if not coverage:
+        return ""
+    from .coverage import AREA_KEYS, _LABELS
+    groups = {"covered": [], "thin": [], "skipped": [], "uncovered": []}
+    for k in AREA_KEYS:
+        groups.get(coverage.get(k, "uncovered"), groups["uncovered"]).append(_LABELS[k])
+    lines = ["\n## Interview coverage"]
+    if groups["covered"]:
+        lines.append("**Covered:** " + "; ".join(groups["covered"]))
+    if groups["thin"]:
+        lines.append("**Thin (mentioned, not concrete):** " + "; ".join(groups["thin"]))
+    if groups["skipped"]:
+        lines.append("**Skipped by you:** " + "; ".join(groups["skipped"]))
+    if groups["uncovered"]:
+        lines.append("**Not covered:** " + "; ".join(groups["uncovered"]))
     return "\n".join(lines)
 
 
@@ -161,7 +185,9 @@ def main() -> None:
         current = None
         idea = " ".join(args.idea) or input("Describe your product idea: ")
         print(f"session: {session}", file=sys.stderr)
-        print(f"(if anything crashes, resume with: python -m interview_engine.cli --session {session})\n",
+        print(f"(if anything crashes, resume with: python -m interview_engine.cli --session {session})",
+              file=sys.stderr)
+        print("(interview controls: 'skip' = skip this area, 'enough' = end the interview)\n",
               file=sys.stderr)
         submission = IntakeSubmission(
             free_text=idea, founder_id="cli-founder", submission_id=session
@@ -213,6 +239,7 @@ def main() -> None:
         ) from e
     (outdir / "intent_model.json").write_text(intent.model_dump_json(indent=2))
     md = render_intent_markdown(intent)
+    md += "\n" + render_coverage_markdown(result.get("coverage") or {})
     preview = result.get("requirement_preview") or []
     if preview:
         (outdir / "requirement_preview.json").write_text(json.dumps(preview, indent=2))

@@ -1,0 +1,100 @@
+"""The coverage model (ADR-0016): the interview aims at a fixed checklist of
+elicitation areas instead of drifting by turn count. The interviewer (option a)
+self-reports what each founder answer covered in its structured reply; the
+concrete-answers-only rule in the prompt keeps self-grading honest, and the
+distillation-side mechanical guards (ADR-0015) catch optimism downstream.
+
+Founder control, detected deterministically in the CLI/graph: "skip" marks the
+current target area skipped (never re-asked), "enough" ends the interview.
+Saturation ending: complete when every area is covered or skipped.
+"""
+from __future__ import annotations
+
+import re
+
+# (key, human label, what "concrete" means for closing it) - order is priority.
+AREAS = [
+    ("goal", "goal & core value", "the problem and who hurts, in a sentence"),
+    ("users", "users & stakeholder classes", "primary users plus at least one other class (admins, support, integrators, regulators)"),
+    ("flows", "core flows", "the 1-3 things a user actually does, end to end"),
+    ("data", "data model & sources", "what data, where it lives, who owns it"),
+    ("integrations", "integrations", "named systems/APIs, not categories"),
+    ("nfrs", "quantified NFRs", "NUMBERS: users, volume, latency/freshness fail-point, uptime - 'strict security' is thin"),
+    ("failures", "failure modes", "what breaks, what degrades, what must never happen"),
+    ("constraints", "constraints", "budget, mandated stack, deadlines, team"),
+    ("risks", "risks", "what assumption kills the product if wrong"),
+    ("done", "done criteria", "how the founder will know it works"),
+    ("glossary", "glossary", "the founder's domain terms pinned to their meanings"),
+]
+AREA_KEYS = [k for k, _, _ in AREAS]
+_LABELS = {k: label for k, label, _ in AREAS}
+
+UNCOVERED, THIN, COVERED, SKIPPED = "uncovered", "thin", "covered", "skipped"
+_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x"}
+
+
+def initial_coverage() -> dict[str, str]:
+    return {k: UNCOVERED for k in AREA_KEYS}
+
+
+def next_area(coverage: dict[str, str]) -> str | None:
+    """The weakest area in priority order: uncovered first, then thin."""
+    for want in (UNCOVERED, THIN):
+        for k in AREA_KEYS:
+            if coverage.get(k) == want:
+                return k
+    return None
+
+
+def status_block(coverage: dict[str, str]) -> str:
+    """Compact per-turn coverage status for the interviewer system prompt."""
+    marks = " ".join(f"{k}={_MARK[coverage.get(k, UNCOVERED)]}" for k in AREA_KEYS)
+    nxt = next_area(coverage)
+    legend = "+ covered, ~ thin (mushy - needs concretes), - uncovered, x skipped by founder"
+    block = f"COVERAGE [{marks}]  ({legend})"
+    if nxt:
+        label, concretes = next(((l, c) for k, l, c in AREAS if k == nxt))
+        block += f"\nNEXT TARGET: {label} - closed only by: {concretes}."
+    else:
+        block += "\nAll areas covered or skipped - close the interview (complete=true)."
+    return block
+
+
+def progress_line(coverage: dict[str, str]) -> str:
+    done = [k for k in AREA_KEYS if coverage.get(k) in (COVERED, SKIPPED)]
+    nxt = next_area(coverage)
+    line = f"coverage {len(done)}/{len(AREA_KEYS)} ({', '.join(done) or 'none yet'})"
+    return line + (f" - next: {_LABELS[nxt]}" if nxt else " - saturated")
+
+
+def apply_reply(coverage: dict[str, str], parsed: dict) -> dict[str, str]:
+    """Fold the interviewer's self-reported statuses into the map. The model
+    can only improve or skip an area, never un-cover one."""
+    out = dict(coverage)
+    for k in parsed.get("covered") or []:
+        if k in out:
+            out[k] = COVERED
+    for k in parsed.get("thin") or []:
+        if k in out and out[k] != COVERED:
+            out[k] = THIN
+    for k in parsed.get("skipped") or []:
+        if k in out and out[k] != COVERED:
+            out[k] = SKIPPED
+    return out
+
+
+_SKIP_RE = re.compile(r"^\s*(skip|pass)( this| it)?\s*[.!]?\s*$", re.IGNORECASE)
+_ENOUGH_RE = re.compile(
+    r"^\s*(enough|that'?s enough|wrap ?up|let'?s wrap|finish|done here|"
+    r"move to (the )?(spec|distill)|end( the)? interview)\s*[.!]?\s*$", re.IGNORECASE)
+
+
+def founder_control(text: str) -> str | None:
+    """'skip' -> skip the current target area; 'enough' -> end the interview.
+    Deliberately strict: a sentence merely CONTAINING 'skip' is not a command."""
+    t = text.strip()
+    if _SKIP_RE.match(t):
+        return "skip"
+    if _ENOUGH_RE.match(t):
+        return "enough"
+    return None

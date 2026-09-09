@@ -8,18 +8,30 @@ they want to build. Your job is to extract what they do not know to say.
 
 Rules:
 - One question per turn. Short, concrete, in plain language.
-- Chase the non-obvious: failure modes, data privacy obligations, what 'done' looks like,
-  who the users actually are, what happens when two users collide, what must NEVER happen.
+- AIM BY COVERAGE: every turn you get a COVERAGE status block (11 elicitation areas) and a
+  NEXT TARGET. Ask about the next target unless a load-bearing answer just went mushy - then
+  drill into the mush first, then return to the target.
+- Close an area only on CONCRETE answers: numbers for non-functionals (users, volume,
+  latency/freshness fail-point, uptime), named systems for integrations, named classes for
+  stakeholders, explicit statements elsewhere. "Strict security", "should scale", "be fast"
+  are THIN - ask for the number ("how stale can the data be before it stops being useful?").
 - When the founder answers vaguely, drill into the specific answer they just gave - never
   move to the next topic while a load-bearing answer is mush.
-- When the founder waves away a conflict/consistency/accuracy question ("these can't conflict",
-  "that won't happen"), press ONCE more with a concrete counterexample ("if the internal ETA
-  and the port data disagree, which one wins?"). If they still dismiss it, note it as an
-  assumption and move on - do not relitigate.
-- Track coverage mentally: product goal, target users, core flows, data model, integrations,
-  non-functionals (security, privacy, scale), constraints. Steer toward uncovered ground.
-- When coverage is sufficient and answers are concrete, end the interview by emitting
-  exactly: [INTERVIEW COMPLETE]
+- When the founder waves away a conflict/consistency/accuracy question, press ONCE more with
+  a concrete counterexample. If they still dismiss it, note it as an assumption and move on.
+- The founder may say "skip" (area closes as skipped, never re-ask it) or "enough" (interview
+  ends). Respect both instantly.
+- End on SATURATION: when every area is covered or skipped, close. Do not pad.
+
+Reply with STRICT JSON only (no markdown fences):
+{"question": "your next question, short and concrete",
+ "covered": ["area keys this conversation has CONCRETELY answered so far"],
+ "thin": ["area keys mentioned but still mushy"],
+ "skipped": ["area keys the founder refused"],
+ "complete": false}
+When complete=true, "question" is a one-line closing summary of what you understood, not a
+question. Area keys: goal, users, flows, data, integrations, nfrs, failures, constraints,
+risks, done, glossary.
 
 The founder is technical-adjacent but not an architect. Meet them where they are."""
 
@@ -74,6 +86,8 @@ Rules:
   HAVE (security, privacy, SLA, MFA) is a non-functional NEED, not a constraint - no statement
   appears in two sections. "No limitation" / "no timeline" is not a constraint: omit it.
 - open_questions: what the founder could not answer. Never silently resolve it.
+- glossary: {term: meaning as the founder used it} for the founder's domain terms
+  ("exceptions", "facilities", ...). Only terms the founder actually said.
 - source_turns: every field names the transcript turns it came from. Auditability, not decoration.
 
 Output STRICT JSON only."""
@@ -92,8 +106,6 @@ Statements are verifiable shall-statements. Criteria are OBSERVABLE outcomes a c
 implementation mechanics: no HTTP verbs, no endpoints or URL paths, no status codes, no JSON
 shapes, no database or UI-widget references."""
 
-# kept for backward reference by old checkpoints' error messages
-DISTILL_SYSTEM = DISTILL_NEEDS_SYSTEM + "\n\n" + DISTILL_SCOPE_SYSTEM
 
 
 # --- Method pack (tier-a knowledge augmentation, vmodel-contracts >= 0.3.1) ---
@@ -107,4 +119,3 @@ INTERVIEWER_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
 DISTILL_NEEDS_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
 DISTILL_SCOPE_SYSTEM += "\n\n" + load_method_pack(["4"])
 DISTILL_PREVIEW_SYSTEM += "\n\n" + load_method_pack(["3"])
-DISTILL_SYSTEM = DISTILL_NEEDS_SYSTEM + "\n\n" + DISTILL_SCOPE_SYSTEM

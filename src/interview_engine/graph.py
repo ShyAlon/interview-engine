@@ -22,8 +22,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
-from .progress import ProgressBus, track
-from .prompts import DISTILL_SYSTEM, INTERVIEWER_SYSTEM
+from .coverage import (apply_reply, founder_control, initial_coverage, next_area,
+                         progress_line, status_block)
+from .progress import ProgressBus, ProgressEvent, track
+from .prompts import INTERVIEWER_SYSTEM
 from .telemetry import UsageLog
 
 
@@ -33,6 +35,8 @@ class InterviewState(TypedDict, total=False):
     verdict: dict             # ScopeVerdict as dict
     intent_model: dict        # IntentModel as dict, after distillation
     requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
+    coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
+    coverage_target: str      # the area the last question aimed at ("skip" applies to it)
     turn_count: int
 
 
@@ -64,13 +68,55 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         if last is not None and "[INTERVIEW COMPLETE]" in getattr(last, "content", ""):
             return {}  # marker already emitted: let routing reach distill without burning a call
 
+        coverage = dict(state.get("coverage") or initial_coverage())
         turn = state.get("turn_count", 0) + 1
+
+        # founder control (ADR-0016): deterministic, never costs a model call
+        control = founder_control(getattr(last, "content", "")) if last is not None else None
+        if control == "enough":
+            return {"messages": [AIMessage(content="Understood - wrapping up.\n\n[INTERVIEW COMPLETE]")],
+                    "coverage": coverage, "turn_count": turn}
+        if control == "skip":
+            target = state.get("coverage_target") or next_area(coverage)
+            if target:
+                coverage[target] = "skipped"
+
+        target = next_area(coverage)
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
             history = state["messages"]
-            resp = model_config.invoke_checked(probing_model, [SystemMessage(content=INTERVIEWER_SYSTEM), *history], "probing")
+            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage)
+            resp = model_config.invoke_checked(probing_model, [SystemMessage(content=system), *history], "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
                              (getattr(resp, "usage_metadata", None) or {}))
-        return {"messages": [resp], "turn_count": turn}
+
+        # structured reply (option a): {question, covered, thin, skipped, complete}.
+        # Parse failure degrades gracefully: the text is the question, coverage stands.
+        import json as _json
+        content = resp.content.strip().strip("`").removeprefix("json").strip()
+        question, complete = content, False
+        try:
+            parsed = _json.loads(content)
+            if isinstance(parsed, dict) and isinstance(parsed.get("question"), str):
+                coverage = apply_reply(coverage, parsed)
+                question = parsed["question"].strip()
+                complete = bool(parsed.get("complete"))
+            elif progress is not None:
+                import time as _t
+                progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
+                                            "unstructured reply - coverage not updated this turn"))
+        except _json.JSONDecodeError:
+            if progress is not None:
+                import time as _t
+                progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
+                                            "unstructured reply - coverage not updated this turn"))
+        if complete:
+            question += "\n\n[INTERVIEW COMPLETE]"
+        if progress is not None:
+            import time as _t
+            progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
+                                        progress_line(coverage)))
+        return {"messages": [AIMessage(content=question)], "coverage": coverage,
+                "coverage_target": target or "", "turn_count": turn}
 
     def route_interview(state: InterviewState) -> str:
         last = state["messages"][-1]
@@ -169,7 +215,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             from vmodel_contracts import ScopeExclusion
             exclusions = [ScopeExclusion.model_validate(x).model_dump(mode="json")
                           for x in (data.get("scope_exclusions") or [])]
-            keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "source_turns")
+            keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "glossary", "source_turns")
             out = {k: data.get(k) for k in keep}
             out["scope_exclusions"] = exclusions
             return out

@@ -72,12 +72,9 @@ def test_ollama_connection_refused_is_friendly():
 
 
 def test_ollama_model_not_pulled_is_friendly():
-    from openai import NotFoundError
-
     from interview_engine.errors import translate_llm_error
 
-    exc = NotFoundError("model 'qwen2.5-coder:7b' not found", response=None, body=None) \
-        if False else type("NotFoundError", (Exception,), {})("404 model not found")
+    exc = type("NotFoundError", (Exception,), {})("404 model not found")
     # name-based mapping: synthesize with the real class name
     exc.__class__.__name__ = "NotFoundError"
     e = translate_llm_error(exc, "probing", "ollama", "qwen2.5-coder:7b", "http://localhost:11434/v1")

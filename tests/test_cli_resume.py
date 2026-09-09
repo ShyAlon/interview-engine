@@ -22,12 +22,6 @@ SCOPE_REPLY = {
 PREVIEW_REPLY = [{"need_id": "SN-1", "kind": "functional",
                   "statement": "The system shall emit a spec.", "example_criterion": "spec file exists"}]
 
-INTENT = {
-    "session_id": "s",
-    "stakeholder_needs": NEEDS_REPLY["stakeholder_needs"],
-    "assumptions": [],
-    **SCOPE_REPLY,
-}
 
 
 class FakeModel:
