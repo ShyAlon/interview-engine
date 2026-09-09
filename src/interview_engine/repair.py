@@ -96,3 +96,42 @@ def normalize_enums(data: dict, model_cls) -> dict:
             fixed_items.append(item)
         out[name] = fixed_items
     return out
+
+
+
+def extract_json_value(text: str) -> str:
+    """Tolerant extraction (run-6, same doctrine as spec-generator): strip
+    fences, else cut the first balanced {...} or [...] out of prose with a
+    string-aware scan. Raises ValueError when nothing balanced exists (e.g.
+    truncated output)."""
+    import json as _j
+
+    candidate = text.strip().strip("`").removeprefix("json").strip()
+    try:
+        _j.loads(candidate)
+        return candidate
+    except _j.JSONDecodeError:
+        pass
+    starts = [(text.find(o), o, c) for o, c in (("{", "}"), ("[", "]")) if text.find(o) >= 0]
+    for start, open_c, close_c in sorted(starts):
+        depth = 0
+        in_str = esc = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == open_c:
+                depth += 1
+            elif c == close_c:
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+    raise ValueError("no balanced JSON value found in the model output")

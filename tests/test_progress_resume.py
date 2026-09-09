@@ -346,3 +346,40 @@ def test_preview_markdown_in_approval_gate():
     md = render_preview_markdown(PREVIEW_REPLY)
     assert "SN-1 -> R-p1" in md and "spec-generator" in md
     assert render_preview_markdown([]) == ""
+
+
+def test_extract_json_value_shapes():
+    from interview_engine.repair import extract_json_value
+    assert extract_json_value('{"a": 1}') == '{"a": 1}'
+    assert extract_json_value('```json\n{"a": 1}\n```') == '{"a": 1}'
+    assert json.loads(extract_json_value('Sure! Result:\n{"a": {"b": [1]}}\nDone')) == {"a": {"b": [1]}}
+    assert json.loads(extract_json_value('Output: [1, {"x": "y"}] end')) == [1, {"x": "y"}]
+    assert json.loads(extract_json_value('{"s": "a } brace {"}')) == {"s": "a } brace {"}
+    with pytest.raises(ValueError):
+        extract_json_value('{"a": {"b": [1, 2')  # truncated
+
+
+def test_distill_recovers_from_prose_wrapped_json(fake_models):
+    """Run-6: a transient invalid-JSON flake auto-retries once with feedback -
+    no human, no lost run (his spec-generator 'tests' failure, same class)."""
+    fake_models["distillation"] = FakeModel([
+        "Sure, let me help! Here is your needs JSON: (no actual json)",
+        json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)])
+    events = []
+    bus = ProgressBus()
+    bus.subscribe(events.append)
+    g = build_graph(UsageLog("s"), checkpointer=None, progress=bus)
+    r = run_one_turn(g, {"configurable": {"thread_id": "flake1"}})
+    assert "intent_model" in r
+    assert any("not valid JSON - retrying once" in (e.detail or "") for e in events)
+
+
+def test_distill_persistent_garbage_friendly_error_with_snippet(fake_models):
+    from interview_engine.errors import UserFacingError
+    fake_models["distillation"] = FakeModel(["no json here at all", "still no json"])
+    g = build_graph(UsageLog("s"), checkpointer=None, progress=ProgressBus())
+    with pytest.raises(UserFacingError) as ei:
+        run_one_turn(g, {"configurable": {"thread_id": "flake2"}})
+    rendered = ei.value.render()
+    assert "automatic retry did not fix it" in rendered
+    assert "still no json" in rendered

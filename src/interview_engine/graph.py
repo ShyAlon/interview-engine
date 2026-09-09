@@ -177,12 +177,19 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from .errors import UserFacingError, translate_json_error
         from .progress import ProgressEvent
         from .prompts import DISTILL_NEEDS_SYSTEM, DISTILL_PREVIEW_SYSTEM, DISTILL_SCOPE_SYSTEM
-        from .repair import coerce_for_model, normalize_enums
+        from .repair import coerce_for_model, extract_json_value, normalize_enums
 
         transcript = "\n".join(
             f"[{i}] {getattr(m, 'type', '?')}: {getattr(m, 'content', '')}"
             for i, m in enumerate(state["messages"])
         )
+
+        class _ParseFailure(Exception):
+            """Model output was not valid JSON; carries the raw text for diagnosis."""
+
+            def __init__(self, raw: str, err: Exception):
+                self.raw, self.err = raw, err
+                super().__init__(str(err))
 
         def _call(system: str, extra: str, feedback: str | None = None):
             messages = [SystemMessage(content=system + "\n\n" + extra)]
@@ -193,7 +200,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             usage_log.record("distillation", model_config.for_stage("distillation").provider,
                              model_config.for_stage("distillation").model,
                              (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
-            return resp, _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
+            try:
+                return resp, _json.loads(extract_json_value(resp.content))
+            except (_json.JSONDecodeError, ValueError) as e:
+                raise _ParseFailure(resp.content, e) from e
 
         def _phase(stage, label, detail, system, extra, validate):
             """One LLM phase: call -> repair -> validate -> ONE retry with the error as feedback."""
@@ -206,8 +216,23 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         if not isinstance(data, dict):
                             raise ValueError(f"expected a JSON object, got {type(data).__name__}")
                         return validate(coerce_for_model(data, IntentModel))
-                    except _json.JSONDecodeError as e:
-                        raise translate_json_error(e, stage) from e
+                    except _ParseFailure as e:
+                        last_err = e
+                        if attempt == 2:
+                            snippet = e.raw.strip()[:200].replace("\n", " ")
+                            raise UserFacingError(
+                                f"distillation phase '{label}' produced output that is not valid JSON (an automatic retry did not fix it).",
+                                f"smaller/local models wrap JSON in prose or truncate. Raw output began: {snippet!r}",
+                                "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model: "
+                                "INTERVIEW_ENGINE_MODEL_DISTILLATION=...",
+                            ) from e
+                        if progress is not None:
+                            import time as _t
+                            progress.emit(ProgressEvent(stage, label, "started", _t.time(), None,
+                                                        "model output was not valid JSON - retrying once with feedback"))
+                        fb = ("Your previous reply was not valid JSON (prose-wrapped, unbalanced, or truncated). "
+                              "Return ONLY the complete JSON payload, no prose, no commentary, balanced to the end.")
+                        continue
                     except (ValidationError, ValueError, KeyError, TypeError) as e:
                         last_err = e
                         if attempt == 2:
