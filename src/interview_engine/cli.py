@@ -282,6 +282,9 @@ def main() -> None:
     if preview:
         (outdir / "requirement_preview.json").write_text(json.dumps(preview, indent=2))
         md += "\n" + render_preview_markdown(preview)
+    warnings = result.get("distill_warnings") or []
+    if warnings:
+        md += "\n## Warnings to confirm\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
     (outdir / "intent_model.md").write_text(md)
 
     # The review gate: cheapest place to catch a misunderstanding (scoping doc, step 2).

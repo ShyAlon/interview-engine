@@ -80,3 +80,29 @@ def dedup_constraints(constraints: list[str], need_statements: list[str]) -> tup
         else:
             kept.append(c)
     return kept, dropped
+
+
+
+def verify_tech_preferences(prefs: list[dict]) -> tuple[list[dict], list[str], list[str]]:
+    """ADR-0019 'open but verified': every ecosystem preference must (1) carry
+    source_turns (founder actually said it - ungrounded is DROPPED, same rule
+    as assumptions) and (2) name a recognized ecosystem for its area -
+    unrecognized names are KEPT but warned (niche-but-real exists), so the
+    founder sees the warning at the approval gate and confirms or corrects."""
+    from vmodel_contracts import text_qa
+
+    kept, dropped, warnings = [], [], []
+    for pref in prefs:
+        if not isinstance(pref, dict):
+            dropped.append(str(pref)[:60])
+            continue
+        if not pref.get("source_turns"):
+            dropped.append(f"{pref.get('area', '?')}: {pref.get('preference', '?')[:50]} (no source turns)")
+            continue
+        kept.append(pref)
+        area = str(pref.get("area", ""))
+        if not text_qa.ecosystem_recognized(area, str(pref.get("preference", ""))):
+            warnings.append(
+                f"technology preference '{pref.get('preference')}' ({area}) is not a recognized "
+                f"ecosystem name - confirm the founder meant it before approving")
+    return kept, dropped, warnings

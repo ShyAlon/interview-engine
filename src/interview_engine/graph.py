@@ -36,6 +36,7 @@ class InterviewState(TypedDict, total=False):
     submission: dict          # IntakeSubmission as dict
     verdict: dict             # ScopeVerdict as dict
     intent_model: dict        # IntentModel as dict, after distillation
+    distill_warnings: list[str]  # non-blocking flags for the approval gate (e.g. unrecognized ecosystem name)
     requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
     coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
     coverage_target: str      # the area the last question aimed at ("skip" applies to it)
@@ -355,6 +356,21 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     progress.emit(ProgressEvent("distill_validate", "Dropped duplicate constraint",
                                                 "completed", _t2.time(), 0.0,
                                                 d[:70] + " (already a classified need)"))
+            from .distill_qa import verify_tech_preferences
+
+            tprefs, dropped_tp, warnings_tp = verify_tech_preferences(parts.get("tech_preferences") or [])
+            parts["tech_preferences"] = tprefs
+            for tp in tprefs:  # dual form: the flat constraints list carries them too (ADR-0019)
+                rendered = f"{tp.get('area', 'technology')}: {tp.get('preference')} (founder, {tp.get('strength', 'preferred')})"
+                if rendered not in parts["constraints"]:
+                    parts["constraints"].append(rendered)
+            if progress is not None:
+                for d in dropped_tp:
+                    progress.emit(ProgressEvent("distill_validate", "Dropped ungrounded tech preference",
+                                                "completed", _t2.time(), 0.0, d))
+                for w in warnings_tp:
+                    progress.emit(ProgressEvent("distill_validate", "Unrecognized ecosystem name",
+                                                "completed", _t2.time(), 0.0, w))
             if (state.get("coverage") or {}).get("glossary") == "covered" and not parts.get("glossary"):
                 import time as _t3
                 if progress is not None:
@@ -374,7 +390,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     f"validation detail: {detail}",
                     "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model.",
                 ) from e
-        return {"intent_model": intent.model_dump(mode="json"), "requirement_preview": preview}
+        return {"intent_model": intent.model_dump(mode="json"), "requirement_preview": preview,
+                "distill_warnings": warnings_tp}
 
     g = StateGraph(InterviewState)
     g.add_node("scope_gate", node_scope_gate)

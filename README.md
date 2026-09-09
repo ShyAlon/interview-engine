@@ -70,6 +70,16 @@ Artifacts land in `out/<session>/`: `intent_model.json`, `intent_model.md`,
 Imports `vmodel-contracts` (pinned release) and nothing from sibling modules.
 Output crosses to `spec-generator` only as an `IntentModel` payload.
 
+## Technology preferences (ADR-0019)
+
+The interview asks openly about technology constraints (language/ecosystem,
+cloud affinity - "agnostic" is recorded as an answer, not silence). Stated
+preferences land in the intent model as `tech_preferences` with transcript
+provenance; ungrounded ones are dropped, unrecognized ecosystem names are kept
+but flagged at the approval gate. They confine the architecture stage in
+spec-generator - the SRS stays solution-agnostic. Cloud is captured, never
+forced: it binds only when the founder explicitly mandates it.
+
 ## Model size
 
 `qwen2.5-coder:14b` is the standing default - proven on a 16GB M4 with

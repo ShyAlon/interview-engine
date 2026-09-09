@@ -61,7 +61,7 @@ Output STRICT JSON only."""
 
 DISTILL_SCOPE_SYSTEM = """From this interview transcript, extract the framing fields of the intent
 model (JSON): problem_statement, target_users[], core_value_proposition, in_scope[], out_of_scope[],
-external_integrations[], constraints[], open_questions[], source_turns{field: [turn indexes]}.
+external_integrations[], constraints[], open_questions[], tech_preferences[], source_turns{field: [turn indexes]}.
 
 Rules:
 - in_scope / out_of_scope are the scope BOUNDARY (what the system will and will not do).
@@ -79,6 +79,11 @@ Rules:
   HAVE (security, privacy, SLA, MFA) is a non-functional NEED, not a constraint - no statement
   appears in two sections. "No limitation" / "no timeline" is not a constraint: omit it.
 - open_questions: what the founder could not answer. Never silently resolve it.
+- tech_preferences[]: objects {area, preference, strength, source_turns[]} - technology, ecosystem, or
+  cloud preferences the founder STATED (area: language | framework | cloud | database | infrastructure).
+  strength=required ONLY when the founder mandated it ("must be", "we are locked into"); affinity and
+  "we'd rather" are preferred. "Agnostic" / "no preference" IS an answer: record it (preferred), never
+  treat it as silence. Never infer a preference the founder did not state in the transcript.
 - glossary: {term: meaning as the founder used it} for the founder's domain terms
   ("exceptions", "facilities", ...). Only terms the founder actually said.
 - source_turns: every field names the transcript turns it came from. Auditability, not decoration.

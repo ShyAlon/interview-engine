@@ -94,3 +94,31 @@ def test_renderer_new_sections():
     md = render_intent_markdown(intent)
     assert "vendors are always honest (turn 7)" in md
     assert "Done criteria" in md and "Operational concepts" in md
+
+
+def test_verify_tech_preferences_grounded_recognized():
+    from interview_engine.distill_qa import verify_tech_preferences
+    kept, dropped, warnings = verify_tech_preferences([
+        {"area": "language", "preference": "python", "strength": "required", "source_turns": [4]}])
+    assert len(kept) == 1 and not dropped and not warnings
+
+
+def test_verify_tech_preferences_ungrounded_dropped():
+    from interview_engine.distill_qa import verify_tech_preferences
+    kept, dropped, _ = verify_tech_preferences([
+        {"area": "cloud", "preference": "AWS", "strength": "preferred", "source_turns": []}])
+    assert not kept and len(dropped) == 1 and "no source turns" in dropped[0]
+
+
+def test_verify_tech_preferences_unrecognized_warned_but_kept():
+    from interview_engine.distill_qa import verify_tech_preferences
+    kept, _, warnings = verify_tech_preferences([
+        {"area": "cloud", "preference": "zorbacloud", "strength": "preferred", "source_turns": [2]}])
+    assert len(kept) == 1  # niche-but-real exists: keep, warn
+    assert warnings and "not a recognized" in warnings[0]
+
+
+def test_agnostic_is_an_answer_not_silence():
+    from vmodel_contracts import TechPreference
+    tp = TechPreference(area="language", preference="agnostic", strength="preferred", source_turns=[1])
+    assert tp.preference == "agnostic"

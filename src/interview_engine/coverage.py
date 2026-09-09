@@ -21,7 +21,7 @@ AREAS = [
     ("integrations", "integrations", "named systems/APIs, not categories"),
     ("nfrs", "quantified NFRs", "NUMBERS: users, volume, latency/freshness fail-point, uptime - 'strict security' is thin"),
     ("failures", "failure modes", "what breaks, what degrades, what must never happen"),
-    ("constraints", "constraints", "budget, mandated stack, deadlines, team"),
+    ("constraints", "constraints", "budget, deadlines, team - and asked OPENLY: 'any technology constraints - language/ecosystem, cloud affinity?' ('agnostic' closes it too)"),
     ("risks", "risks", "what assumption kills the product if wrong"),
     ("done", "done criteria", "how the founder will know it works"),
     ("glossary", "glossary", "the founder's domain terms pinned to their meanings"),
