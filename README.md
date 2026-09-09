@@ -4,6 +4,8 @@ The adaptive systems-engineering interview: a founder's rough idea in, a
 versioned `IntentModel` out. **This stage is the moat** - the LLM budget is
 spent here on purpose (see ARCHITECTURE.md in `vmodel-spec-app`, ADR-0004).
 
+Pipeline map: [PROCESS.md in the meta repo](https://github.com/ShyAlon/vmodel-spec-app/blob/main/docs/PROCESS.md) shows what each stage consumes and produces (and why stage 1 is "Formalizing", not "Extracting").
+
 ## What it does
 
 1. **Scope gate** (`scope_gate.py`) - web applications only. Deterministic

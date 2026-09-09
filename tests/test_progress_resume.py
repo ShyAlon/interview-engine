@@ -272,7 +272,7 @@ def test_needs_phase_fails_loudly_after_retry(fake_models):
     g = build_graph(UsageLog("t1"))
     with pytest.raises(UserFacingError) as ei:
         run_one_turn(g, {"configurable": {"thread_id": "pf"}})
-    assert "stakeholder needs" in ei.value.render().lower() or "Extracting stakeholder needs" in ei.value.render()
+    assert "interview-level needs" in ei.value.render().lower() or "Extracting interview-level needs" in ei.value.render()
 
 
 def test_legacy_flat_assumptions_dropped_as_ungrounded(fake_models):

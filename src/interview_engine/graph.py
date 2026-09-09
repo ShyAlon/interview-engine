@@ -290,7 +290,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             out["scope_exclusions"] = exclusions
             return out
 
-        parts = _phase("distill_needs", "Extracting stakeholder needs", "phase 1/4",
+        parts = _phase("distill_needs", "Extracting interview-level needs", "phase 1/4",
                        DISTILL_NEEDS_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_needs)
         _needs_glossary = parts.pop("_glossary", None)
         parts.update(_phase("distill_scope", "Building scope and framing", "phase 2/4",
