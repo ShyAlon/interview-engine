@@ -86,7 +86,8 @@ def apply_reply(coverage: dict[str, str], parsed: dict) -> dict[str, str]:
 _SKIP_RE = re.compile(r"^\s*(skip|pass)( this| it)?\s*[.!]?\s*$", re.IGNORECASE)
 _ENOUGH_RE = re.compile(
     r"^\s*(enough|that'?s enough|wrap ?up|let'?s wrap|finish|done here|"
-    r"move to (the )?(spec|distill)|end( the)? interview)\s*[.!]?\s*$", re.IGNORECASE)
+    r"move to (the )?(spec|distill)|end( the)? interview|end|stop|quit|exit)\s*[.!]?\s*$",
+    re.IGNORECASE)
 
 
 def founder_control(text: str) -> str | None:
@@ -97,4 +98,30 @@ def founder_control(text: str) -> str | None:
         return "skip"
     if _ENOUGH_RE.match(t):
         return "enough"
+    return None
+
+
+def extract_turn_json(text: str) -> dict | None:
+    """Tolerant structured-turn parse: whole-body JSON, fenced JSON, or the
+    first balanced {...} object embedded in prose. Returns None if no object
+    with a string 'question' is found."""
+    import json
+    candidate = text.strip().strip("`")
+    if candidate.startswith("json"):
+        candidate = candidate[4:].strip()
+    for attempt in (candidate, text):
+        try:
+            obj = json.loads(attempt)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("question"), str):
+            return obj
+    start = text.find("{")
+    if start >= 0:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text[start:])
+            if isinstance(obj, dict) and isinstance(obj.get("question"), str):
+                return obj
+        except ValueError:
+            pass
     return None

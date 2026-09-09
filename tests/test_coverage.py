@@ -138,12 +138,57 @@ def test_skip_marks_area_and_asks_next(monkeypatch):
 
 
 def test_unstructured_reply_degrades_gracefully(monkeypatch):
-    probing = FakeModel(["Just a plain question?"])
+    class AlwaysProse:
+        calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return AIMessage(content="Just a plain question?")
+
+    probing = AlwaysProse()
     fake_models(monkeypatch, probing)
     g = build_graph(UsageLog("t1"))
     r = start(g)
+    assert probing.calls == 2  # one retry with format feedback, then degrade
     assert r["messages"][-1].content == "Just a plain question?"
     assert all(v == "uncovered" for v in r["coverage"].values())
+
+
+def test_retry_with_feedback_recovers_structured_turn(monkeypatch):
+    probing = FakeModel(["Here you go, some prose first",
+                         structured("Who else touches this?", covered=["goal"])])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    r = start(g)
+    assert r["coverage"]["goal"] == "covered"          # retry recovered the turn
+    assert r["messages"][-1].content == "Who else touches this?"
+
+
+def test_prose_wrapped_json_is_tolerated(monkeypatch):
+    probing = FakeModel(['Sure! {"question": "Risks?", "covered": ["goal"], "complete": false} done.'])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    r = start(g)
+    assert r["coverage"]["goal"] == "covered"
+    assert r["messages"][-1].content == "Risks?"
+
+
+def test_saturation_guard_blocks_premature_complete(monkeypatch):
+    # run-4 audit: complete=true with 0/11 covered must NOT end the interview
+    probing = FakeModel([structured("Closing summary.", covered=["goal"], complete=True)])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    r = start(g)
+    assert "[INTERVIEW COMPLETE]" not in r["messages"][-1].content
+    assert r["coverage"]["goal"] == "covered"
+
+
+def test_marker_turn_skips_parse_and_retry(monkeypatch):
+    probing = FakeModel(["[INTERVIEW COMPLETE]"])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    r = start(g)
+    assert probing.calls == 1
 
 
 def test_coverage_map_render():
@@ -154,3 +199,44 @@ def test_coverage_map_render():
     assert "Skipped by you:** users & stakeholder classes" in md
     assert "Thin" in md and "quantified NFRs" in md
     assert "Not covered:" in md
+
+
+# --- run-4 regression: scope drift crash + truncated error ---
+
+def test_scope_dict_items_coerced_to_strings(monkeypatch):
+    """Run-4 crash: the model blended scope_exclusions' shape into out_of_scope
+    ({item, explicit} dicts). Coercion must turn them back into strings."""
+    import json as j
+    from langchain_core.messages import HumanMessage
+    scope = dict(SCOPE, out_of_scope=[{"item": "precise algorithms", "explicit": True},
+                                      {"item": "mobile app", "explicit": False}])
+    distills = [j.dumps(NEEDS), j.dumps(scope), "[]"]
+    probing = FakeModel(["[INTERVIEW COMPLETE]"])
+    monkeypatch.setattr(model_config, "build_chat_model",
+                        lambda stage: probing if stage == "probing"
+                        else FakeModel(distills) if stage == "distillation"
+                        else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
+    g = build_graph(UsageLog("t1"))
+    r = start(g, thread="r4")
+    from vmodel_contracts import IntentModel
+    intent = IntentModel.model_validate(r["intent_model"])
+    assert intent.out_of_scope == ["precise algorithms", "mobile app"]
+
+
+def test_validation_error_detail_not_truncated(monkeypatch):
+    """Run-4: the phase-4 error was cut mid-sentence ('out_of_scope.1 Input should be')."""
+    import json as j
+    bad_needs = dict(NEEDS, stakeholder_needs=[{k: v for k, v in NEEDS["stakeholder_needs"][0].items() if k != "need_id"}])
+    probing = FakeModel(["[INTERVIEW COMPLETE]"])
+    # both needs attempts return the same broken payload (retry fails too)
+    distills = [j.dumps(bad_needs), j.dumps(bad_needs)]
+    monkeypatch.setattr(model_config, "build_chat_model",
+                        lambda stage: probing if stage == "probing"
+                        else FakeModel(list(distills)) if stage == "distillation"
+                        else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
+    from interview_engine.errors import UserFacingError
+    g = build_graph(UsageLog("t1"))
+    with pytest.raises(UserFacingError) as ei:
+        start(g, thread="r4e")
+    msg = ei.value.render()
+    assert "need_id" in msg and "Field required" in msg

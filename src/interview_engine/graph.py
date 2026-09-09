@@ -22,10 +22,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
-from .coverage import (apply_reply, founder_control, initial_coverage, next_area,
-                         progress_line, status_block)
+from .coverage import (apply_reply, extract_turn_json, founder_control, initial_coverage,
+                         next_area, progress_line, status_block)
 from .progress import ProgressBus, ProgressEvent, track
-from .prompts import INTERVIEWER_SYSTEM
+from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
 from .telemetry import UsageLog
 
 
@@ -62,7 +62,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return "interview_turn" if state["verdict"]["accepted"] else END
 
     def node_interview_turn(state: InterviewState) -> dict:
-        from langchain_core.messages import AIMessage, SystemMessage
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
         last = state["messages"][-1] if state.get("messages") else None
         if last is not None and "[INTERVIEW COMPLETE]" in getattr(last, "content", ""):
@@ -84,31 +84,48 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         target = next_area(coverage)
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
             history = state["messages"]
-            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage)
+            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + "\n\n" + STRUCTURED_TURN_FORMAT
             resp = model_config.invoke_checked(probing_model, [SystemMessage(content=system), *history], "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
                              (getattr(resp, "usage_metadata", None) or {}))
 
         # structured reply (option a): {question, covered, thin, skipped, complete}.
-        # Parse failure degrades gracefully: the text is the question, coverage stands.
-        import json as _json
-        content = resp.content.strip().strip("`").removeprefix("json").strip()
-        question, complete = content, False
-        try:
-            parsed = _json.loads(content)
-            if isinstance(parsed, dict) and isinstance(parsed.get("question"), str):
-                coverage = apply_reply(coverage, parsed)
-                question = parsed["question"].strip()
-                complete = bool(parsed.get("complete"))
-            elif progress is not None:
-                import time as _t
-                progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
-                                            "unstructured reply - coverage not updated this turn"))
-        except _json.JSONDecodeError:
+        # Tolerant parse (fences/prose-wrapped JSON); on failure ONE retry with
+        # feedback, then graceful degrade (run-4: the 14B ignored the format).
+        import time as _t
+        # terminal plain-text marker (older checkpoints / models): no parse, no retry
+        if "[INTERVIEW COMPLETE]" in resp.content:
+            return {"messages": [AIMessage(content=resp.content)], "coverage": coverage,
+                    "coverage_target": target or "", "turn_count": turn}
+        parsed = extract_turn_json(resp.content)
+        if parsed is None:
             if progress is not None:
-                import time as _t
+                progress.emit(ProgressEvent("interview_turn", "Coverage", "started", _t.time(), None,
+                                            "unstructured reply - retrying with format feedback"))
+            retry_msgs = [SystemMessage(content=system), *history,
+                          AIMessage(content=resp.content),
+                          HumanMessage(content="Your reply was not valid JSON. Reply with ONLY the JSON object, "
+                                               "no prose: " + STRUCTURED_TURN_FORMAT)]
+            resp2 = model_config.invoke_checked(probing_model, retry_msgs, "probing")
+            usage_log.record("probing", model_config.for_stage("probing").provider,
+                             model_config.for_stage("probing").model,
+                             (getattr(resp2, "usage_metadata", None) or {}))
+            parsed = extract_turn_json(resp2.content)
+            if parsed is None and progress is not None:
                 progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
-                                            "unstructured reply - coverage not updated this turn"))
+                                            "still unstructured after retry - coverage not updated this turn"))
+        question, complete = resp.content, False
+        if parsed is not None:
+            coverage = apply_reply(coverage, parsed)
+            question = parsed["question"].strip()
+            # saturation guard (run-4 audit): the model may only declare the
+            # interview complete when the coverage map actually is saturated -
+            # self-grading cannot jump 0/11 -> done.
+            complete = bool(parsed.get("complete")) and next_area(coverage) is None
+            if parsed.get("complete") and not complete and progress is not None:
+                open_areas = sum(1 for v in coverage.values() if v in ("uncovered", "thin"))
+                progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
+                                            f"model tried to close with {open_areas} areas open - continuing"))
         if complete:
             question += "\n\n[INTERVIEW COMPLETE]"
         if progress is not None:
@@ -201,6 +218,19 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     "operational_concepts": [str(o) for o in (data.get("operational_concepts") or [])],
                     "assumptions": data.get("assumptions") or []}
 
+        def _as_str_list(v):
+            # run-4 drift: the model blends scope_exclusions' object shape into
+            # the flat lists. Coerce {item: ...} dicts to their item string.
+            out = []
+            for x in v or []:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict) and isinstance(x.get("item"), str):
+                    out.append(x["item"])
+                else:
+                    raise ValueError(f"scope list item must be a string, got {type(x).__name__}: {str(x)[:80]}")
+            return out
+
         def _valid_scope(data):
             required_str = ("problem_statement", "core_value_proposition")
             required_list = ("target_users", "in_scope", "out_of_scope")
@@ -210,6 +240,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for k in required_list:
                 if not isinstance(data.get(k), list):
                     raise ValueError(f"{k} must be a list")
+                data[k] = _as_str_list(data[k])
             if not data["out_of_scope"]:
                 raise ValueError("out_of_scope is empty - derive at least one exclusion from the conversation")
             from vmodel_contracts import ScopeExclusion
@@ -273,9 +304,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             try:
                 intent = IntentModel.model_validate(data)
             except ValidationError as e:
+                detail = "; ".join(
+                    f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']} (got {str(err.get('input'))[:60]})"
+                    for err in e.errors())[:1500]
                 raise UserFacingError(
                     "the assembled intent model fails the contract schema.",
-                    f"validation detail: {str(e)[:300]}",
+                    f"validation detail: {detail}",
                     "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model.",
                 ) from e
         return {"intent_model": intent.model_dump(mode="json"), "requirement_preview": preview}

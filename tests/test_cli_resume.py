@@ -29,9 +29,9 @@ class FakeModel:
         self.replies = list(replies)
 
     def invoke(self, messages):
-        if not self.replies:
-            raise AssertionError("model called more than expected")
-        return AIMessage(content=self.replies.pop(0))
+        # exhausted queue -> terminal marker (the structured-turn retry legitimately
+        # consumes one extra reply since the format-feedback retry, run-4 fix)
+        return AIMessage(content=self.replies.pop(0) if self.replies else "[INTERVIEW COMPLETE]")
 
 
 def run_cli_with_inputs(inputs, argv):

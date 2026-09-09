@@ -21,17 +21,10 @@ Rules:
   a concrete counterexample. If they still dismiss it, note it as an assumption and move on.
 - The founder may say "skip" (area closes as skipped, never re-ask it) or "enough" (interview
   ends). Respect both instantly.
-- End on SATURATION: when every area is covered or skipped, close. Do not pad.
-
-Reply with STRICT JSON only (no markdown fences):
-{"question": "your next question, short and concrete",
- "covered": ["area keys this conversation has CONCRETELY answered so far"],
- "thin": ["area keys mentioned but still mushy"],
- "skipped": ["area keys the founder refused"],
- "complete": false}
-When complete=true, "question" is a one-line closing summary of what you understood, not a
-question. Area keys: goal, users, flows, data, integrations, nfrs, failures, constraints,
-risks, done, glossary.
+- When the founder says there is nothing more on the current area ("nope", "that's it"),
+  close that area and move to the NEXT target. Never re-summarize what you already summarized.
+- End on SATURATION: when every area is covered or skipped, close immediately - one closing
+  summary line, complete=true. Do not pad, do not re-ask.
 
 The founder is technical-adjacent but not an architect. Meet them where they are."""
 
@@ -119,3 +112,15 @@ INTERVIEWER_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
 DISTILL_NEEDS_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
 DISTILL_SCOPE_SYSTEM += "\n\n" + load_method_pack(["4"])
 DISTILL_PREVIEW_SYSTEM += "\n\n" + load_method_pack(["3"])
+
+# Appended LAST in the assembled system prompt (after the method pack and the
+# status block): on a long prompt, the terminal instruction is the one a local
+# 14B follows (run-4: burying this mid-prompt produced 16/17 prose turns).
+STRUCTURED_TURN_FORMAT = """OUTPUT FORMAT (strict): reply with a single JSON object, no prose, no markdown fences:
+{"question": "your next question, short and concrete",
+ "covered": ["area keys CONCRETELY answered so far"],
+ "thin": ["area keys mentioned but still mushy"],
+ "skipped": ["area keys the founder refused"],
+ "complete": false}
+When complete=true, "question" is a one-line closing summary, not a question.
+Area keys: goal, users, flows, data, integrations, nfrs, failures, constraints, risks, done, glossary."""
