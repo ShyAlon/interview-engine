@@ -20,7 +20,7 @@ class FakeModel:
 @pytest.fixture(autouse=True)
 def _clean_guard_env(monkeypatch):
     monkeypatch.setattr(mc, "_CALLS_USED", 0)
-    for v in ("VMODEL_LLM_CALL_TIMEOUT_S", "VMODEL_LLM_MAX_CALLS", "VMODEL_LLM_MAX_TOKENS", "VMODEL_LLM_LOG"):
+    for v in ("VMODEL_LLM_CALL_TIMEOUT_S", "VMODEL_LLM_MAX_CALLS", "VMODEL_LLM_MAX_TOKENS", "VMODEL_LLM_LOG", "VMODEL_LLM_HEARTBEAT_S"):
         monkeypatch.delenv(v, raising=False)
 
 
@@ -182,3 +182,35 @@ def test_403_speaks_of_tier_access():
     err = translate_llm_error(exc, "probing", "openai", "gpt-x", None)
     r = err.render()
     assert "denied access (403)" in r and "tier" in r
+
+
+def test_heartbeat_prints_during_silent_call_then_stops(monkeypatch, capsys):
+    monkeypatch.setenv("VMODEL_LLM_HEARTBEAT_S", "0.05")
+
+    class M:
+        def invoke(self, messages):
+            time.sleep(0.2)
+            return type("R", (), {})()
+
+    mc.invoke_checked(M(), [], "probing")
+    err = capsys.readouterr().err
+    assert "still working - stage 'probing' call" in err
+    time.sleep(0.15)  # ~3 more intervals: no further beats once the call returned
+    assert "still working" not in capsys.readouterr().err
+
+
+def test_heartbeat_disabled_with_zero(monkeypatch, capsys):
+    monkeypatch.setenv("VMODEL_LLM_HEARTBEAT_S", "0")
+
+    class M:
+        def invoke(self, messages):
+            time.sleep(0.1)
+            return type("R", (), {})()
+
+    mc.invoke_checked(M(), [], "probing")
+    assert "still working" not in capsys.readouterr().err
+
+
+def test_describe_models_names_resolved_provider_and_model():
+    s = mc.describe_models()
+    assert "ollama/qwen2.5-coder:14b" in s and "probing=" in s

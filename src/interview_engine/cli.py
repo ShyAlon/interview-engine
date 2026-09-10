@@ -23,6 +23,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from vmodel_contracts import AppArchetype, IntakeSubmission, IntentModel
 
 from .errors import UserFacingError, run_cli, translate_json_error
+from . import model_config as _mc
 from .graph import build_graph
 from .progress import ProgressBus, stderr_printer
 from .telemetry import UsageLog, jsonl_sink
@@ -202,6 +203,7 @@ def main() -> None:
     checkpointer = SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
     graph = build_graph(log, checkpointer=checkpointer, progress=bus)
     cfg = {"configurable": {"thread_id": session}}
+    print(f"Models: {_mc.describe_models()}", file=sys.stderr)
 
     if resuming:
         print(f"Resuming session {session} from {db_path.resolve()}", file=sys.stderr)
@@ -301,3 +303,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     run_cli(main)
+

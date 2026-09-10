@@ -21,6 +21,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from . import model_config as _mc
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,10 @@ def track(bus: ProgressBus | None, stage: str, label: str, detail: str | None = 
 def stderr_printer():
     """The CLI consumer. Plain stderr lines; no TUI dependencies."""
     def _print(ev: ProgressEvent) -> None:
+        with _mc._CONSOLE_LOCK:  # never interleave with the heartbeat thread
+            _print_inner(ev)
+
+    def _print_inner(ev: ProgressEvent) -> None:
         detail = f" ({ev.detail})" if ev.detail else ""
         if ev.status == "started":
             print(f"  -> {ev.label}{detail}...", file=sys.stderr)
@@ -79,3 +84,4 @@ def stderr_printer():
         else:
             print(f"  !! {ev.label}{detail} FAILED after {ev.elapsed_s:.1f}s", file=sys.stderr)
     return _print
+
