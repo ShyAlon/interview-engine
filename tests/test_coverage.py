@@ -36,7 +36,7 @@ SCOPE = {"problem_statement": "p", "target_users": ["u"], "core_value_propositio
 def fake_models(monkeypatch, probing):
     box = {"probing": probing}
 
-    def _build(stage):
+    def _build(stage, **kwargs):
         if stage == "probing":
             return probing
         if stage == "scope_tiebreak":
@@ -138,7 +138,7 @@ def test_skip_marks_area_and_asks_next(monkeypatch):
     assert r["messages"][-1].content == "What breaks first?"
 
 
-def test_unstructured_reply_degrades_gracefully(monkeypatch):
+def test_unstructured_reply_fails_actionably_after_one_retry(monkeypatch):
     class AlwaysProse:
         calls = 0
 
@@ -149,10 +149,13 @@ def test_unstructured_reply_degrades_gracefully(monkeypatch):
     probing = AlwaysProse()
     fake_models(monkeypatch, probing)
     g = build_graph(UsageLog("t1"))
-    r = start(g)
-    assert probing.calls == 2  # one retry with format feedback, then degrade
-    assert r["messages"][-1].content == "Just a plain question?"
-    assert all(v == "uncovered" for v in r["coverage"].values())
+    from interview_engine.errors import UserFacingError
+    with pytest.raises(UserFacingError) as ei:
+        start(g)
+    assert probing.calls == 2  # capped: original + one retry, never a loop
+    message = ei.value.render()
+    assert "ignored the structured interview-turn contract twice" in message
+    assert "OLLAMA_CONTEXT_LENGTH=32768" in message and "--session" in message
 
 
 def test_retry_with_feedback_recovers_structured_turn(monkeypatch):
@@ -214,7 +217,7 @@ def test_scope_dict_items_coerced_to_strings(monkeypatch):
     distills = [j.dumps(NEEDS), j.dumps(scope), "[]"]
     probing = FakeModel(["[INTERVIEW COMPLETE]"])
     monkeypatch.setattr(model_config, "build_chat_model",
-                        lambda stage: probing if stage == "probing"
+                        lambda stage, **kwargs: probing if stage == "probing"
                         else FakeModel(distills) if stage == "distillation"
                         else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
     g = build_graph(UsageLog("t1"))
@@ -232,7 +235,7 @@ def test_validation_error_detail_not_truncated(monkeypatch):
     # both needs attempts return the same broken payload (retry fails too)
     distills = [j.dumps(bad_needs), j.dumps(bad_needs)]
     monkeypatch.setattr(model_config, "build_chat_model",
-                        lambda stage: probing if stage == "probing"
+                        lambda stage, **kwargs: probing if stage == "probing"
                         else FakeModel(list(distills)) if stage == "distillation"
                         else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
     from interview_engine.errors import UserFacingError
@@ -241,3 +244,13 @@ def test_validation_error_detail_not_truncated(monkeypatch):
         start(g, thread="r4e")
     msg = ei.value.render()
     assert "need_id" in msg and "Field required" in msg
+
+
+
+def test_turn_output_schema_fixes_shape_and_area_keys():
+    from interview_engine.coverage import AREA_KEYS, turn_output_schema
+    schema = turn_output_schema()
+    assert schema["required"] == ["question", "covered", "thin", "skipped", "complete"]
+    assert schema["additionalProperties"] is False
+    for field in ("covered", "thin", "skipped"):
+        assert schema["properties"][field]["items"]["enum"] == AREA_KEYS

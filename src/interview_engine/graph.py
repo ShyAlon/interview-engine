@@ -25,7 +25,8 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
 from .coverage import (COVERED, THIN, apply_reply, extract_turn_json, founder_control,
-                         initial_coverage, next_area, nfr_quantified, progress_line, status_block)
+                         initial_coverage, next_area, nfr_quantified, progress_line, status_block,
+                         turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
 from .telemetry import UsageLog
@@ -47,7 +48,7 @@ MAX_TURNS = 60  # hard stop: 30-60 min target; a runaway interview is a cost lea
 
 
 def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None):
-    probing_model = model_config.build_chat_model("probing")
+    probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
     distill_model = model_config.build_chat_model("distillation")
     tiebreak_model = model_config.build_chat_model("scope_tiebreak")
 
@@ -116,9 +117,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                              model_config.for_stage("probing").model,
                              (getattr(resp2, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
             parsed = extract_turn_json(resp2.content)
-            if parsed is None and progress is not None:
-                progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
-                                            "still unstructured after retry - coverage not updated this turn"))
+            if parsed is None:
+                from .errors import UserFacingError
+
+                raise UserFacingError(
+                    "stage 'probing': the model ignored the structured interview-turn contract twice.",
+                    f"provider returned prose instead of the required JSON object; second reply began: {resp2.content.strip()[:160]!r}.",
+                    "rerun with the same --session id; the checkpoint preserves prior answers. If this is Ollama, "
+                    "confirm the server started with OLLAMA_CONTEXT_LENGTH=32768; otherwise route probing to "
+                    "deepseek-flash with vmodel-spec-app/scripts/switch-model.sh deepseek.",
+                )
         question, complete = resp.content, False
         if parsed is not None:
             coverage = apply_reply(coverage, parsed)
@@ -429,3 +437,4 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
     g.add_edge("distill_intent", END)
 
     return g.compile(checkpointer=checkpointer or MemorySaver())
+

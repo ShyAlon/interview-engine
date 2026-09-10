@@ -55,11 +55,11 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     session = "20260908-181530-dead"
 
     models = {
-        "probing": FakeModel(["What is the goal?", "[INTERVIEW COMPLETE]"]),
+        "probing": FakeModel([json.dumps({"question": "What is the goal?", "covered": [], "thin": [], "skipped": [], "complete": False}), "[INTERVIEW COMPLETE]"]),
         "distillation": FakeModel([json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)]),
         "scope_tiebreak": FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']),
     }
-    monkeypatch.setattr(model_config, "build_chat_model", lambda stage: models[stage])
+    monkeypatch.setattr(model_config, "build_chat_model", lambda stage, **kwargs: models[stage])
 
     # the CLI's own validation explodes (his scenario); the graph's in-node
     # validation is untouched because node_distill imports the class itself.
@@ -88,3 +88,4 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     run_cli_with_inputs(["y"], ["prog", "--session", session])
     assert (outdir / "intent_model.json").exists()
     assert "What we understood" in capsys.readouterr().out
+

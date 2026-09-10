@@ -105,3 +105,27 @@ def test_json_error_names_stage_and_fix():
 
 def test_current_deepseek_flash_peak_price():
     assert price_for("deepseek-flash", provider="deepseek") == (0.30, 1.20)
+
+
+def test_probing_schema_is_sent_as_strict_response_format(monkeypatch):
+    schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+    model = model_config.build_chat_model("probing", schema=schema)
+    response_format = model.model_kwargs["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"] == schema
+
+
+def test_anthropic_structured_adapter_preserves_raw_metadata():
+    from langchain_core.messages import AIMessage
+    raw = AIMessage(content="tool call", response_metadata={"stop_reason": "end_turn"},
+                    usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5})
+    class Runnable:
+        def invoke(self, messages):
+            return {"raw": raw, "parsed": {"question": "Who uses it?", "covered": [],
+                    "thin": [], "skipped": [], "complete": False}, "parsing_error": None}
+    out = model_config._StructuredOutputAdapter(Runnable()).invoke([])
+    assert out is raw
+    assert out.response_metadata["stop_reason"] == "end_turn"
+    assert out.usage_metadata["output_tokens"] == 2
+    assert __import__("json").loads(out.content)["question"] == "Who uses it?"

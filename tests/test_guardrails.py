@@ -72,6 +72,16 @@ def test_truncated_generation_is_named_not_silently_passed():
     assert "VMODEL_LLM_MAX_TOKENS" in err and "'probing'" in err
 
 
+def test_ollama_truncation_names_server_context_fix(monkeypatch):
+    monkeypatch.setattr(mc, "for_stage", lambda stage: mc.StageModel("ollama", "phi4", max_tokens=2048))
+    class M:
+        def invoke(self, messages):
+            return _Resp('{"partial":', "length")
+    with pytest.raises(UserFacingError) as ei:
+        mc.invoke_checked(M(), [], "probing")
+    assert "OLLAMA_CONTEXT_LENGTH=32768" in ei.value.render()
+
+
 def test_clean_finish_reason_passes():
     class M:
         def invoke(self, messages):

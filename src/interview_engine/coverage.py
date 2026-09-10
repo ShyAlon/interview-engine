@@ -29,6 +29,28 @@ AREAS = [
 AREA_KEYS = [k for k, _, _ in AREAS]
 _LABELS = {k: label for k, label, _ in AREAS}
 
+
+def turn_output_schema() -> dict:
+    """Provider-neutral constrained-output shape for one interview turn.
+
+    The area arrays are enum-constrained to code-owned keys. Content remains
+    model-authored; JSON structure is enforced by the provider rather than by
+    prompt compliance and a paid retry.
+    """
+    area = {"type": "string", "enum": AREA_KEYS}
+    return {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "covered": {"type": "array", "items": area},
+            "thin": {"type": "array", "items": area},
+            "skipped": {"type": "array", "items": area},
+            "complete": {"type": "boolean"},
+        },
+        "required": ["question", "covered", "thin", "skipped", "complete"],
+        "additionalProperties": False,
+    }
+
 UNCOVERED, THIN, COVERED, SKIPPED = "uncovered", "thin", "covered", "skipped"
 _MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x"}
 
@@ -143,3 +165,4 @@ def nfr_quantified(founder_text: str) -> bool:
     words, or an explicit founder acknowledgment that there are none (demo).
     'Strict security' and a model's confidence are not quantification."""
     return bool(_NUM_RE.search(founder_text) or _NO_NUMBERS_RE.search(founder_text))
+

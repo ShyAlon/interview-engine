@@ -108,10 +108,13 @@ def _check_truncated(resp, stage: str, cfg) -> None:
     ceiling = _max_tokens_limit(cfg.max_tokens)
     _log_llm({"event": "llm_call_error", "provider": cfg.provider, "model": cfg.model, "stage": stage,
               "error": {"kind": "token_ceiling", "ceiling_tokens": ceiling}})
+    ollama_context = (" For Ollama's OpenAI-compatible endpoint, per-request num_ctx may be ignored; "
+                      "restart the server with OLLAMA_CONTEXT_LENGTH=32768 if the prompt itself is being cut."
+                      if cfg.provider == "ollama" else "")
     raise UserFacingError(
         f"stage '{stage}': the {cfg.provider}/{cfg.model} call hit the generation-length "
         f"ceiling ({ceiling} tokens) and its output was cut off.",
-        "the model had more to emit than one call allows - the payload is truncated.",
+        "the model had more to emit than one call allows - the payload is truncated." + ollama_context,
         "rerun the same command - the checkpoint resumes at this stage. If it repeats, raise "
         f"{_MAX_TOKENS_ENV} only deliberately, or route the stage to another provider with "
         "vmodel-spec-app/scripts/switch-model.sh.",
@@ -426,9 +429,38 @@ def _ollama_think() -> bool:
     return _env("VMODEL_OLLAMA_THINK") == "1"
 
 
-def build_chat_model(stage: str):
-    """Return a LangChain chat model for the stage. Import-time lazy so the
-    deterministic parts of the module never pay for SDK imports."""
+class _StructuredOutputAdapter:
+    """Normalize LangChain native structured output back to an AIMessage.
+
+    Anthropic returns ``{raw, parsed, parsing_error}`` when include_raw is on.
+    Keeping the raw message preserves finish reasons and token usage for the
+    existing truncation and telemetry path; serializing parsed makes provider
+    behavior identical to the OpenAI-compatible JSON-schema route.
+    """
+    def __init__(self, runnable):
+        self.runnable = runnable
+
+    def invoke(self, messages):
+        import json
+        result = self.runnable.invoke(messages)
+        raw = result.get("raw") if isinstance(result, dict) else None
+        parsed = result.get("parsed") if isinstance(result, dict) else result
+        error = result.get("parsing_error") if isinstance(result, dict) else None
+        if error is not None or parsed is None:
+            return raw if raw is not None else result
+        if hasattr(parsed, "model_dump"):
+            parsed = parsed.model_dump(mode="json")
+        raw.content = json.dumps(parsed)
+        return raw
+
+
+def build_chat_model(stage: str, schema: dict | None = None):
+    """Return a LangChain chat model for the stage.
+
+    `schema` is enforced provider-side. Ollama's OpenAI-compatible endpoint
+    supports JSON Schema through response_format; DeepSeek/OpenAI use the same
+    interface. The post-parse checks remain the safety net, not the formatter.
+    """
     cfg = for_stage(stage)
     _preflight(cfg, stage)
     if cfg.provider in ("deepseek", "openai", "ollama"):
@@ -442,6 +474,9 @@ def build_chat_model(stage: str):
             if not _ollama_think():
                 body["think"] = False
             extra = {"extra_body": body}
+        if schema is not None:
+            extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
+                                     {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
         return ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,
@@ -454,12 +489,15 @@ def build_chat_model(stage: str):
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(
+        model = ChatAnthropic(
             model=cfg.model,
             temperature=cfg.temperature,
             timeout=_guard_limits()[0],  # the socket dies with the guardrail deadline
             max_tokens=_max_tokens_limit(cfg.max_tokens),
             api_key=_env(_API_KEY_ENV["anthropic"]) or "",
         )
+        if schema is not None:
+            return _StructuredOutputAdapter(model.with_structured_output(schema, include_raw=True))
+        return model
     raise ValueError(f"unsupported provider {cfg.provider!r}")
 
