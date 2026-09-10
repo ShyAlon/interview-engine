@@ -25,8 +25,8 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
 from .coverage import (COVERED, THIN, apply_reply, extract_turn_json, founder_control,
-                         initial_coverage, next_area, nfr_quantified, progress_line, status_block,
-                         turn_output_schema)
+                         initial_coverage, is_deferral, next_area, nfr_quantified, progress_line,
+                         question_topic, safe_question, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
 from .telemetry import UsageLog
@@ -41,6 +41,7 @@ class InterviewState(TypedDict, total=False):
     requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
     coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
     coverage_target: str      # the area the last question aimed at ("skip" applies to it)
+    parked_topics: list[str]  # founder-deferred sub-topics that must never be re-probed
     turn_count: int
 
 
@@ -73,7 +74,18 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return {}  # marker already emitted: let routing reach distill without burning a call
 
         coverage = dict(state.get("coverage") or initial_coverage())
+        parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
+
+        # A direct deferral is terminal for the question's sub-topic. Keep the
+        # area honestly open/thin, but park this design detail across all later
+        # turns so “you decide” cannot cause increasingly specific rephrases.
+        if last is not None and getattr(last, "type", "") == "human" and is_deferral(getattr(last, "content", "")):
+            prior_question = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
+                                   if getattr(m, "type", "") == "ai"), "")
+            parked = question_topic(prior_question)
+            if parked and parked not in parked_topics:
+                parked_topics.append(parked)
 
         # founder control (ADR-0016): deterministic, never costs a model call
         control = founder_control(getattr(last, "content", "")) if last is not None else None
@@ -88,7 +100,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         target = next_area(coverage)
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
             history = state["messages"]
-            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + "\n\n" + STRUCTURED_TURN_FORMAT
+            parked_block = ("\n\nPARKED SUB-TOPICS (founder deferred; never ask these again): "
+                            + ", ".join(parked_topics)) if parked_topics else ""
+            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + parked_block + "\n\n" + STRUCTURED_TURN_FORMAT
             _t0 = _time.time()
             resp = model_config.invoke_checked(probing_model, [SystemMessage(content=system), *history], "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
@@ -144,7 +158,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             "interview_turn", "Coverage", "completed", _t.time(), 0.0,
                             "NFRs claimed covered with no numbers given - holding thin; "
                             "say 'no numbers for the demo' to close it honestly"))
-            question = parsed["question"].strip()
+            question = safe_question(parsed["question"].strip(), parked_topics, target)
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
             # self-grading cannot jump 0/11 -> done.
@@ -160,7 +174,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
                                         progress_line(coverage)))
         return {"messages": [AIMessage(content=question)], "coverage": coverage,
-                "coverage_target": target or "", "turn_count": turn}
+                "coverage_target": target or "", "parked_topics": parked_topics, "turn_count": turn}
 
     def route_interview(state: InterviewState) -> str:
         last = state["messages"][-1]

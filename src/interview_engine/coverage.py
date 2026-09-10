@@ -114,6 +114,62 @@ _ENOUGH_RE = re.compile(
     re.IGNORECASE)
 
 
+_DEFERRAL_RE = re.compile(
+    r"^\s*(?:i (?:do not|don't) know|not sure|no (?:idea|preference)|"
+    r"(?:that is|that's|it is|it's|this is) (?:up to you|your call)|"
+    r"you decide|your call|use (?:the )?(?:standard|best practice|state of the art)|"
+    r"state[- ]of[- ]the[- ]art(?:[.! ]+you decide)?|whatever (?:is )?(?:standard|best)|"
+    r"(?:i am|i'm) (?:agnostic|not technical enough to say))\s*[.!]?\s*$",
+    re.IGNORECASE)
+
+_TOPIC_PATTERNS = (
+    ("security/encryption detail", re.compile(r"\b(encrypt|encryption|cipher|tls|ssl|cryptograph|security protocol)\w*\b", re.I)),
+    ("identity/authentication detail", re.compile(r"\b(auth|authentication|authorization|oauth|mfa|login protocol)\w*\b", re.I)),
+    ("scale/capacity target", re.compile(r"\b(scale|capacity|concurrent|users per|requests per|throughput)\w*\b", re.I)),
+    ("latency target", re.compile(r"\b(latency|response time|how fast|milliseconds?)\b", re.I)),
+    ("availability target", re.compile(r"\b(uptime|availability|downtime|sla)\w*\b", re.I)),
+    ("technology-stack detail", re.compile(r"\b(programming language|framework|tech stack)\b", re.I)),
+    ("database detail", re.compile(r"\b(database|sql|nosql|data store)\b", re.I)),
+    ("cloud/infrastructure detail", re.compile(r"\b(cloud|aws|azure|gcp|infrastructure|hosting)\b", re.I)),
+)
+
+
+def is_deferral(text: str) -> bool:
+    """A founder explicitly delegates or cannot answer the current design detail."""
+    return bool(_DEFERRAL_RE.match(text or ""))
+
+
+def question_topic(question: str) -> str | None:
+    """Return a code-owned sub-topic label for repeat-probe prevention."""
+    for label, pattern in _TOPIC_PATTERNS:
+        if pattern.search(question or ""):
+            return label
+    return None
+
+
+_FALLBACK_QUESTIONS = {
+    "goal": "What outcome would make this product worth building?",
+    "users": "Who besides the primary user will operate, support, or be affected by it?",
+    "flows": "What is the most important user flow from start to finish?",
+    "data": "What information goes in, where does it come from, and who owns it?",
+    "integrations": "Which external systems must exchange data with it?",
+    "nfrs": "Apart from parked design details, what user volume, response-time, or uptime target matters most?",
+    "failures": "What failure must the system handle without losing the user's work?",
+    "constraints": "What fixed deadline, budget, team, platform, or compliance constraint applies?",
+    "risks": "What assumption would most threaten the product if it proved false?",
+    "done": "What observable result will tell you the product is ready?",
+    "glossary": "Which domain terms need a precise shared meaning?",
+}
+
+
+def safe_question(question: str, parked_topics: list[str], target: str | None) -> str:
+    """Mechanically prevent a model from re-probing a parked sub-topic."""
+    topic = question_topic(question)
+    if topic and topic in parked_topics:
+        return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
+    return question
+
+
 def founder_control(text: str) -> str | None:
     """'skip' -> skip the current target area; 'enough' -> end the interview.
     Deliberately strict: a sentence merely CONTAINING 'skip' is not a command."""

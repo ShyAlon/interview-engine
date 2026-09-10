@@ -140,6 +140,34 @@ def test_skip_marks_area_and_asks_next(monkeypatch):
     assert r["messages"][-1].content == "What breaks first?"
 
 
+def test_deferral_parks_subtopic_and_prevents_reprobe(monkeypatch):
+    probing = FakeModel([
+        structured("What specific encryption standards should be used?", thin=["nfrs"]),
+        structured("Which encryption protocol, such as TLS 1.3, should be used?"),
+        structured("What exact encryption standard do you require?"),
+    ])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    start(g, thread="park1")
+    r = g.invoke({"messages": [HumanMessage(content="State of the art. You decide.")]},
+                 {"configurable": {"thread_id": "park1"}})
+    assert r["parked_topics"] == ["security/encryption detail"]
+    assert "encryption" not in r["messages"][-1].content.lower()
+    assert r["coverage"]["nfrs"] == "thin"  # parked is not falsely covered
+
+    r2 = g.invoke({"messages": [HumanMessage(content="No other preference.")]},
+                  {"configurable": {"thread_id": "park1"}})
+    assert "encryption" not in r2["messages"][-1].content.lower()
+    assert r2["parked_topics"] == ["security/encryption detail"]
+
+
+def test_deferral_detection_is_explicit_not_generic_uncertainty():
+    from interview_engine.coverage import is_deferral
+    for text in ("I don't know", "you decide", "your call", "state of the art", "I'm agnostic"):
+        assert is_deferral(text), text
+    assert not is_deferral("I don't know the count yet, but I can get it tomorrow")
+
+
 def test_unstructured_reply_fails_actionably_after_one_retry(monkeypatch):
     class AlwaysProse:
         calls = 0
