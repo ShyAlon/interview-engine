@@ -36,7 +36,7 @@ def test_glossary_list_shape_coerced(monkeypatch):
                                   {"term": "exceptions", "meaning": "plan deviations"}])
     distills = [json.dumps(NEEDS), json.dumps(scope), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
-                        lambda stage: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
+                        lambda stage, **kwargs: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
                         else FakeModel(distills) if stage == "distillation"
                         else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
     g = build_graph(UsageLog("t1"))
@@ -49,7 +49,7 @@ def test_glossary_from_needs_phase_merged(monkeypatch):
     needs = dict(NEEDS, glossary={"TMS": "transport mgmt system"})
     distills = [json.dumps(needs), json.dumps(SCOPE), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
-                        lambda stage: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
+                        lambda stage, **kwargs: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
                         else FakeModel(distills) if stage == "distillation"
                         else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
     g = build_graph(UsageLog("t1"))
@@ -59,12 +59,25 @@ def test_glossary_from_needs_phase_merged(monkeypatch):
 
 # --- 3c: operational concepts drift ---
 
+def test_done_criteria_dicts_render_as_statements(monkeypatch):
+    needs = dict(NEEDS, done_criteria=[{"statement": "A developer can build from the spec",
+                                       "source_turns": [20]}])
+    distills = [json.dumps(needs), json.dumps(SCOPE), "[]"]
+    monkeypatch.setattr(model_config, "build_chat_model",
+                        lambda stage, **kwargs: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
+                        else FakeModel(distills) if stage == "distillation"
+                        else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
+    g = build_graph(UsageLog("t1"))
+    r = start(g, thread="done1")
+    assert r["intent_model"]["done_criteria"] == ["A developer can build from the spec"]
+
+
 def test_operational_concepts_dicts_render_as_statements(monkeypatch):
     needs = dict(NEEDS, operational_concepts=[{"statement": "support team handles feed failures",
                                                "source_turns": [18]}])
     distills = [json.dumps(needs), json.dumps(SCOPE), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
-                        lambda stage: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
+                        lambda stage, **kwargs: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
                         else FakeModel(distills) if stage == "distillation"
                         else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
     g = build_graph(UsageLog("t1"))
@@ -88,7 +101,7 @@ def test_model_cannot_close_nfrs_without_numbers(monkeypatch):
     probing = FakeModel([turn, "[INTERVIEW COMPLETE]"])
     distills = [json.dumps(NEEDS), json.dumps(SCOPE), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
-                        lambda stage: probing if stage == "probing"
+                        lambda stage, **kwargs: probing if stage == "probing"
                         else FakeModel(distills) if stage == "distillation"
                         else FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']))
     g = build_graph(UsageLog("t1"))
@@ -162,3 +175,4 @@ def test_usage_summary_rollup(tmp_path):
     p = tmp_path / "usage_summary.json"
     log.write_summary(p)
     assert json.loads(p.read_text())["stages"]["probing"]["calls"] == 2
+

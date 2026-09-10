@@ -108,7 +108,9 @@ def apply_reply(coverage: dict[str, str], parsed: dict) -> dict[str, str]:
 _SKIP_RE = re.compile(r"^\s*(skip|pass)( this| it)?\s*[.!]?\s*$", re.IGNORECASE)
 _ENOUGH_RE = re.compile(
     r"^\s*(enough|that'?s enough|wrap ?up|let'?s wrap|finish|done here|"
-    r"move to (the )?(spec|distill)|end( the)? interview|end|stop|quit|exit)\s*[.!]?\s*$",
+    r"move to (the )?(spec|distill)|end( the)? interview|end|stop|quit|exit|"
+    r"(?:i (?:think|believe) )?you have enough(?: (?:to )?(?:move on|continue|proceed))?|"
+    r"(?:i (?:think|believe) )?(?:we|you) can (?:move on|continue|proceed))\s*[.!]?\s*$",
     re.IGNORECASE)
 
 

@@ -226,7 +226,7 @@ def main() -> None:
         print(f"session: {session}", file=sys.stderr)
         print(f"(if anything crashes, resume with: python -m interview_engine.cli --session {session})",
               file=sys.stderr)
-        print("(interview controls: 'skip' = skip this area, 'enough' = end the interview)\n",
+        print("(interview controls: 'skip' = skip this area, 'enough' or 'end' = end the interview)\n",
               file=sys.stderr)
         submission = IntakeSubmission(
             free_text=idea, founder_id="cli-founder", submission_id=session

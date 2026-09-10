@@ -88,6 +88,8 @@ def test_founder_control_is_strict():
     assert founder_control("skip this") == "skip"
     assert founder_control("enough") == "enough"
     assert founder_control("let's wrap") == "enough"
+    assert founder_control("I think you have enough to move on") == "enough"
+    assert founder_control("I believe we can proceed") == "enough"
     assert founder_control("we should skip login for v1") is None   # content, not a command
     assert founder_control("that's enough salt in the recipe") is None or True  # see below
 

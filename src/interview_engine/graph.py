@@ -257,9 +257,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         fb = ("Your previous output failed validation:\n" + str(e)[:400]
                               + "\nReturn the corrected JSON only, matching the schema exactly.")
 
-        def _op_concepts(items):
-            # run-5 drift: the model emits {statement, source_turns} objects; the
-            # contract carries plain strings. Keep the statement, not str(dict).
+        def _statements(items):
+            # Model drift: done criteria and operational concepts can arrive as
+            # {statement, source_turns} objects, while the contract carries strings.
             out = []
             for o in items:
                 if isinstance(o, dict) and isinstance(o.get("statement"), str):
@@ -279,8 +279,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return {"_glossary": data.get("glossary") if isinstance(data.get("glossary"), dict) else None,
                     "stakeholder_needs": [n.model_dump(mode="json") for n in validated],
                     "assumption_items": [Assumption.model_validate(a).model_dump(mode="json") for a in items],
-                    "done_criteria": [str(d) for d in (data.get("done_criteria") or [])],
-                    "operational_concepts": _op_concepts(data.get("operational_concepts") or []),
+                    "done_criteria": _statements(data.get("done_criteria") or []),
+                    "operational_concepts": _statements(data.get("operational_concepts") or []),
                     "assumptions": data.get("assumptions") or []}
 
         def _as_str_list(v):
