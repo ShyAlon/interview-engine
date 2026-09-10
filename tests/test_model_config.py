@@ -100,3 +100,8 @@ def test_json_error_names_stage_and_fix():
     e = translate_json_error(j.JSONDecodeError("x", "doc", 0), "distillation")
     r = e.render()
     assert "distillation" in r and "stronger model" in r
+
+
+
+def test_current_deepseek_flash_peak_price():
+    assert price_for("deepseek-flash", provider="deepseek") == (0.30, 1.20)

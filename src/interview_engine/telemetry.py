@@ -18,11 +18,11 @@ from vmodel_contracts import StageTokenUsage
 # Sonnet 5's Sept 1 increase did NOT take effect; $2/$10 stands.
 # Update here AND bump PRICE_TABLE_VERSION - price drift is real (two changes
 # this month) and silent drift makes cost reports lie retroactively.
-PRICE_TABLE_VERSION = "2026-09-08"
+PRICE_TABLE_VERSION = "2026-09-10"
 PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # model: (input, output)
-    "deepseek-chat": (0.27, 1.10),        # verify against deepseek.com pricing before first real run
-    "deepseek-reasoner": (0.55, 2.19),    # verify before use
+    "deepseek-flash": (0.30, 1.20),       # V4.1 Flash peak; off-peak $0.15/$0.60
+    "deepseek-v4-pro": (1.32, 3.96),      # peak; off-peak $0.66/$1.98; retires to Flash 2026-09-14
     "claude-sonnet-5": (2.00, 10.00),     # platform.claude.com, 2026-09-08
     "claude-haiku-4.5": (1.00, 5.00),     # platform.claude.com, 2026-09-08
     "gpt-5": (1.25, 10.00),               # OpenAI model page, 2026-09-08
@@ -125,3 +125,4 @@ class UsageLog:
 
     def write_summary(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.summary(), indent=2))
+
