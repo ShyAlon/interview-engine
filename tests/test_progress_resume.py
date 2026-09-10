@@ -67,7 +67,7 @@ DEFAULT_REPLIES = {
 def fake_models(monkeypatch):
     box = {}
 
-    def _build(stage):
+    def _build(stage, **kwargs):
         if stage not in box:
             replies = DEFAULT_REPLIES[stage] if DEFAULT_REPLIES[stage] else [
                 json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)]
@@ -146,7 +146,9 @@ def test_crash_resume_from_disk_checkpoint(tmp_path, fake_models):
     from langgraph.checkpoint.sqlite import SqliteSaver
 
     # two-turn interview: question first, so the first invoke pauses for input
-    fake_models["probing"] = FakeModel(["What problem does it solve?", "[INTERVIEW COMPLETE]"])
+    fake_models["probing"] = FakeModel([
+        '{"question": "What problem does it solve?", "covered": [], "thin": [], "skipped": [], "complete": false}',
+        "[INTERVIEW COMPLETE]"])
     db = str(tmp_path / "cp.sqlite")
     cfg = {"configurable": {"thread_id": "s-resume"}}
     g1 = build_graph(UsageLog("s"), checkpointer=SqliteSaver(sqlite3.connect(db, check_same_thread=False)))
