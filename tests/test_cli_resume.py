@@ -1,6 +1,7 @@
 """End-to-end CLI: fresh run crashes after distillation; --session resume recovers it."""
 import json
 import sys
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -89,3 +90,9 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     assert (outdir / "intent_model.json").exists()
     assert "What we understood" in capsys.readouterr().out
 
+
+
+
+def test_cli_module_uses_shared_keep_awake_guard():
+    source = (Path(cli.__file__)).read_text()
+    assert "run_with_system_awake(main)" in source

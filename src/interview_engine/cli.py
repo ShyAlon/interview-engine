@@ -20,7 +20,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
-from vmodel_contracts import AppArchetype, IntakeSubmission, IntentModel
+from vmodel_contracts import AppArchetype, IntakeSubmission, IntentModel, run_with_system_awake
 
 from .errors import UserFacingError, run_cli, translate_json_error
 from . import model_config as _mc
@@ -302,5 +302,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_cli(main)
+    run_cli(lambda: run_with_system_awake(main))
+
 
