@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 out/
 .env
+
+# Generated interview checkpoints, outputs, and diagnostics
+checkpoints.sqlite*
+usage.jsonl
+usage_summary.json
+llm-calls.jsonl
+run.log
