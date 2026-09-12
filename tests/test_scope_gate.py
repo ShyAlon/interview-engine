@@ -57,3 +57,30 @@ def test_tiebreak_prompt_formats_and_reaches_the_model():
     assert v.accepted and v.llm_tiebreak_used
     assert '"is_web_app"' in m.prompt            # the model still sees the JSON example
     assert "maybe web, maybe not" in m.prompt    # the idea text was substituted
+
+
+def test_tiebreak_usage_logging_uses_config_not_response_metadata(tmp_path):
+    # 2026-09-12, second crash on the same resume: response_metadata on the
+    # founder's ChatOllama carried NO model_provider key, the scraped value
+    # was literally "unknown", and pricing a $0 local call as remote crashed
+    # the run. Provider/model must come from the configured route.
+    from interview_engine import model_config
+    from interview_engine.scope_gate import verdict_with_llm
+    from interview_engine.telemetry import UsageLog
+
+    class Bare:
+        class _Resp:
+            content = '{"is_web_app": true, "archetype": "saas_crud", "confidence": 0.8, "reason": "web"}'
+            response_metadata = {}   # the real metadata path: no model_provider key at all
+            usage_metadata = {"input_tokens": 10, "output_tokens": 5}
+
+        def invoke(self, prompt, *a, **k):
+            return self._Resp()
+
+    log = UsageLog("s1")
+    v = verdict_with_llm(sub("A booking thing, maybe web, maybe not"), Bare(), usage_log=log)
+    assert v.accepted
+    (rec,) = log.records
+    cfg = model_config.for_stage("scope_tiebreak")
+    assert (rec.provider, rec.model) == (cfg.provider, cfg.model)
+    assert rec.cost_usd == 0.0     # the configured local route prices $0

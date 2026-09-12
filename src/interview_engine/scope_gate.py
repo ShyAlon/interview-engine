@@ -85,13 +85,17 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> Scope
     is mixed or silent - ambiguous wording is a semantic problem, pay for it."""
     import json as _json
 
+    from . import model_config
     from .errors import translate_json_error
     from .model_config import invoke_checked
 
     resp = invoke_checked(chat_model, TIE_BREAK_PROMPT.format(text=sub.free_text), "scope_tiebreak")
     if usage_log is not None:
-        usage_log.record("scope_tiebreak", getattr(resp, "response_metadata", {}).get("model_provider", "unknown"),
-                         getattr(resp, "response_metadata", {}).get("model_name", "unknown"),
+        # Price from the CONFIGURED route, never scraped off response_metadata:
+        # langchain does not guarantee model_provider (2026-09-12: absent on the
+        # founder's ChatOllama, a $0 local call crashed as "unpriced").
+        cfg = model_config.for_stage("scope_tiebreak")
+        usage_log.record("scope_tiebreak", cfg.provider, cfg.model,
                          getattr(resp, "usage_metadata", {}) or {})
     try:
         data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
