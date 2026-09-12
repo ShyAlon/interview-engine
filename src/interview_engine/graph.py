@@ -70,9 +70,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
     def node_interview_turn(state: InterviewState) -> dict:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+        if "intent_model" in state:
+            return {}  # already distilled: nothing left to do
+        # marker ANYWHERE in AI history short-circuits, not only as the last
+        # message: a founder message arriving after completion must not
+        # re-open a saturated interview (2026-09-12 double-distillation)
+        if any(getattr(m, "type", "") == "ai" and "[INTERVIEW COMPLETE]" in getattr(m, "content", "")
+               for m in state.get("messages", [])):
+            return {}
+
         last = state["messages"][-1] if state.get("messages") else None
-        if last is not None and "[INTERVIEW COMPLETE]" in getattr(last, "content", ""):
-            return {}  # marker already emitted: let routing reach distill without burning a call
 
         coverage = dict(state.get("coverage") or initial_coverage())
         parked_topics = list(state.get("parked_topics") or [])
@@ -180,7 +187,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
             # self-grading cannot jump 0/11 -> done.
-            complete = bool(parsed.get("complete")) and next_area(coverage) is None
+            # Saturation is CODE-OWNED (2026-09-12, session bd17: coverage hit
+            # 11/11 and phi4 kept asking for three more turns because it never
+            # set complete=true). A saturated map ends the interview whether or
+            # not the model notices; the model's complete flag is a hint, not
+            # the gate.
+            complete = next_area(coverage) is None
             if parsed.get("complete") and not complete and progress is not None:
                 open_areas = sum(1 for v in coverage.values() if v in ("uncovered", "thin"))
                 progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
@@ -203,6 +215,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return "await_founder"  # interrupt point: founder's reply arrives, graph resumes
 
     def node_distill(state: InterviewState) -> dict:
+        if "intent_model" in state:  # distilled already - never re-pay
+            return {}
         """PHASED distillation (ADR-0011): needs -> scope -> preview -> assemble/validate.
         Four visible steps instead of one black box; each LLM phase is small enough
         for a local 14B, validated on its own, and retried once with schema feedback.

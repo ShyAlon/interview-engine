@@ -167,3 +167,43 @@ def test_persistence_deferral_parks_and_stops_the_drill(monkeypatch):
                   {"configurable": {"thread_id": "steer5"}})
     q23 = r2["messages"][-1].content.lower()
     assert "storage" not in q23 and "persist" not in q23
+
+
+# --- session 20260912-201837-bd17, turns 24-27: saturated but never ends ---
+
+def test_saturation_terminates_without_model_cooperation(monkeypatch):
+    # turn 25: coverage hit 11/11, phi4 never set complete=true, and the
+    # interview kept drilling for THREE more turns. Termination is code-owned.
+    probing = FakeModel([
+        structured("What fixed deadline, budget, team, platform, or compliance constraint applies?"),
+        # founder answers; model covers everything but forgets complete=true
+        structured("What specific free resources, like Supabase, are you considering for backend services?",
+                   covered=["goal", "users", "flows", "data", "integrations", "nfrs",
+                            "failures", "constraints", "risks", "done", "glossary"],
+                   complete=False),
+    ])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    start(g, thread="sat1")
+    r = g.invoke({"messages": [HumanMessage(
+        content="The application should use free resources (like supabase) wherever possible. "
+                "There are no timeline constraints. Expect maybe 10000 users.")]},
+        {"configurable": {"thread_id": "sat1"}})
+    assert "[INTERVIEW COMPLETE]" in r["messages"][-1].content
+    assert probing.calls == 2                      # no third drilling call
+    assert r.get("intent_model") is not None       # distillation ran
+
+
+def test_cloud_infrastructure_drilling_is_suppressed():
+    assert implementation_question(
+        "What specific free resources, like Supabase, are you considering for backend services, "
+        "and what are their roles in the application?")
+    assert implementation_question(
+        "What specific cloud services or infrastructure components are you considering for the "
+        "backend, and how do they fit into the application's architecture?")
+
+
+def test_leading_steer_inside_a_longer_answer():
+    assert founder_steer("You suggest. I'm good with any cloud infrastructure.") == "delegate"
+    assert founder_steer("This is implementation. I just want the app to be accessible and to "
+                         "persist the users' data.") == "dismiss"

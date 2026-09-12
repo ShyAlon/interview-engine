@@ -120,6 +120,8 @@ _DEFERRAL_RE = re.compile(
     r"you decide|your call|use (?:the )?(?:standard|best practice|state of the art)|"
     r"state[- ]of[- ]the[- ]art(?:[.! ]+you decide)?|whatever (?:is )?(?:standard|best)|"
     r"you do it|your choice|up to you|not up to me|whatever you (?:think|decide|choose)|"
+    r"you suggest|you pick|i'?m good with any\b.*|anything(?:'?s| is) fine(?: by me)?|"
+    r"whatever works|i have no preference|"
     r"no[.!,]?\s+(?:you\s+(?:do\s+it|decide|choose|pick)|it'?s up to you)|"
     r"(?:i'?ll\s+|i will )?leave (?:it|that|this|the \w+) (?:up )?to you|"
     r"(?:i am|i'm) (?:agnostic|not technical enough to say))\s*[.!?]*\s*$",
@@ -129,6 +131,7 @@ _DEFERRAL_RE = re.compile(
 # about X". Distinct from 'enough' (whole interview) and from a deferral
 # (delegate ONE detail): the founder closes the current AREA.
 _DISMISS_RE = re.compile(
+    r"^this is (?:an? )?implementation\b|"
     r"\bmove on from\b|"
     r"^(?:can|could) (?:we|you) (?:please )?move on\b|"
     r"^(?:next|another) (?:topic|question|area)\b|"
@@ -164,6 +167,10 @@ def founder_steer(text: str) -> str | None:
     t = (text or "").strip()
     if is_deferral(t):
         return "delegate"
+    # a steer may LEAD a longer answer ('You suggest. I'm good with any cloud.')
+    first = re.split(r"(?<=[.!?])\s+", t, maxsplit=1)[0] if t else ""
+    if first != t and (is_deferral(first) or _DISMISS_RE.search(first)):
+        return "delegate" if is_deferral(first) else "dismiss"
     if _DISMISS_RE.search(t):
         return "dismiss"
     return None
@@ -180,6 +187,9 @@ _IMPL_QUESTION_RE = re.compile(
     r"(?:data )?storage (?:solution|engine|system|technology|mechanism)|"
     r"persistence (?:solution|layer|mechanism|technology)|"
     r"hosting (?:provider|platform)|auth(?:entication)? (?:provider|solution)|"
+    r"cloud (?:service|services|infrastructure|platform|provider)|"
+    r"infrastructure (?:component|components|choice|choices)|"
+    r"backend (?:service|services|infrastructure|stack)|free (?:resource|resources)|"
     r"ui (?:framework|toolkit|library))\b",
     re.IGNORECASE)
 # Constraint/affinity questions are product-level and legitimate (the
