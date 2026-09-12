@@ -76,8 +76,8 @@ def verdict_deterministic(sub: IntakeSubmission) -> ScopeVerdict | None:
 
 TIE_BREAK_PROMPT = """Classify this product idea for a service that ONLY builds specs for web applications
 (apps in the browser; they may consume web APIs and services). Answer STRICT JSON:
-{"is_web_app": true|false, "archetype": one of saas_crud|marketplace|content_site|dashboard|ecommerce|other_web|not_web_app, "confidence": 0..1, "reason": one sentence}
-Idea: {text}"""
+{{"is_web_app": true|false, "archetype": one of saas_crud|marketplace|content_site|dashboard|ecommerce|other_web|not_web_app, "confidence": 0..1, "reason": one sentence}}
+Idea: {text}"""  # literal JSON example braces are doubled: .format() fills {text} only
 
 
 def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> ScopeVerdict:
