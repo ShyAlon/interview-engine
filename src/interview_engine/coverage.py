@@ -119,7 +119,22 @@ _DEFERRAL_RE = re.compile(
     r"(?:that is|that's|it is|it's|this is) (?:up to you|your call)|"
     r"you decide|your call|use (?:the )?(?:standard|best practice|state of the art)|"
     r"state[- ]of[- ]the[- ]art(?:[.! ]+you decide)?|whatever (?:is )?(?:standard|best)|"
-    r"(?:i am|i'm) (?:agnostic|not technical enough to say))\s*[.!]?\s*$",
+    r"you do it|your choice|up to you|not up to me|whatever you (?:think|decide|choose)|"
+    r"no[.!,]?\s+(?:you\s+(?:do\s+it|decide|choose|pick)|it'?s up to you)|"
+    r"(?:i'?ll\s+|i will )?leave (?:it|that|this|the \w+) (?:up )?to you|"
+    r"(?:i am|i'm) (?:agnostic|not technical enough to say))\s*[.!?]*\s*$",
+    re.IGNORECASE)
+
+# Topic-level dismissal: "move on from the UI", "next topic", "stop asking
+# about X". Distinct from 'enough' (whole interview) and from a deferral
+# (delegate ONE detail): the founder closes the current AREA.
+_DISMISS_RE = re.compile(
+    r"\bmove on from\b|"
+    r"^(?:can|could) (?:we|you) (?:please )?move on\b|"
+    r"^(?:next|another) (?:topic|question|area)\b|"
+    r"^ask (?:me )?(?:about )?something else\b|"
+    r"^(?:please )?(?:stop|don'?t) asking (?:me )?(?:about|for)\b|"
+    r"^(?:can|could) (?:we|you) (?:please )?(?:drop|skip) (?:this|that|it)\b",
     re.IGNORECASE)
 
 _TOPIC_PATTERNS = (
@@ -137,6 +152,42 @@ _TOPIC_PATTERNS = (
 def is_deferral(text: str) -> bool:
     """A founder explicitly delegates or cannot answer the current design detail."""
     return bool(_DEFERRAL_RE.match(text or ""))
+
+
+def founder_steer(text: str) -> str | None:
+    """An explicit founder steer (2026-09-12 transcript: 'No. You do it.',
+    'Can you move on from the UI?'): 'delegate' hands the current detail to
+    implementation; 'dismiss' closes the current area entirely. Both are
+    terminal - no rephrase-and-ask-again. Whole-message matching only for
+    deferrals; dismissal needs one clear phrase."""
+    t = (text or "").strip()
+    if is_deferral(t):
+        return "delegate"
+    if _DISMISS_RE.search(t):
+        return "dismiss"
+    return None
+
+
+# Implementation-choice questions the interviewer must never ask (the same
+# 2026-09-12 transcript: 'Which UI framework do you envision...?'). Technology
+# selection belongs to the spec stage under the system baseline; the interview
+# owns product intent and behavior. Deterministic guard, prompt-independent.
+_IMPL_QUESTION_RE = re.compile(
+    r"\b(?:which|what|pick|choose|envision)\b[^?]{0,90}"
+    r"\b(?:framework|librar\w*|toolkit|programming language|scripting language|"
+    r"tech(?:nology)? stack|database (?:engine|system|technology)|orm|cms|"
+    r"ui (?:framework|toolkit|library))\b",
+    re.IGNORECASE)
+# Constraint/affinity questions are product-level and legitimate (the
+# constraints area asks them openly; 'agnostic' closes it too).
+_IMPL_ALLOW_RE = re.compile(
+    r"constraint|affinity|mandat|must (?:use|be)|existing|already|locked", re.IGNORECASE)
+
+
+def implementation_question(question: str) -> bool:
+    """True when the question asks the founder to CHOOSE an implementation."""
+    q = question or ""
+    return bool(_IMPL_QUESTION_RE.search(q)) and not _IMPL_ALLOW_RE.search(q)
 
 
 def question_topic(question: str) -> str | None:
@@ -168,6 +219,16 @@ def safe_question(question: str, parked_topics: list[str], target: str | None) -
     if topic and topic in parked_topics:
         return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
     return question
+
+
+def guard_question(question: str, parked_topics: list[str], target: str | None) -> str:
+    """safe_question plus the implementation-choice guard: a technology-choice
+    question is replaced by the product-level fallback for the target area
+    (the behavior need stays with the interview; the tech choice moves to the
+    spec stage)."""
+    if implementation_question(question):
+        return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
+    return safe_question(question, parked_topics, target)
 
 
 def founder_control(text: str) -> str | None:

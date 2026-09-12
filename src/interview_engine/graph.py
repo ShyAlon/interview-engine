@@ -25,8 +25,8 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
 from .coverage import (COVERED, THIN, apply_reply, extract_turn_json, founder_control,
-                         initial_coverage, is_deferral, next_area, nfr_quantified, progress_line,
-                         question_topic, safe_question, status_block, turn_output_schema)
+                         founder_steer, guard_question, initial_coverage, next_area, nfr_quantified,
+                         progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
 from .telemetry import UsageLog
@@ -42,6 +42,7 @@ class InterviewState(TypedDict, total=False):
     coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
     coverage_target: str      # the area the last question aimed at ("skip" applies to it)
     parked_topics: list[str]  # founder-deferred sub-topics that must never be re-probed
+    delegated_decisions: list[dict]  # founder-delegated choices: {statement, source_turns} for the intent model
     turn_count: int
 
 
@@ -77,15 +78,32 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
 
-        # A direct deferral is terminal for the question's sub-topic. Keep the
-        # area honestly open/thin, but park this design detail across all later
-        # turns so “you decide” cannot cause increasingly specific rephrases.
-        if last is not None and getattr(last, "type", "") == "human" and is_deferral(getattr(last, "content", "")):
+        # Founder steers are terminal (2026-09-12 transcript: 'No. You do it.'
+        # got rephrased and re-asked twice). 'delegate' parks the sub-topic and
+        # records the delegation for the intent model; 'dismiss' closes the
+        # whole target area. Neither may be rephrased and re-asked.
+        steer = (founder_steer(getattr(last, "content", ""))
+                 if last is not None and getattr(last, "type", "") == "human" else None)
+        delegated = [dict(d) for d in (state.get("delegated_decisions") or [])]
+        if steer:
             prior_question = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
                                    if getattr(m, "type", "") == "ai"), "")
             parked = question_topic(prior_question)
             if parked and parked not in parked_topics:
                 parked_topics.append(parked)
+            area_label = state.get("coverage_target") or next_area(coverage) or "the current topic"
+            words = getattr(last, "content", "").strip()[:120]
+            turn_idx = len(state["messages"]) - 1  # the founder message's transcript index
+            topic = parked or area_label
+            delegated.append({
+                "statement": f"FOUNDER-DELEGATED: {topic} - the founder explicitly delegated this "
+                             f"decision ('{words}'); the spec/architecture stage owns the choice.",
+                "source_turns": [turn_idx]})
+            # dismiss closes the AREA only when no specific topic was parked;
+            # with a topic, parking it is the whole closure (the founder said
+            # 'move on from X', not 'this whole area is done')
+            if steer == "dismiss" and parked is None and area_label in coverage:
+                coverage[area_label] = "skipped"
 
         # founder control (ADR-0016): deterministic, never costs a model call
         control = founder_control(getattr(last, "content", "")) if last is not None else None
@@ -158,7 +176,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             "interview_turn", "Coverage", "completed", _t.time(), 0.0,
                             "NFRs claimed covered with no numbers given - holding thin; "
                             "say 'no numbers for the demo' to close it honestly"))
-            question = safe_question(parsed["question"].strip(), parked_topics, target)
+            question = guard_question(parsed["question"].strip(), parked_topics, target)
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
             # self-grading cannot jump 0/11 -> done.
@@ -174,7 +192,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
                                         progress_line(coverage)))
         return {"messages": [AIMessage(content=question)], "coverage": coverage,
-                "coverage_target": target or "", "parked_topics": parked_topics, "turn_count": turn}
+                "coverage_target": target or "", "parked_topics": parked_topics,
+                "delegated_decisions": delegated, "turn_count": turn}
 
     def route_interview(state: InterviewState) -> str:
         last = state["messages"][-1]
@@ -395,6 +414,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 parts.get("constraints") or [],
                 [n["statement"] for n in parts["stakeholder_needs"]])
             parts["constraints"] = kept_c
+            # Founder-delegated decisions (steers like 'you do it'): appended by
+            # CODE from interview state - grounded by construction, never left
+            # for the distillation model to remember.
+            for d in state.get("delegated_decisions") or []:
+                if d not in parts["assumption_items"]:
+                    parts["assumption_items"].append(dict(d))
             if progress is not None:
                 for d in dropped_a:
                     progress.emit(ProgressEvent("distill_validate", "Dropped ungrounded assumption",
