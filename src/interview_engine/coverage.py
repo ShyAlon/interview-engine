@@ -145,6 +145,7 @@ _TOPIC_PATTERNS = (
     ("availability target", re.compile(r"\b(uptime|availability|downtime|sla)\w*\b", re.I)),
     ("technology-stack detail", re.compile(r"\b(programming language|framework|tech stack)\b", re.I)),
     ("database detail", re.compile(r"\b(database|sql|nosql|data store)\b", re.I)),
+    ("persistence/storage detail", re.compile(r"\b(persist\w*|storage|data store)\b", re.I)),
     ("cloud/infrastructure detail", re.compile(r"\b(cloud|aws|azure|gcp|infrastructure|hosting)\b", re.I)),
 )
 
@@ -175,7 +176,10 @@ def founder_steer(text: str) -> str | None:
 _IMPL_QUESTION_RE = re.compile(
     r"\b(?:which|what|pick|choose|envision)\b[^?]{0,90}"
     r"\b(?:framework|librar\w*|toolkit|programming language|scripting language|"
-    r"tech(?:nology)? stack|database (?:engine|system|technology)|orm|cms|"
+    r"tech(?:nology)? stack|database (?:engine|system|technology|solution)|orm|cms|"
+    r"(?:data )?storage (?:solution|engine|system|technology|mechanism)|"
+    r"persistence (?:solution|layer|mechanism|technology)|"
+    r"hosting (?:provider|platform)|auth(?:entication)? (?:provider|solution)|"
     r"ui (?:framework|toolkit|library))\b",
     re.IGNORECASE)
 # Constraint/affinity questions are product-level and legitimate (the

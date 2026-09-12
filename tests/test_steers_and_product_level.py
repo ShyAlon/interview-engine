@@ -128,3 +128,42 @@ def test_delegation_reaches_the_intent_model(monkeypatch):
     im = r.get("intent_model") or {}
     stmts = [a.get("statement", "") for a in im.get("assumption_items", [])]
     assert any(s.startswith("FOUNDER-DELEGATED:") for s in stmts), stmts
+
+
+# --- the exact turn 21-23 exchange from session 20260912-201837-bd17 ---
+
+def test_storage_drilling_is_suppressed():
+    assert implementation_question(
+        "What data storage solution do you envision for persisting user points across devices?")
+    assert implementation_question(
+        "What specific storage solution do you envision that is both simple and cost-effective "
+        "for persisting user data?")
+
+
+def test_persistence_deferral_parks_and_stops_the_drill(monkeypatch):
+    # turn 21: behavior-flavored question, founder delegates; turns 22/23 must
+    # NOT re-ask storage - the parked topic + the widened impl guard both fire
+    probing = FakeModel([
+        structured("How will the app handle data persistence to ensure points are saved "
+                   "across devices and over time?", thin=["data"]),
+        structured("What data storage solution do you envision for persisting user points "
+                   "across devices?"),
+        structured("What specific storage solution do you envision that is both simple "
+                   "and cost-effective for persisting user data?"),
+    ])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t1"))
+    start(g, thread="steer5")
+    r = g.invoke({"messages": [HumanMessage(content="You decide")]},
+                 {"configurable": {"thread_id": "steer5"}})
+    assert "persistence/storage detail" in r["parked_topics"]
+    assert r["delegated_decisions"][0]["statement"].startswith(
+        "FOUNDER-DELEGATED: persistence/storage detail")
+    # turn 22's storage question is suppressed before it reaches the founder
+    q22 = r["messages"][-1].content.lower()
+    assert "storage" not in q22 and "persist" not in q22
+    # and turn 23 after a non-steer answer is suppressed too
+    r2 = g.invoke({"messages": [HumanMessage(content="Simple and cheap")]},
+                  {"configurable": {"thread_id": "steer5"}})
+    q23 = r2["messages"][-1].content.lower()
+    assert "storage" not in q23 and "persist" not in q23
