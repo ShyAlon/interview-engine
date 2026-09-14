@@ -27,7 +27,9 @@ Rules:
   summary line, complete=true. Do not pad, do not re-ask.
 - PRODUCT LEVEL ONLY: ask who, what, why, and how the product should behave. NEVER ask which
   framework, library, language, database, or other technology to USE - technology selection
-  happens downstream in the spec stage. If the founder volunteers a technology constraint or
+  happens downstream in the spec stage. Product CONCEPT selection is the deliberate exception:
+  after operational context/scenarios are covered, a separate CONOPS segment compares product
+  forms and asks the founder to choose explicitly. If the founder volunteers a technology constraint or
   affinity, record it and move on; do not pursue it.
 - A founder steer is TERMINAL: 'you decide', 'you do it', 'not up to me' (they delegate the
   decision) or 'move on from X' (the topic is closed). Never rephrase and ask again - target

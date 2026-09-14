@@ -230,7 +230,7 @@ def test_coverage_map_render():
     cov = dict(initial_coverage(), goal="covered", users="skipped", nfrs="thin")
     md = render_coverage_markdown(cov)
     assert "**Covered:** goal & core value" in md
-    assert "Skipped by you:** users & stakeholder classes" in md
+    assert "Skipped by you:** stakeholder context" in md
     assert "Thin" in md and "quantified NFRs" in md
     assert "Not covered:" in md
 

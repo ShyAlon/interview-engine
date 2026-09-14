@@ -23,6 +23,15 @@ SCOPE_REPLY = {
 PREVIEW_REPLY = [{"need_id": "SN-1", "kind": "functional",
                   "statement": "The system shall emit a spec.", "example_criterion": "spec file exists"}]
 
+CONOPS_REPLY = {"stakeholder_context": [{"stakeholder": "founder", "role": "authors specs",
+ "goals": ["finish a spec"], "operating_environment": "desktop", "source_turns": [0]}],
+ "operational_scenarios": [{"scenario_id": "OS-1", "name": "Create spec", "trigger": "idea",
+ "actors": ["founder"], "operational_flow": ["describe idea", "review output"],
+ "success_outcome": "approved spec", "exceptions": [], "source_turns": [0]}],
+ "concept_options": [{"name": "Web app", "summary": "browser app", "advantages": ["access"],
+ "disadvantages": ["browser limits"]}, {"name": "Native app", "summary": "installed app",
+ "advantages": ["native APIs"], "disadvantages": ["distribution"]}]}
+
 
 
 class FakeModel:
@@ -58,6 +67,7 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     models = {
         "probing": FakeModel([json.dumps({"question": "What is the goal?", "covered": [], "thin": [], "skipped": [], "complete": False}), "[INTERVIEW COMPLETE]"]),
         "distillation": FakeModel([json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)]),
+        "conops": FakeModel([json.dumps(CONOPS_REPLY)]),
         "scope_tiebreak": FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']),
     }
     monkeypatch.setattr(model_config, "build_chat_model", lambda stage, **kwargs: models[stage])
@@ -76,7 +86,7 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     monkeypatch.setattr(cli, "IntentModel", ExplodingIntent)
 
     with pytest.raises(Exception):
-        run_cli_with_inputs("the answer".split("\n"), ["prog", "a saas web app for surf schools with booking and logins"])
+        run_cli_with_inputs(["the answer", "1"], ["prog", "a saas web app for surf schools with booking and logins"])
 
     outdir = tmp_path / "out" / session
     assert (outdir / "intent_model.raw.json").exists(), "raw distillation preserved before validation"

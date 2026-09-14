@@ -307,6 +307,7 @@ class StageModel:
 _STAGE_DEFAULTS: dict[str, StageModel] = {
     "probing":       StageModel("ollama", "qwen2.5-coder:14b", temperature=0.5),
     "distillation":  StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
+    "conops":         StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
     "phrasing":      StageModel("ollama", "qwen2.5-coder:14b", temperature=0.7),
     "scope_tiebreak": StageModel("ollama", "qwen2.5-coder:14b", temperature=0.0),
 }

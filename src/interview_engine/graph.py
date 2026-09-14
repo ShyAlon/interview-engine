@@ -37,6 +37,8 @@ class InterviewState(TypedDict, total=False):
     submission: dict          # IntakeSubmission as dict
     verdict: dict             # ScopeVerdict as dict
     intent_model: dict        # IntentModel as dict, after distillation
+    conops_draft: dict        # validated context/scenarios/options, awaiting founder choice
+    conops: dict              # founder-confirmed ConOpsDocument
     distill_warnings: list[str]  # non-blocking flags for the approval gate (e.g. unrecognized ecosystem name)
     requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
     coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
@@ -49,9 +51,10 @@ class InterviewState(TypedDict, total=False):
 MAX_TURNS = 60  # hard stop: 30-60 min target; a runaway interview is a cost leak
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False):
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
     distill_model = model_config.build_chat_model("distillation")
+    conops_model = model_config.build_chat_model("conops") if conops_enabled else None
     tiebreak_model = model_config.build_chat_model("scope_tiebreak")
 
     def node_scope_gate(state: InterviewState) -> dict:
@@ -65,7 +68,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return {"verdict": verdict.model_dump(mode="json")}
 
     def route_scope(state: InterviewState) -> str:
-        return "interview_turn" if state["verdict"]["accepted"] else END
+        if not state["verdict"]["accepted"]:
+            return END
+        if conops_enabled and state.get("intent_model") and not state.get("conops"):
+            return "conops"
+        return "interview_turn"
 
     def node_interview_turn(state: InterviewState) -> dict:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -479,15 +486,81 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return {"intent_model": intent.model_dump(mode="json"), "requirement_preview": preview,
                 "distill_warnings": warnings_tp}
 
+
+    def node_conops(state: InterviewState) -> dict:
+        """One resumable stage: draft once, pause for an exact founder choice,
+        then finalize without another model call."""
+        if state.get("conops"):
+            return {}
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from .conops_stage import (CONOPS_SYSTEM, comparison_question, finalize,
+                                   validate_draft)
+        from .errors import UserFacingError
+        from .repair import extract_json_value
+        import json as _json
+
+        draft = state.get("conops_draft")
+        last = state.get("messages", [])[-1] if state.get("messages") else None
+        if draft:
+            if last is None or getattr(last, "type", "") != "human":
+                return {}
+            source_turn = len(state["messages"]) - 1
+            try:
+                doc = finalize(draft, state["submission"]["submission_id"],
+                               getattr(last, "content", ""), source_turn)
+            except ValueError:
+                return {"messages": [AIMessage(content=comparison_question(draft)
+                    + "\n\nI couldn't match that to one option. Reply with its number or exact name.")]}
+            if progress is not None:
+                progress.emit(ProgressEvent("conops", "Concept of Operations decision", "completed",
+                                            _time.time(), 0.0, doc.decision.selected_concept))
+            return {"conops": doc.model_dump(mode="json")}
+
+        transcript = "\n".join(
+            f"[{i}] {getattr(m, 'type', '?')}: {getattr(m, 'content', '')}"
+            for i, m in enumerate(state.get("messages", [])))
+        founder_turns = {i for i, m in enumerate(state.get("messages", []))
+                         if getattr(m, "type", "") == "human"}
+        feedback = None
+        with track(progress, "conops", "Building Concept of Operations",
+                   "stakeholder context, operational scenarios, concept comparison"):
+            for attempt in (1, 2):
+                messages = [SystemMessage(content=CONOPS_SYSTEM + "\n\nTRANSCRIPT:\n" + transcript)]
+                if feedback:
+                    messages.append(HumanMessage(content=feedback))
+                t0 = _time.time()
+                resp = model_config.invoke_checked(conops_model, messages, "conops")
+                usage_log.record("conops", model_config.for_stage("conops").provider,
+                                 model_config.for_stage("conops").model,
+                                 (getattr(resp, "usage_metadata", None) or {}),
+                                 duration_s=_time.time() - t0)
+                try:
+                    raw = _json.loads(extract_json_value(resp.content))
+                    draft = validate_draft(raw, founder_turns)
+                    break
+                except Exception as exc:
+                    if attempt == 2:
+                        raise UserFacingError(
+                            "stage 'conops': the Concept of Operations draft failed validation twice.",
+                            f"validation detail: {str(exc)[:300]}",
+                            "rerun with the same --session id; intent and transcript are checkpointed, "
+                            "or route INTERVIEW_ENGINE_MODEL_CONOPS to a stronger model.") from exc
+                    feedback = ("Previous output failed Concept of Operations validation: "
+                                + str(exc)[:350] + ". Return one corrected JSON object only.")
+        return {"conops_draft": draft,
+                "messages": [AIMessage(content=comparison_question(draft))]}
+
     g = StateGraph(InterviewState)
     g.add_node("scope_gate", node_scope_gate)
     g.add_node("interview_turn", node_interview_turn)
     g.add_node("distill_intent", node_distill)
+    g.add_node("conops", node_conops)
     g.set_entry_point("scope_gate")
-    g.add_conditional_edges("scope_gate", route_scope, {"interview_turn": "interview_turn", END: END})
+    g.add_conditional_edges("scope_gate", route_scope, {"interview_turn": "interview_turn", "conops": "conops", END: END})
     g.add_conditional_edges("interview_turn", route_interview,
                             {"interview_turn": "interview_turn", "await_founder": END, "distill_intent": "distill_intent"})
-    g.add_edge("distill_intent", END)
+    g.add_edge("distill_intent", "conops" if conops_enabled else END)
+    g.add_edge("conops", END)
 
     return g.compile(checkpointer=checkpointer or MemorySaver())
 

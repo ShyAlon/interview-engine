@@ -15,8 +15,8 @@ import re
 # (key, human label, what "concrete" means for closing it) - order is priority.
 AREAS = [
     ("goal", "goal & core value", "the problem and who hurts, in a sentence"),
-    ("users", "users & stakeholder classes", "primary users plus at least one other class (admins, support, integrators, regulators)"),
-    ("flows", "core flows", "the 1-3 things a user actually does, end to end"),
+    ("users", "stakeholder context", "primary and supporting stakeholders, their roles, and where/when they operate"),
+    ("flows", "operational scenarios", "at least one concrete trigger-to-outcome scenario with actors, ordered steps, and exceptions"),
     ("data", "data model & sources", "what data, where it lives, who owns it"),
     ("integrations", "integrations", "named systems/APIs, not categories"),
     ("nfrs", "quantified NFRs", "NUMBERS: users, volume, latency/freshness fail-point, uptime - 'strict security' is thin"),
@@ -214,8 +214,8 @@ def question_topic(question: str) -> str | None:
 
 _FALLBACK_QUESTIONS = {
     "goal": "What outcome would make this product worth building?",
-    "users": "Who besides the primary user will operate, support, or be affected by it?",
-    "flows": "What is the most important user flow from start to finish?",
+    "users": "Who operates, supports, or is affected by it, and where or when do they do that work?",
+    "flows": "Walk me through the most important operational scenario from trigger to successful outcome, including what can go wrong.",
     "data": "What information goes in, where does it come from, and who owns it?",
     "integrations": "Which external systems must exchange data with it?",
     "nfrs": "Apart from parked design details, what user volume, response-time, or uptime target matters most?",

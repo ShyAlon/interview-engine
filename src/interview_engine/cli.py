@@ -20,7 +20,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
-from vmodel_contracts import AppArchetype, IntakeSubmission, IntentModel, run_with_system_awake
+from vmodel_contracts import AppArchetype, ConOpsDocument, IntakeSubmission, IntentModel, run_with_system_awake
 
 from .errors import UserFacingError, run_cli, translate_json_error
 from . import model_config as _mc
@@ -201,7 +201,7 @@ def main() -> None:
     # the msgpack serde unregistered (AppArchetype allow-listed as belt).
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     checkpointer = SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
-    graph = build_graph(log, checkpointer=checkpointer, progress=bus)
+    graph = build_graph(log, checkpointer=checkpointer, progress=bus, conops_enabled=True)
     cfg = {"configurable": {"thread_id": session}}
     print(f"Models: {_mc.describe_models()}", file=sys.stderr)
 
@@ -214,9 +214,9 @@ def main() -> None:
                 "the checkpoint file exists but is empty.",
                 "run without --session to start a fresh interview.",
             )
-        finished = "intent_model" in current.values  # crashed AT/AFTER distillation
+        finished = "conops" in current.values
         if finished:
-            print("The interview had already completed; re-rendering the intent model from the checkpoint.",
+            print("The interview and Concept of Operations had already completed; re-rendering artifacts from the checkpoint.",
                   file=sys.stderr)
         state = None  # resume from the checkpoint
     else:
@@ -243,7 +243,7 @@ def main() -> None:
         if verdict and not verdict["accepted"]:
             print("\n" + verdict["decline_message"])
             return
-        if "intent_model" in result:
+        if "conops" in result:
             break
         last = result["messages"][-1].content
         if "[INTERVIEW COMPLETE]" in last:
@@ -252,6 +252,13 @@ def main() -> None:
         print(f"\nInterviewer: {last}")
         reply = input("You: ")
         state = {"messages": [HumanMessage(content=reply)]}
+
+    # Both stage artifacts are contract-validated in-node. CONOPS is separate,
+    # never folded into the intent model.
+    conops = ConOpsDocument.model_validate(result["conops"])
+    (outdir / "conops.json").write_text(conops.model_dump_json(indent=2))
+    from .conops_stage import render_conops
+    (outdir / "conops.md").write_text(render_conops(conops))
 
     # The graph validated the intent model in-node; write the raw artifact
     # BEFORE re-validating so a future contract bump can never strand a run.
@@ -298,7 +305,7 @@ def main() -> None:
     log.write_summary(outdir / "usage_summary.json")
     _print_usage_table(log)
     print(f"\nApproved. Artifacts in {outdir.resolve()}/")
-    print("Next: hand intent_model.json to spec-generator.")
+    print("Next: hand intent_model.json and conops.json to spec-generator.")
 
 
 if __name__ == "__main__":
