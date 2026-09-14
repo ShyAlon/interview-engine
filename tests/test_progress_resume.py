@@ -385,3 +385,19 @@ def test_distill_persistent_garbage_friendly_error_with_snippet(fake_models):
     rendered = ei.value.render()
     assert "automatic retry did not fix it" in rendered
     assert "still no json" in rendered
+
+
+def test_dict_shaped_constraint_normalized_before_dedup(fake_models):
+    """Live session d630: phase 4 crashed in content_words because the scope
+    model emitted a structured constraint object instead of a string."""
+    scope = dict(SCOPE_REPLY, constraints=[
+        {"constraint": "$0 infrastructure budget during the demo", "source_turns": [0]},
+        {"statement": "founder data must stay secure", "source_turns": [0]},
+    ])
+    fake_models["distillation"] = FakeModel(
+        [json.dumps(NEEDS_REPLY), json.dumps(scope), json.dumps(PREVIEW_REPLY)])
+    g = build_graph(UsageLog("t1"))
+    r = run_one_turn(g, {"configurable": {"thread_id": "dict-constraint"}})
+    intent = IntentModel.model_validate(r["intent_model"])
+    assert intent.constraints == ["$0 infrastructure budget during the demo"]
+    assert all(isinstance(c, str) for c in intent.constraints)

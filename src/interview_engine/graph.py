@@ -337,17 +337,30 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     "operational_concepts": _statements(data.get("operational_concepts") or []),
                     "assumptions": data.get("assumptions") or []}
 
-        def _as_str_list(v):
-            # run-4 drift: the model blends scope_exclusions' object shape into
-            # the flat lists. Coerce {item: ...} dicts to their item string.
+        def _as_str_list(v, *, field: str):
+            """Normalize model-drifted list entries at the distillation boundary.
+
+            Structured entries are accepted only through a field-specific text
+            key. Never stringify an arbitrary dict: its repr would become
+            accidental product data and hide schema drift.
+            """
+            text_key = "constraint" if field == "constraints" else "item"
             out = []
             for x in v or []:
                 if isinstance(x, str):
-                    out.append(x)
-                elif isinstance(x, dict) and isinstance(x.get("item"), str):
-                    out.append(x["item"])
+                    text = x
+                elif isinstance(x, dict) and isinstance(x.get(text_key), str):
+                    text = x[text_key]
+                elif field == "constraints" and isinstance(x, dict)                         and isinstance(x.get("statement"), str):
+                    # Some models reuse the grounded-statement shape here.
+                    text = x["statement"]
                 else:
-                    raise ValueError(f"scope list item must be a string, got {type(x).__name__}: {str(x)[:80]}")
+                    raise ValueError(f"{field} item must be text or an object with {text_key!r} text, "
+                                     f"got {type(x).__name__}: {str(x)[:80]}")
+                text = text.strip()
+                if not text:
+                    raise ValueError(f"{field} item text must not be empty")
+                out.append(text)
             return out
 
         def _valid_scope(data):
@@ -359,10 +372,15 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for k in required_list:
                 if not isinstance(data.get(k), list):
                     raise ValueError(f"{k} must be a list")
-                data[k] = _as_str_list(data[k])
+                data[k] = _as_str_list(data[k], field=k)
             if not data["out_of_scope"]:
                 raise ValueError("out_of_scope is empty - derive at least one exclusion from the conversation")
             from vmodel_contracts import ScopeExclusion
+            for k in ("external_integrations", "constraints", "open_questions"):
+                raw = data.get(k) or []
+                if not isinstance(raw, list):
+                    raise ValueError(f"{k} must be a list")
+                data[k] = _as_str_list(raw, field=k)
             exclusions = [ScopeExclusion.model_validate(x).model_dump(mode="json")
                           for x in (data.get("scope_exclusions") or [])]
             keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "glossary", "source_turns")
@@ -433,7 +451,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 parts["assumptions"] = []
             kept_c, dropped_c = dedup_constraints(
                 parts.get("constraints") or [],
-                [n["statement"] for n in parts["stakeholder_needs"]])
+                [str(n.get("statement", "")) for n in parts["stakeholder_needs"]
+                 if isinstance(n, dict) and str(n.get("statement", "")).strip()])
             parts["constraints"] = kept_c
             # Founder-delegated decisions (steers like 'you do it'): appended by
             # CODE from interview state - grounded by construction, never left
