@@ -86,7 +86,7 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     monkeypatch.setattr(cli, "IntentModel", ExplodingIntent)
 
     with pytest.raises(Exception):
-        run_cli_with_inputs(["the answer", "1"], ["prog", "a saas web app for surf schools with booking and logins"])
+        run_cli_with_inputs(["the answer", "1 - browser access"], ["prog", "a saas web app for surf schools with booking and logins"])
 
     outdir = tmp_path / "out" / session
     assert (outdir / "intent_model.raw.json").exists(), "raw distillation preserved before validation"

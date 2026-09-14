@@ -51,32 +51,37 @@ def comparison_question(draft: dict) -> str:
         lines += [f"{i}. {o.name}: {o.summary}",
                   f"   + {'; '.join(o.advantages)}",
                   f"   - {'; '.join(o.disadvantages)}"]
-    lines.append("Reply with the option number or exact concept name. This is an explicit founder decision.")
+    lines.append("Reply with the option number or exact concept name, then ` - ` and why you chose it. This is an explicit founder decision.")
     return "\n".join(lines)
 
 
-def selected_option(reply: str, options: list[dict]) -> ConceptOption | None:
-    """Exact name or standalone option number only. No fuzzy/model inference."""
-    text = reply.strip()
-    m = re.fullmatch(r"(?:option\s*)?(\d+)[.!]?", text, re.I)
+def decision_reply(reply: str, options: list[dict]) -> tuple[ConceptOption, str] | None:
+    """Exact option + founder rationale. No fuzzy/model inference."""
+    choice, sep, rationale = reply.strip().partition(" - ")
+    if not sep or not rationale.strip():
+        return None
+    m = re.fullmatch(r"(?:option\s*)?(\d+)[.!]?", choice.strip(), re.I)
     if m:
         i = int(m.group(1)) - 1
-        return ConceptOption.model_validate(options[i]) if 0 <= i < len(options) else None
-    matches = [ConceptOption.model_validate(o) for o in options
-               if text.casefold() == str(o.get("name", "")).strip().casefold()]
-    return matches[0] if len(matches) == 1 else None
+        selected = ConceptOption.model_validate(options[i]) if 0 <= i < len(options) else None
+    else:
+        matches = [ConceptOption.model_validate(o) for o in options
+                   if choice.strip().casefold() == str(o.get("name", "")).strip().casefold()]
+        selected = matches[0] if len(matches) == 1 else None
+    return (selected, rationale.strip()) if selected else None
 
 
 def finalize(draft: dict, session_id: str, founder_reply: str, source_turn: int) -> ConOpsDocument:
-    selected = selected_option(founder_reply, draft["concept_options"])
-    if selected is None:
-        raise ValueError("founder reply did not exactly select one compared concept")
+    parsed = decision_reply(founder_reply, draft["concept_options"])
+    if parsed is None:
+        raise ValueError("founder reply did not exactly select one concept and give a rationale")
+    selected, rationale = parsed
     return ConOpsDocument.model_validate({
         "session_id": session_id,
         **draft,
         "decision": ConceptDecision(
             selected_concept=selected.name,
-            rationale=f"Founder selected {selected.name} after reviewing the recorded trade-offs.",
+            rationale=rationale,
             founder_confirmed=True,
             source_turns=[source_turn],
         ).model_dump(mode="json"),

@@ -4,7 +4,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from vmodel_contracts import ConOpsDocument
 
 from interview_engine.conops_stage import (comparison_question, finalize,
-                                            selected_option, validate_draft)
+                                            decision_reply, validate_draft)
 
 
 def draft():
@@ -24,10 +24,12 @@ def draft():
 def test_draft_provenance_and_explicit_selection():
     d = validate_draft(draft(), {0, 2})
     assert "Concept Decision" in comparison_question(d)
-    assert selected_option("1", d["concept_options"]).name == "Native app"
-    assert selected_option("PWA", d["concept_options"]).name == "PWA"
-    assert selected_option("I lean native", d["concept_options"]) is None
-    doc = finalize(d, "s", "2", 5)
+    assert decision_reply("1 - native APIs are required", d["concept_options"])[0].name == "Native app"
+    assert decision_reply("PWA - one deployment", d["concept_options"])[0].name == "PWA"
+    assert decision_reply("1", d["concept_options"]) is None
+    assert decision_reply("I lean native - maybe", d["concept_options"]) is None
+    doc = finalize(d, "s", "2 - one deployment is enough", 5)
+    assert doc.decision.rationale == "one deployment is enough"
     assert ConOpsDocument.model_validate(doc).decision.source_turns == [5]
 
 
@@ -56,6 +58,6 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
                                  "founder_id": "f", "submission_id": "s"}}, cfg)
     assert r["conops_draft"] and not r.get("conops")
     assert "Concept Decision" in r["messages"][-1].content
-    r = g.invoke({"messages": [HumanMessage(content="1")]}, cfg)
+    r = g.invoke({"messages": [HumanMessage(content="1 - reliable native APIs")]}, cfg)
     assert r["conops"]["decision"]["selected_concept"] == "Native app"
     assert conops.calls == 1

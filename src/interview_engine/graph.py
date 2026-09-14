@@ -510,7 +510,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                getattr(last, "content", ""), source_turn)
             except ValueError:
                 return {"messages": [AIMessage(content=comparison_question(draft)
-                    + "\n\nI couldn't match that to one option. Reply with its number or exact name.")]}
+                    + "\n\nI couldn't match an exact option plus rationale. Reply as `<number or exact name> - <why you chose it>`.")]}
             if progress is not None:
                 progress.emit(ProgressEvent("conops", "Concept of Operations decision", "completed",
                                             _time.time(), 0.0, doc.decision.selected_concept))
