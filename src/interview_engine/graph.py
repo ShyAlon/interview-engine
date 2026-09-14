@@ -544,7 +544,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             "stage 'conops': the Concept of Operations draft failed validation twice.",
                             f"validation detail: {str(exc)[:300]}",
                             "rerun with the same --session id; intent and transcript are checkpointed, "
-                            "or route INTERVIEW_ENGINE_MODEL_CONOPS to a stronger model.") from exc
+                            "or change the shared INTERVIEW_ENGINE_MODEL_DISTILLATION route.") from exc
                     feedback = ("Previous output failed Concept of Operations validation: "
                                 + str(exc)[:350] + ". Return one corrected JSON object only.")
         return {"conops_draft": draft,

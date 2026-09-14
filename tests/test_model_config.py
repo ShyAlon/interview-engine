@@ -129,3 +129,20 @@ def test_anthropic_structured_adapter_preserves_raw_metadata():
     assert out.response_metadata["stop_reason"] == "end_turn"
     assert out.usage_metadata["output_tokens"] == 2
     assert __import__("json").loads(out.content)["question"] == "Who uses it?"
+
+
+def test_conops_uses_shared_distillation_route_never_its_own_default(monkeypatch, tmp_path):
+    """Regression: first live CONOPS run used qwen while every configured stage
+    used phi4 because the new stage invented an independent default/key."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "INTERVIEW_ENGINE_MODEL_PROBING=ollama:phi4\n"
+        "INTERVIEW_ENGINE_MODEL_DISTILLATION=ollama:phi4\n"
+        "INTERVIEW_ENGINE_MODEL_CONOPS=ollama:wrong-stage-specific-model\n"
+    )
+    monkeypatch.setattr(model_config, "_DOTENV", None)
+    monkeypatch.delenv("INTERVIEW_ENGINE_MODEL_DISTILLATION", raising=False)
+    monkeypatch.delenv("INTERVIEW_ENGINE_MODEL_CONOPS", raising=False)
+    assert model_config.for_stage("distillation").model == "phi4"
+    assert model_config.for_stage("conops").model == "phi4"
+    assert "conops=ollama/phi4" in model_config.describe_models()

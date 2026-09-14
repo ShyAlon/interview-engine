@@ -307,6 +307,9 @@ class StageModel:
 _STAGE_DEFAULTS: dict[str, StageModel] = {
     "probing":       StageModel("ollama", "qwen2.5-coder:14b", temperature=0.5),
     "distillation":  StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
+    # CONOPS is intentionally not configured independently. It follows the
+    # shared distillation route below, so adding a stage can never fall back to
+    # a different model than the interview configured in the shared .env.
     "conops":         StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
     "phrasing":      StageModel("ollama", "qwen2.5-coder:14b", temperature=0.7),
     "scope_tiebreak": StageModel("ollama", "qwen2.5-coder:14b", temperature=0.0),
@@ -329,12 +332,17 @@ def for_stage(stage: str) -> StageModel:
     if stage not in _STAGE_DEFAULTS:
         raise KeyError(f"unknown stage {stage!r}; add it explicitly - silent fallback models are how budgets leak")
     cfg = _STAGE_DEFAULTS[stage]
-    # Env override: INTERVIEW_ENGINE_MODEL_PROBING=ollama:qwen2.5-coder:14b etc.
-    override = _env(f"INTERVIEW_ENGINE_MODEL_{stage.upper()}")
+    # Concept of Operations is part of interview understanding, not its own
+    # model tier. It MUST follow the shared distillation route. The first live
+    # run exposed why: all configured stages used phi4, while a new CONOPS key
+    # silently fell back to qwen. There is deliberately no
+    # INTERVIEW_ENGINE_MODEL_CONOPS setting.
+    route = "distillation" if stage == "conops" else stage
+    override = _env(f"INTERVIEW_ENGINE_MODEL_{route.upper()}")
     if override:
         provider, _, model = override.partition(":")
         return StageModel(provider, model, cfg.temperature, cfg.max_tokens)
-    return cfg
+    return _STAGE_DEFAULTS[route] if stage == "conops" else cfg
 
 
 def _preflight(cfg: "StageModel", stage: str) -> None:
