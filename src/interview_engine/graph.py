@@ -25,7 +25,7 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
 from .coverage import (COVERED, THIN, SKIPPED, _LABELS, apply_reply, extract_turn_json, founder_control,
-                         founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, DELEGATED,
+                         founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, same_question_substance, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
@@ -137,10 +137,15 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         attempts = sum(1 for q in (state.get("question_history") or []) if q.get("area") == target)
         if target and attempts >= 2 and coverage.get(target) in ("uncovered", "thin"):
             prior = [q.get("question", "") for q in (state.get("question_history") or []) if q.get("area") == target]
+            # The current founder turn is the evidence for deferring this
+            # unresolved detail. Keep the question history in graph state; the
+            # contract assumption carries only its statement and real source.
+            source_turn = len(state.get("messages") or []) - 1
             delegated.append({
                 "statement": f"FOUNDER-DELEGATED: {_LABELS.get(target, target)} - after two interview attempts, "
-                             "the remaining detail is left open for the spec/architecture stage instead of being re-asked.",
-                "source_turns": [], "attempted_questions": prior[-2:]})
+                             "the remaining detail is left open for the spec/architecture stage instead of being re-asked. "
+                             f"The founder's latest response was: '{getattr(last, 'content', '').strip()[:120]}'.",
+                "source_turns": [source_turn]})
             coverage[target] = DELEGATED
             target = next_area(coverage)
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
@@ -479,8 +484,36 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # CODE from interview state - grounded by construction, never left
             # for the distillation model to remember.
             for d in state.get("delegated_decisions") or []:
-                if d not in parts["assumption_items"]:
-                    parts["assumption_items"].append(dict(d))
+                # Remove an unvalidated copy the distillation model may have
+                # echoed from transcript/state before appending the normalized
+                # code-owned version below.
+                parts["assumption_items"] = [a for a in parts["assumption_items"]
+                    if str(a.get("statement", "")).strip() != str(d.get("statement", "")).strip()]
+                # Repair checkpoints written by bb5b8d4: the automatic
+                # two-attempt record had source_turns=[] and carried the
+                # graph-only attempted_questions field into the contract.
+                clean = {"statement": str(d.get("statement", "")).strip(),
+                         "source_turns": list(d.get("source_turns") or [])}
+                if not clean["source_turns"]:
+                    attempted = list(d.get("attempted_questions") or [])
+                    # The founder response immediately after the final emitted
+                    # attempted question is the actual provenance turn.
+                    messages = list(state.get("messages") or [])
+                    for i, message in enumerate(messages[:-1]):
+                        if (getattr(message, "type", "") == "ai" and attempted
+                                and same_question_substance(getattr(message, "content", ""), attempted[-1])
+                                and getattr(messages[i + 1], "type", "") == "human"):
+                            clean["source_turns"] = [i + 1]
+                    if not clean["source_turns"]:
+                        # Conservative compatibility fallback for an already
+                        # persisted invalid checkpoint: bind to the latest real
+                        # founder turn rather than fabricating no provenance.
+                        founder_turns = [i for i, m in enumerate(state.get("messages") or [])
+                                         if getattr(m, "type", "") == "human"]
+                        if founder_turns:
+                            clean["source_turns"] = [founder_turns[-1]]
+                if clean["statement"] and clean not in parts["assumption_items"]:
+                    parts["assumption_items"].append(clean)
             if progress is not None:
                 for d in dropped_a:
                     progress.emit(ProgressEvent("distill_validate", "Dropped ungrounded assumption",

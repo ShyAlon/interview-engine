@@ -295,6 +295,34 @@ def test_two_failed_attempts_become_visible_assumption_and_move_on(monkeypatch):
     r=g.invoke({"messages":[HumanMessage(content="We still need evidence")]},cfg)
     assert r["coverage"]["risks"]=="delegated"
     assumption=next(x for x in r["delegated_decisions"] if "after two interview attempts" in x["statement"])
-    assert len(assumption["attempted_questions"])==2
+    assert assumption["source_turns"] and "attempted_questions" not in assumption
     assert r["coverage_target"]=="done"
     assert "ready" in r["messages"][-1].content.lower()
+    # End to end: the same delegated assumption must survive intent assembly
+    # and validate against the current vmodel-contracts schema.
+    done=g.invoke({"messages":[HumanMessage(content="enough")]},cfg)
+    from vmodel_contracts import IntentModel
+    intent=IntentModel.model_validate(done["intent_model"])
+    auto=next(a for a in intent.assumption_items if "after two interview attempts" in a.statement)
+    assert auto.source_turns
+
+
+def test_resume_repairs_bb5b8d4_invalid_delegation_checkpoint(monkeypatch):
+    """The user's held session already contains the old invalid record."""
+    probing=FakeModel([structured("closing", covered=[k for k,_,_ in __import__('interview_engine.coverage',fromlist=['AREAS']).AREAS], complete=True)])
+    fake_models(monkeypatch,probing); g=build_graph(UsageLog("legacy-checkpoint")); cfg={"configurable":{"thread_id":"legacy-checkpoint"}}
+    messages=[HumanMessage(content="web supply chain predictor"),
+              AIMessage(content="What exact risk remains?"), HumanMessage(content="It is unclear"),
+              AIMessage(content="Which assumption could kill it?"), HumanMessage(content="We need evidence")]
+    old={"statement":"FOUNDER-DELEGATED: risks - after two interview attempts, the remaining detail is left open.",
+         "source_turns":[],"attempted_questions":["What exact risk remains?","Which assumption could kill it?"]}
+    cov={k:"covered" for k,_,_ in __import__('interview_engine.coverage',fromlist=['AREAS']).AREAS}
+    g.invoke({"messages":messages,"submission":{"free_text":"web supply chain predictor","founder_id":"t","submission_id":"legacy-checkpoint"},
+              "verdict":{"accepted":True},"coverage":cov,"coverage_target":"risks","delegated_decisions":[old]},cfg)
+    r=g.invoke({"messages":[HumanMessage(content="enough")]},cfg)
+    from vmodel_contracts import IntentModel
+    intent=IntentModel.model_validate(r["intent_model"])
+    fixed=next(a for a in intent.assumption_items if "after two interview attempts" in a.statement)
+    assert fixed.source_turns==[4]
+    dumped=fixed.model_dump(mode="json")
+    assert "attempted_questions" not in dumped
