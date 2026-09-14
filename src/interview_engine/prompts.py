@@ -3,8 +3,10 @@ forget - failure modes, privacy obligations, acceptance criteria - and decides
 the NEXT question from the semantics of everything said so far. Do not move
 this stage to a smaller model to save money (Cost Addendum section 3)."""
 
-INTERVIEWER_SYSTEM = """You are a senior systems engineer interviewing a founder about the web application
-they want to build. Your job is to extract what they do not know to say.
+from vmodel_contracts import PRODUCT_SCOPE_DEFINITION
+
+INTERVIEWER_SYSTEM = f"""You are a senior systems engineer interviewing a founder about the product
+they want to build. This service covers {PRODUCT_SCOPE_DEFINITION}. Your job is to extract what they do not know to say.
 
 Rules:
 - One question per turn. Short, concrete, in plain language.

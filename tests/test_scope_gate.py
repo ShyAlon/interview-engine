@@ -14,11 +14,25 @@ def test_clear_web_app_accepted():
     assert not v.llm_tiebreak_used
 
 
-def test_native_mobile_declined_politely():
+def test_native_mobile_app_accepted():
     v = verdict_deterministic(sub("A native iOS app distributed through the app store"))
-    assert v and not v.accepted
-    assert v.archetype == AppArchetype.NOT_WEB_APP
-    assert v.decline_message and "web applications" in v.decline_message
+    assert v and v.accepted and not v.llm_tiebreak_used
+
+
+def test_games_on_web_or_mobile_are_accepted():
+    for idea in ("A Pokemon battle game for mobile", "A browser game built with Unity"):
+        v = verdict_deterministic(sub(idea))
+        assert v and v.accepted, idea
+        assert "interactive game" in v.deterministic_signals
+
+
+def test_non_software_businesses_declined_with_canonical_scope():
+    from vmodel_contracts import PRODUCT_SCOPE_DEFINITION
+    for idea in ("I want to open a bakery business", "Start a logistics company"):
+        v = verdict_deterministic(sub(idea))
+        assert v and not v.accepted, idea
+        assert v.archetype == AppArchetype.NOT_WEB_APP
+        assert PRODUCT_SCOPE_DEFINITION in v.decline_message
 
 
 def test_ambiguous_goes_to_tiebreaker():
@@ -57,6 +71,8 @@ def test_tiebreak_prompt_formats_and_reaches_the_model():
     assert v.accepted and v.llm_tiebreak_used
     assert '"is_web_app"' in m.prompt            # the model still sees the JSON example
     assert "maybe web, maybe not" in m.prompt    # the idea text was substituted
+    from vmodel_contracts import PRODUCT_SCOPE_DEFINITION
+    assert PRODUCT_SCOPE_DEFINITION in m.prompt
 
 
 def test_tiebreak_usage_logging_uses_config_not_response_metadata(tmp_path):

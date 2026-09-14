@@ -1,30 +1,18 @@
-"""Web-apps-only scope gate. Hybrid by design (ADR-0005):
-deterministic signals first, LLM only as tiebreaker.
-
-In scope: web applications, including ones that consume web APIs/services.
-Out of scope (polite decline): native mobile apps, desktop, hardware/firmware,
-pure APIs with no web surface, physical systems (step 2 of the vision).
-"""
+"""Interactive-application scope gate. Hybrid by design (ADR-0005):
+deterministic signals first, LLM only as tiebreaker. The tuneable scope
+wording and signals are imported from vmodel-contracts.product_scope."""
 from __future__ import annotations
 
 import re
 
-from vmodel_contracts import AppArchetype, IntakeSubmission, ScopeVerdict
+from vmodel_contracts import (AppArchetype, IntakeSubmission,
+                              PRODUCT_SCOPE_DEFINITION, SCOPE_DECLINE_PREFIX,
+                              SCOPE_IN_SIGNALS, SCOPE_OUT_SIGNALS, ScopeVerdict)
 
-# Deterministic signal sets. Auditable: every verdict lists what fired.
-_OUT_SIGNALS: list[tuple[str, str]] = [
-    (r"\b(native|ios|android|app store|play store|swiftui|kotlin)\b", "mentions native mobile"),
-    (r"\b(desktop|electron app|windows app|mac app)\b", "desktop application"),
-    (r"\b(hardware|firmware|embedded|pcb|sensor|drone|vehicle|device)\b", "hardware/firmware"),
-    (r"\b(browser extension|chrome extension)\b", "browser extension"),
-    (r"\b(cli tool|command.line|dev.?tool sdk)\b", "CLI/dev tooling, no web surface"),
-    (r"\b(game|unity|unreal)\b", "game"),
-]
-_IN_SIGNALS: list[tuple[str, str]] = [
-    (r"\b(web ?app|website|web platform|web application|saas|portal|dashboard)\b", "explicit web app"),
-    (r"\b(marketplace|booking|storefront|checkout)\b", "web commerce pattern"),
-    (r"\b(login|sign up|account|subscription)\b", "account-based web pattern"),
-]
+# Aliases kept module-local only for compatibility with existing tests/imports;
+# the data itself has one owner in the contract layer.
+_OUT_SIGNALS = SCOPE_OUT_SIGNALS
+_IN_SIGNALS = SCOPE_IN_SIGNALS
 
 _ARCHETYPE_SIGNALS: list[tuple[str, AppArchetype]] = [
     (r"\bmarketplace|two.sided|buyers? and sellers?\b", AppArchetype.MARKETPLACE),
@@ -59,8 +47,7 @@ def verdict_deterministic(sub: IntakeSubmission) -> ScopeVerdict | None:
             archetype=AppArchetype.NOT_WEB_APP, confidence=min(0.7 + 0.1 * len(out_hits), 0.97),
             deterministic_signals=signals, llm_tiebreak_used=False,
             decline_message=(
-                "This service builds systems-engineering specs for web applications "
-                "(which may consume web APIs and services). What you described looks like "
+                SCOPE_DECLINE_PREFIX + " What you described looks like "
                 f"{out_hits[0]}, which is outside the current scope - so rather than hand "
                 "you a spec that doesn't fit, we'll stop here."
             ),
@@ -74,10 +61,13 @@ def verdict_deterministic(sub: IntakeSubmission) -> ScopeVerdict | None:
     return None  # mixed or silent: pay the tiebreaker
 
 
-TIE_BREAK_PROMPT = """Classify this product idea for a service that ONLY builds specs for web applications
-(apps in the browser; they may consume web APIs and services). Answer STRICT JSON:
-{{"is_web_app": true|false, "archetype": one of saas_crud|marketplace|content_site|dashboard|ecommerce|other_web|not_web_app, "confidence": 0..1, "reason": one sentence}}
-Idea: {text}"""  # literal JSON example braces are doubled: .format() fills {text} only
+TIE_BREAK_PROMPT = """Classify this product idea against this product scope:
+{scope}
+Accept interactive software applications delivered on web or mobile platforms, including games.
+Reject non-software businesses/products (for example a bakery or logistics company), hardware/firmware,
+and software with no interactive web/mobile application surface. Answer STRICT JSON:
+{{{{"is_web_app": true|false, "archetype": one of saas_crud|marketplace|content_site|dashboard|ecommerce|other_web|not_web_app, "confidence": 0..1, "reason": one sentence}}}}
+Idea: {{text}}""".format(scope=PRODUCT_SCOPE_DEFINITION)
 
 
 def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> ScopeVerdict:
@@ -110,7 +100,6 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> Scope
         deterministic_signals=classify(sub)[0] + classify(sub)[1],
         llm_tiebreak_used=True,
         decline_message=None if accepted else (
-            "This service builds specs for web applications only. "
-            f"{data['reason']} - so we'll stop here rather than hand you a spec that doesn't fit."
+            SCOPE_DECLINE_PREFIX + " " + f"{data['reason']} - so we'll stop here rather than hand you a spec that doesn't fit."
         ),
     )
