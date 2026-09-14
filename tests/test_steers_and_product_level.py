@@ -207,3 +207,94 @@ def test_leading_steer_inside_a_longer_answer():
     assert founder_steer("You suggest. I'm good with any cloud infrastructure.") == "delegate"
     assert founder_steer("This is implementation. I just want the app to be accessible and to "
                          "persist the users' data.") == "dismiss"
+
+# --- session 20260914-210005-68fa: historical-data question repeated 4x ---
+
+def test_historical_data_deflection_forms_are_terminal():
+    assert founder_steer("You decide") == "delegate"
+    assert founder_steer("The data science team will approve the final selection") == "delegate"
+    assert founder_steer("Leave the historical data") == "dismiss"
+
+
+def test_all_three_live_deflections_resolve_the_current_area(monkeypatch):
+    replies=["You decide", "The data science team will approve the final selection", "Leave the historical data"]
+    expected=["delegated", "delegated", "delegated"]
+    for i,(answer,status) in enumerate(zip(replies,expected)):
+        probing=FakeModel([structured("Which historical datasets should train the model?"),
+                           structured("Which historical data sources should train the model?")])
+        fake_models(monkeypatch,probing); g=build_graph(UsageLog(f"live-deflect-{i}"))
+        cfg={"configurable":{"thread_id":f"live-deflect-{i}"}}
+        cov={k:"covered" for k,_,_ in __import__('interview_engine.coverage',fromlist=['AREAS']).AREAS}
+        cov["data"]="uncovered"; cov["risks"]="thin"
+        g.invoke({"messages":[HumanMessage(content="weather and port feeds")],"submission":{"free_text":"web supply chain predictor","founder_id":"t","submission_id":f"live-deflect-{i}"},"verdict":{"accepted":True},"coverage":cov,"coverage_target":"data"},cfg)
+        r=g.invoke({"messages":[HumanMessage(content=answer)]},cfg)
+        assert r["coverage"]["data"]==status
+        assert r["delegated_decisions"]
+        assert "historical" not in r["messages"][-1].content.lower()
+
+
+def test_exact_historical_data_turn_sequence_resolves_and_never_reasks(monkeypatch):
+    probing = FakeModel([
+        structured("What specific historical data sources will train the predictive model?"),
+        structured("Which historical data providers will the data science team approve?"),
+        structured("What historical training datasets will be selected?"),
+    ])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("historical-repeat"))
+    cfg={"configurable":{"thread_id":"historical-repeat"}}
+    cov={k:"covered" for k,_,_ in __import__('interview_engine.coverage',fromlist=['AREAS']).AREAS}
+    cov["data"]="uncovered"; cov["risks"]="thin"
+    initial={"messages":[HumanMessage(content="Weather, geopolitical events, port congestion and customs data")],
+             "submission":{"free_text":"a web supply chain predictor","founder_id":"t","submission_id":"historical-repeat"},
+             "verdict":{"accepted":True},"coverage":cov,"coverage_target":"data"}
+    first=g.invoke(initial,cfg)
+    assert "historical data sources" in first["messages"][-1].content.lower()
+    r=g.invoke({"messages":[HumanMessage(content="You decide")]},cfg)
+    assert r["coverage"]["data"]=="delegated"
+    assert r["coverage_target"]=="risks"
+    assert r["delegated_decisions"] and "historical-data source selection" in r["parked_topics"]
+    assert "historical" not in r["messages"][-1].content.lower()
+    r2=g.invoke({"messages":[HumanMessage(content="The data science team will approve the final selection")]},cfg)
+    assert "historical" not in r2["messages"][-1].content.lower()
+
+
+def test_coverage_credit_and_question_selector_cannot_drift(monkeypatch):
+    probing = FakeModel([
+        structured("What exact outcome makes this worth building?", covered=["goal"]),
+        structured("Which outcome would make this product worthwhile?"),
+    ])
+    fake_models(monkeypatch, probing)
+    g=build_graph(UsageLog("credit-retarget")); cfg={"configurable":{"thread_id":"credit-retarget"}}
+    first=start(g,thread="credit-retarget")
+    assert first["coverage"]["goal"]=="covered" and first["coverage_target"]=="goal"
+    r=g.invoke({"messages":[HumanMessage(content="Operations managers") ]},cfg)
+    assert "outcome" not in r["messages"][-1].content.lower()
+
+
+def test_same_substance_question_is_reframed_after_two_attempts():
+    from interview_engine.coverage import same_question_substance, unique_question
+    a="What specific historical data sources will train the predictive model?"
+    b="Which historical data sources will be used to train the prediction model?"
+    assert same_question_substance(a,b)
+    q=unique_question(b,[{"area":"data","question":a}],"data")
+    assert not same_question_substance(q,a)
+
+
+def test_two_failed_attempts_become_visible_assumption_and_move_on(monkeypatch):
+    probing=FakeModel([
+        structured("What exact business risk remains?", thin=["risks"]),
+        structured("Which assumption could kill the product?", thin=["risks"]),
+        structured("What result proves the product is ready?"),
+    ])
+    fake_models(monkeypatch,probing); g=build_graph(UsageLog("two-attempts")); cfg={"configurable":{"thread_id":"two-attempts"}}
+    cov={k:"covered" for k,_,_ in __import__('interview_engine.coverage',fromlist=['AREAS']).AREAS}
+    cov["risks"]="uncovered"; cov["done"]="thin"
+    initial={"messages":[HumanMessage(content="web product")],"submission":{"free_text":"web product","founder_id":"t","submission_id":"two-attempts"},"verdict":{"accepted":True},"coverage":cov,"coverage_target":"risks"}
+    g.invoke(initial,cfg)
+    g.invoke({"messages":[HumanMessage(content="It is unclear today")]},cfg)
+    r=g.invoke({"messages":[HumanMessage(content="We still need evidence")]},cfg)
+    assert r["coverage"]["risks"]=="delegated"
+    assumption=next(x for x in r["delegated_decisions"] if "after two interview attempts" in x["statement"])
+    assert len(assumption["attempted_questions"])==2
+    assert r["coverage_target"]=="done"
+    assert "ready" in r["messages"][-1].content.lower()

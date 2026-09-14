@@ -116,12 +116,14 @@ def render_coverage_markdown(coverage: dict[str, str]) -> str:
     if not coverage:
         return ""
     from .coverage import AREA_KEYS, _LABELS
-    groups = {"covered": [], "thin": [], "skipped": [], "uncovered": []}
+    groups = {"covered": [], "delegated": [], "thin": [], "skipped": [], "uncovered": []}
     for k in AREA_KEYS:
         groups.get(coverage.get(k, "uncovered"), groups["uncovered"]).append(_LABELS[k])
     lines = ["\n## Interview coverage"]
     if groups["covered"]:
         lines.append("**Covered:** " + "; ".join(groups["covered"]))
+    if groups["delegated"]:
+        lines.append("**Covered by your delegation (recorded as assumptions):** " + "; ".join(groups["delegated"]))
     if groups["thin"]:
         lines.append("**Thin (mentioned, not concrete):** " + "; ".join(groups["thin"]))
     if groups["skipped"]:

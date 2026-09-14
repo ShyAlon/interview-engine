@@ -51,8 +51,8 @@ def turn_output_schema() -> dict:
         "additionalProperties": False,
     }
 
-UNCOVERED, THIN, COVERED, SKIPPED = "uncovered", "thin", "covered", "skipped"
-_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x"}
+UNCOVERED, THIN, COVERED, SKIPPED, DELEGATED = "uncovered", "thin", "covered", "skipped", "delegated"
+_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x", DELEGATED: "d"}
 
 
 def initial_coverage() -> dict[str, str]:
@@ -72,7 +72,7 @@ def status_block(coverage: dict[str, str]) -> str:
     """Compact per-turn coverage status for the interviewer system prompt."""
     marks = " ".join(f"{k}={_MARK[coverage.get(k, UNCOVERED)]}" for k in AREA_KEYS)
     nxt = next_area(coverage)
-    legend = "+ covered, ~ thin (mushy - needs concretes), - uncovered, x skipped by founder"
+    legend = "+ covered, d covered by explicit delegation, ~ thin, - uncovered, x skipped"
     block = f"COVERAGE [{marks}]  ({legend})"
     if nxt:
         label, concretes = next(((l, c) for k, l, c in AREAS if k == nxt))
@@ -83,7 +83,7 @@ def status_block(coverage: dict[str, str]) -> str:
 
 
 def progress_line(coverage: dict[str, str]) -> str:
-    done = [k for k in AREA_KEYS if coverage.get(k) in (COVERED, SKIPPED)]
+    done = [k for k in AREA_KEYS if coverage.get(k) in (COVERED, SKIPPED, DELEGATED)]
     nxt = next_area(coverage)
     line = f"coverage {len(done)}/{len(AREA_KEYS)} ({', '.join(done) or 'none yet'})"
     return line + (f" - next: {_LABELS[nxt]}" if nxt else " - saturated")
@@ -94,13 +94,13 @@ def apply_reply(coverage: dict[str, str], parsed: dict) -> dict[str, str]:
     can only improve or skip an area, never un-cover one."""
     out = dict(coverage)
     for k in parsed.get("covered") or []:
-        if k in out:
+        if k in out and out[k] not in (SKIPPED, DELEGATED):
             out[k] = COVERED
     for k in parsed.get("thin") or []:
-        if k in out and out[k] != COVERED:
+        if k in out and out[k] not in (COVERED, SKIPPED, DELEGATED):
             out[k] = THIN
     for k in parsed.get("skipped") or []:
-        if k in out and out[k] != COVERED:
+        if k in out and out[k] not in (COVERED, DELEGATED):
             out[k] = SKIPPED
     return out
 
@@ -124,7 +124,9 @@ _DEFERRAL_RE = re.compile(
     r"whatever works|i have no preference|"
     r"no[.!,]?\s+(?:you\s+(?:do\s+it|decide|choose|pick)|it'?s up to you)|"
     r"(?:i'?ll\s+|i will )?leave (?:it|that|this|the \w+) (?:up )?to you|"
-    r"(?:i am|i'm) (?:agnostic|not technical enough to say))\s*[.!?]*\s*$",
+    r"(?:i am|i'm) (?:agnostic|not technical enough to say)|"
+    r"(?:the |our )?[\w -]+ team (?:will|can|should) (?:decide|select|choose|approve)(?: the final (?:choice|selection))?|"
+    r"(?:[a-z][\w -]+) (?:will|can|should) (?:decide|select|choose|approve)(?: the final (?:choice|selection))?)\s*[.!?]*\s*$",
     re.IGNORECASE)
 
 # Topic-level dismissal: "move on from the UI", "next topic", "stop asking
@@ -137,10 +139,13 @@ _DISMISS_RE = re.compile(
     r"^(?:next|another) (?:topic|question|area)\b|"
     r"^ask (?:me )?(?:about )?something else\b|"
     r"^(?:please )?(?:stop|don'?t) asking (?:me )?(?:about|for)\b|"
-    r"^(?:can|could) (?:we|you) (?:please )?(?:drop|skip) (?:this|that|it)\b",
+    r"^(?:can|could) (?:we|you) (?:please )?(?:drop|skip) (?:this|that|it)\b|"
+    r"^(?:please )?(?:leave|drop|skip) (?:the |this |that )?[a-z][\w -]*(?:data|topic|question|detail|area)\b|"
+    r"^(?:please )?(?:leave|drop|skip) (?:the |this |that )?(?:historical|training) data\b",
     re.IGNORECASE)
 
 _TOPIC_PATTERNS = (
+    ("historical-data source selection", re.compile(r"\b(?:(?:historical|training) (?:data (?:source|sources|set|sets|provider|providers)|datasets?)|data sources? (?:for )?(?:training|history|historical))\b", re.I)),
     ("security/encryption detail", re.compile(r"\b(encrypt|encryption|cipher|tls|ssl|cryptograph|security protocol)\w*\b", re.I)),
     ("identity/authentication detail", re.compile(r"\b(auth|authentication|authorization|oauth|mfa|login protocol)\w*\b", re.I)),
     ("scale/capacity target", re.compile(r"\b(scale|capacity|concurrent|users per|requests per|throughput)\w*\b", re.I)),
@@ -244,6 +249,37 @@ def guard_question(question: str, parked_topics: list[str], target: str | None) 
         return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
     return safe_question(question, parked_topics, target)
 
+
+def question_substance(question: str) -> frozenset[str]:
+    """Stable content words for deterministic same-substance detection."""
+    stop = {"what", "which", "the", "a", "an", "do", "does", "did", "is", "are", "will", "would",
+            "could", "should", "you", "your", "we", "our", "it", "this", "that", "specific", "please",
+            "tell", "me", "about", "for", "to", "of", "in", "on", "and", "or", "between", "from"}
+    words = re.findall(r"[a-z0-9]+", (question or "").lower())
+    stems = {"sources":"source", "datasets":"dataset", "providers":"provider", "predictive":"prediction",
+             "models":"model", "training":"train", "trained":"train", "used":"use", "using":"use",
+             "makes":"make", "made":"make", "worthwhile":"worth"}
+    return frozenset(stems.get(w, w) for w in words if w not in stop)
+
+
+def same_question_substance(left: str, right: str) -> bool:
+    a, b = question_substance(left), question_substance(right)
+    if not a or not b:
+        return (left or "").strip().lower() == (right or "").strip().lower()
+    return len(a & b) / len(a | b) >= .45
+
+
+def unique_question(question: str, prior_questions: list[dict], target: str | None) -> str:
+    """Never expose a repeated probe. Reframe once to the actual current gap."""
+    prior = [str(x.get("question", "")) for x in prior_questions]
+    if not any(same_question_substance(question, old) for old in prior):
+        return question
+    fallback = _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
+    if not any(same_question_substance(fallback, old) for old in prior):
+        return fallback
+    # A deterministic, target-specific final reframe. The graph parks the area
+    # after two attempts, so this is only a compatibility safety net.
+    return f"For {_LABELS.get(target or '', 'the remaining area')}, what single missing fact should the specification preserve?"
 
 def founder_control(text: str) -> str | None:
     """'skip' -> skip the current target area; 'enough' -> end the interview.
