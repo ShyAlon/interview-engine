@@ -30,6 +30,29 @@ from .progress import ProgressBus, stderr_printer
 from .telemetry import UsageLog, jsonl_sink
 
 
+
+def _prefer_migrated_intent(outdir: Path, session: str, checkpoint_intent: dict) -> tuple[dict, Path | None]:
+    """Use a current, schema-valid disk artifact over a stale checkpoint copy.
+
+    The migration command named by the version error targets
+    intent_model.raw.json, so that file is checked first. A stale or invalid
+    candidate is ignored; normal compatibility handling remains downstream.
+    """
+    from vmodel_contracts import check_compatible
+    for name in ("intent_model.raw.json", "intent_model.json"):
+        path = outdir / name
+        if not path.is_file():
+            continue
+        try:
+            candidate = json.loads(path.read_text())
+            check_compatible(candidate)
+            validated = IntentModel.model_validate(candidate)
+        except Exception:
+            continue
+        if validated.session_id == session:
+            return validated.model_dump(mode="json"), path
+    return checkpoint_intent, None
+
 def render_intent_markdown(intent: IntentModel) -> str:
     """Human-readable rendering for the founder review gate (scoping doc, step 2),
     in systems-engineering terms: needs (functional / non-functional) distinct
@@ -273,20 +296,16 @@ def main() -> None:
     # migration the canonical disk artifact may be newer than that state. On
     # resume, prefer the explicitly migrated, schema-valid artifact instead of
     # overwriting it with the stale checkpoint value (the 0.14 -> 0.15 trap).
-    if resuming and (outdir / "intent_model.json").is_file():
-        from vmodel_contracts import check_compatible
-        try:
-            migrated = json.loads((outdir / "intent_model.json").read_text())
-            check_compatible(migrated)
-            validated_migrated = IntentModel.model_validate(migrated)
-            if validated_migrated.session_id == session:
-                result = {**result, "intent_model": validated_migrated.model_dump(mode="json")}
-                graph.update_state(cfg, {"intent_model": result["intent_model"]})
-                print("Loaded migrated intent_model.json into the completed checkpoint.", file=sys.stderr)
-        except Exception:
-            # Existing compatibility/schema handling below remains the single
-            # human-readable failure path; never silently accept a bad file.
-            pass
+    if resuming:
+        migrated_intent, migrated_path = _prefer_migrated_intent(
+            outdir, session, result["intent_model"])
+        if migrated_path is not None:
+            result = {**result, "intent_model": migrated_intent}
+            # Keep checkpoint and both canonical copies coherent. This makes
+            # the repaired state durable rather than re-applying the override
+            # on every resume.
+            graph.update_state(cfg, {"intent_model": migrated_intent})
+            print(f"Loaded migrated {migrated_path.name} into the completed checkpoint.", file=sys.stderr)
 
     # Both stage artifacts are contract-validated in-node. CONOPS is separate,
     # never folded into the intent model.
@@ -295,20 +314,41 @@ def main() -> None:
     from .conops_stage import render_conops
     (outdir / "conops.md").write_text(render_conops(conops))
 
-    # The graph validated the intent model in-node; write the raw artifact
-    # BEFORE re-validating so a future contract bump can never strand a run.
-    (outdir / "intent_model.raw.json").write_text(json.dumps(result["intent_model"], indent=2))
+    # Snapshot disk state before writing checkpoint output. If compatibility
+    # fails, diagnostics must distinguish a missing raw artifact from a stale
+    # one instead of creating a stale raw file and obscuring the cause.
+    raw_path = outdir / "intent_model.raw.json"
+    raw_existed_before = raw_path.is_file()
+    raw_version_before = None
+    raw_read_error = False
+    if raw_existed_before:
+        try:
+            raw_version_before = json.loads(raw_path.read_text()).get("contract_version")
+        except Exception:
+            raw_read_error = True
+    # Preserve the graph result before re-validation so a future schema error
+    # can still be repaired from disk.
+    raw_path.write_text(json.dumps(result["intent_model"], indent=2))
     from vmodel_contracts import ContractVersionMismatch, check_compatible
 
     try:
         check_compatible(result["intent_model"])
     except ContractVersionMismatch as e:
+        if not raw_existed_before:
+            raw_detail = "no intent_model.raw.json was found before resume"
+            next_step = ("restore or regenerate the raw artifact, then run "
+                         "python -m vmodel_contracts.migrate <path-to-intent_model.raw.json>")
+        else:
+            if raw_read_error:
+                raw_detail = "intent_model.raw.json existed but was not readable JSON"
+            else:
+                raw_detail = f"intent_model.raw.json is still stamped {raw_version_before or 'without a version'}"
+            next_step = (f"re-stamp the exact raw artifact at {raw_path}: "
+                         f"python -m vmodel_contracts.migrate {raw_path}")
         raise UserFacingError(
             f"this session's intent model is from an older contracts version ({e.have}).",
-            "the interview ran before a contract upgrade; the transcript is preserved in the checkpoint.",
-            "if the schema is otherwise compatible, re-stamp the raw artifact: "
-            "python -m vmodel_contracts.migrate <path-to-intent_model.raw.json> (validates first, refuses on real drift); "
-            "otherwise start a fresh session (the interview is the cheap part to redo).",
+            "the checkpoint is stale and " + raw_detail + ".",
+            next_step + " (schema validation happens first); then resume the same session.",
         ) from e
     try:
         intent = IntentModel.model_validate(result["intent_model"])
@@ -359,12 +399,18 @@ def main() -> None:
         (outdir/"expert-opinion.intent.json").write_text(json.dumps(record,indent=2))
         with (outdir/"audit.jsonl").open("a") as fh:fh.write(json.dumps({"event":"gate.simulated_expert_opinion",**record})+"\n")
         print(f"\nSIMULATED EXPERT OPINION: {verdict['action']} - not founder approval; human review remains required.")
+        print(f"RATIONALE: {verdict['rationale']}")
         ok="y" if verdict["action"]=="approve" else "n"
     else:
         ok = input("\nApprove this intent model? [y/N] ").strip().lower()
     if ok != "y":
-        print("Rejected - nothing generated. The interview can resume with corrections.")
-        return
+        cause = (verdict["rationale"] if args.expert_opinion else
+                 "the founder did not approve the intent model")
+        raise UserFacingError(
+            "intent gate rejected - nothing downstream may be generated.",
+            cause,
+            f"correct the interview intent, then resume with --session {session}.",
+        )
     log.write_summary(outdir / "usage_summary.json")
     _print_usage_table(log)
     print(f"\n{'Simulated expert accepted for testing' if args.expert_opinion else 'Approved'}. Artifacts in {outdir.resolve()}/")
