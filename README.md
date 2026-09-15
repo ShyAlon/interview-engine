@@ -96,3 +96,15 @@ done
 Ollama calls are logged at $0.00 in `usage.jsonl` (local compute). Quality
 note: the interview IS the moat - judge demo quality on the real provider
 before showing founders; Ollama is for the dev loop.
+
+## Canonical artifact lifecycle vocabulary
+
+Lifecycle terms come from `vmodel_contracts.artifact_lifecycle`: `missing`,
+`partial`, `complete`, `stale`, `invalidated`, and `migrated`. During phase 1,
+LangGraph still owns orchestration; these words describe artifacts, not graph
+nodes. Interview turns and per-phase work are `partial`; a schema-valid sealed
+IntentModel or CONOPS is `complete`; a contract-transformed disk artifact is
+`migrated` until `adopt_migration` updates canonical storage and checkpoint
+atomically. A stale checkpoint must never overwrite a `migrated` artifact.
+Resume is legal only with a named next artifact and outgoing arc. See the
+contracts README for the guarded transition table and diagram exporters.
