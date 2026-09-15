@@ -116,3 +116,54 @@ def test_conops_has_no_whole_document_generation_path():
     assert "generate_item(\"stakeholder\"" in source
     assert "generate_item(\"scenario\"" in source
     assert "generate_item(\"concept option\"" in source
+
+
+def test_parroted_validation_text_is_stripped_and_raw_truth_is_logged(monkeypatch,tmp_path):
+    from interview_engine import model_config
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel, NEEDS, SCOPE
+    d=draft(); broken={k:v for k,v in d["stakeholder_context"][0].items() if k!="goals"}
+    # Exact failure shape from session: wrapper + real field + echoed Pydantic junk.
+    parrot={"stakeholder_context":[{"goals":["quick capture"],
+        "operating_environment":"input_value={'stakeholder': 'Supply c...]}], input_type=list]"}]}
+    replies=[json.dumps(broken),json.dumps(parrot),json.dumps(d["operational_scenarios"][0]),
+             json.dumps([{"name":o["name"],"summary":o["summary"]} for o in d["concept_options"]]),
+             json.dumps(d["concept_options"][0]),json.dumps(d["concept_options"][1])]
+    conops=FakeModel(replies)
+    models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),
+            "distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),"conops":conops,
+            "scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
+    monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
+    g=build_graph(UsageLog("parrot"),conops_enabled=True,raw_output_dir=tmp_path/"debug")
+    r=g.invoke({"messages":[HumanMessage(content="phone habit app, often offline")],
+                "submission":{"free_text":"web-enabled phone habit app with logins","founder_id":"f","submission_id":"parrot"}},
+               {"configurable":{"thread_id":"parrot"}})
+    ctx=r["conops_draft"]["stakeholder_context"][0]
+    assert ctx["goals"]==["quick capture"]
+    assert "input_value" not in ctx["operating_environment"]
+    files=list((tmp_path/"debug").glob("conops-*.raw.txt"))
+    assert len(files)==6
+    assert any("input_value={'stakeholder'" in f.read_text() for f in files)
+
+
+def test_empty_cleaned_patch_error_points_to_raw_log(monkeypatch,tmp_path):
+    from interview_engine import model_config
+    from interview_engine.errors import UserFacingError
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel, NEEDS, SCOPE
+    d=draft(); broken={k:v for k,v in d["stakeholder_context"][0].items() if k!="goals"}
+    conops=FakeModel([json.dumps(broken),json.dumps({"goals":"input_value={}, input_type=list]"})])
+    models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),"distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),
+            "conops":conops,"scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
+    monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
+    g=build_graph(UsageLog("empty-patch"),conops_enabled=True,raw_output_dir=tmp_path/"debug")
+    import pytest
+    with pytest.raises(UserFacingError) as caught:
+        g.invoke({"messages":[HumanMessage(content="phone habit app, often offline")],
+                  "submission":{"free_text":"web-enabled phone habit app with logins","founder_id":"f","submission_id":"empty-patch"}},
+                 {"configurable":{"thread_id":"empty-patch"}})
+    rendered=caught.value.render()
+    assert "repair patch is empty after cleaning" in rendered
+    assert str((tmp_path/"debug").resolve()) in rendered and ".raw.txt" in rendered

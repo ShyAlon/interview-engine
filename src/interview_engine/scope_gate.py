@@ -70,7 +70,7 @@ and software with no interactive web/mobile application surface. Answer STRICT J
 Idea: {{text}}""".format(scope=PRODUCT_SCOPE_DEFINITION)
 
 
-def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> ScopeVerdict:
+def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_output_log=None) -> ScopeVerdict:
     """The ONLY LLM call in the gate. Runs when deterministic classification
     is mixed or silent - ambiguous wording is a semantic problem, pay for it."""
     import json as _json
@@ -87,11 +87,15 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None) -> Scope
         cfg = model_config.for_stage("scope_tiebreak")
         usage_log.record("scope_tiebreak", cfg.provider, cfg.model,
                          getattr(resp, "usage_metadata", {}) or {})
+    raw_path = raw_output_log.write("scope-tiebreak", "classification", resp.content) if raw_output_log else None
     try:
         data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
         accepted = bool(data["is_web_app"])
     except (_json.JSONDecodeError, KeyError, TypeError) as e:
-        raise translate_json_error(e, "scope_tiebreak") from e
+        error = translate_json_error(e, "scope_tiebreak")
+        if raw_path:
+            error.next_action = f"inspect the raw response at {raw_path}, then " + (error.next_action or "retry.")
+        raise error from e
     return ScopeVerdict(
         submission_id=sub.submission_id,
         accepted=accepted,

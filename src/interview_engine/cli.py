@@ -203,7 +203,8 @@ def main() -> None:
     # the msgpack serde unregistered (AppArchetype allow-listed as belt).
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     checkpointer = SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
-    graph = build_graph(log, checkpointer=checkpointer, progress=bus, conops_enabled=True)
+    graph = build_graph(log, checkpointer=checkpointer, progress=bus, conops_enabled=True,
+                        raw_output_dir=outdir / "debug")
     cfg = {"configurable": {"thread_id": session}}
     print(f"Models: {_mc.describe_models()}", file=sys.stderr)
 

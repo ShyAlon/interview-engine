@@ -135,3 +135,45 @@ def extract_json_value(text: str) -> str:
                 if depth == 0:
                     return text[start:i + 1]
     raise ValueError("no balanced JSON value found in the model output")
+
+_ECHO_FRAGMENTS = ("input_value=", "input_type=", "validation errors", "validationerror",
+                   "for further information visit https://errors.pydantic.dev")
+
+def clean_model_patch(value, model_cls, error: Exception) -> dict:
+    """Normalize a repair as a strict field patch, never as model-shaped junk.
+
+    Wrapper objects and singleton lists are unwrapped. Only fields named by the
+    validation errors are accepted. Unknown keys and echoed Pydantic error text
+    cannot enter the candidate object.
+    """
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    if isinstance(value, dict) and len(value) == 1:
+        only = next(iter(value.values()))
+        if isinstance(only, list) and len(only) == 1 and isinstance(only[0], dict):
+            value = only[0]
+        elif isinstance(only, dict):
+            value = only
+    if not isinstance(value, dict):
+        raise ValueError(f"repair patch must be one JSON object, got {type(value).__name__}")
+    allowed = set(model_cls.model_fields)
+    requested = set()
+    errors = getattr(error, "errors", lambda: [])()
+    for item in errors:
+        loc=item.get("loc") or ()
+        if loc and isinstance(loc[-1],str) and loc[-1] in allowed:
+            requested.add(loc[-1])
+    if not requested:
+        requested=allowed
+    cleaned={}
+    for key,val in value.items():
+        if key not in allowed or key not in requested:
+            continue
+        rendered=str(val).casefold()
+        if any(fragment in rendered for fragment in _ECHO_FRAGMENTS):
+            continue
+        if val not in (None,"",[]):
+            cleaned[key]=val
+    if not cleaned:
+        raise ValueError(f"repair patch is empty after cleaning; requested fields: {sorted(requested)}")
+    return cleaned

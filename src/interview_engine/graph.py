@@ -52,7 +52,9 @@ class InterviewState(TypedDict, total=False):
 MAX_TURNS = 60  # hard stop: 30-60 min target; a runaway interview is a cost leak
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None):
+    from .raw_output import RawOutputLog
+    raw_log = RawOutputLog(raw_output_dir)
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
     distill_model = model_config.build_chat_model("distillation")
     conops_model = model_config.build_chat_model("conops") if conops_enabled else None
@@ -65,7 +67,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             sub = IntakeSubmission.model_validate(state["submission"])
             verdict = scope_gate.verdict_deterministic(sub)
             if verdict is None:
-                verdict = scope_gate.verdict_with_llm(sub, tiebreak_model, usage_log)
+                verdict = scope_gate.verdict_with_llm(sub, tiebreak_model, usage_log, raw_log)
         return {"verdict": verdict.model_dump(mode="json")}
 
     def route_scope(state: InterviewState) -> str:
@@ -288,6 +290,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             usage_log.record("distillation", model_config.for_stage("distillation").provider,
                              model_config.for_stage("distillation").model,
                              (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
+            raw_label = ("needs" if system == DISTILL_NEEDS_SYSTEM else
+                         "scope" if system == DISTILL_SCOPE_SYSTEM else
+                         "preview" if system == DISTILL_PREVIEW_SYSTEM else "structured")
+            raw_log.write("distillation", raw_label + ("-repair" if feedback else "-generation"), resp.content)
             try:
                 return resp, _json.loads(extract_json_value(resp.content))
             except (_json.JSONDecodeError, ValueError) as e:
@@ -570,7 +576,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                    item_repair_prompt, preseed_from_intent,
                                    scenario_seeds_from_intent, validate_draft)
         from .errors import UserFacingError
-        from .repair import extract_json_value
+        from .repair import clean_model_patch, extract_json_value
         import json as _json
 
         draft = state.get("conops_draft")
@@ -599,6 +605,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         context_seeds = preseed_from_intent(intent, founder_turns)["stakeholder_context"]
         scenario_seeds = scenario_seeds_from_intent(intent, founder_turns)
 
+        raw_paths: dict[str, str] = {}
         def call_json(system_text: str, body: str, label: str, detail: str) -> dict | list:
             if progress is not None:
                 progress.emit(ProgressEvent("conops", label, "started", _time.time(), None, detail))
@@ -608,13 +615,17 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             usage_log.record("conops", model_config.for_stage("conops").provider,
                              model_config.for_stage("conops").model,
                              (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time()-t0)
+            raw_path = raw_log.write("conops", label, resp.content)
+            if raw_path:
+                raw_paths[label] = str(raw_path)
             try:
                 value = _json.loads(extract_json_value(resp.content))
             except Exception as exc:
                 raise UserFacingError(
                     f"stage 'conops': {label.lower()} returned unreadable JSON.",
                     f"parse detail: {str(exc)[:300]}",
-                    "rerun with the same --session id; completed intent work is checkpointed.") from exc
+                    "inspect the raw response at " + (str(raw_path) if raw_path else "the configured debug output")
+                    + ", then rerun with the same --session id; completed intent work is checkpointed.") from exc
             if progress is not None:
                 progress.emit(ProgressEvent("conops", label, "completed", _time.time(), _time.time()-t0, detail))
             return value
@@ -634,8 +645,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 patch = call_json(CONOPS_SYSTEM,
                     item_repair_prompt(kind, identity, candidate, first_error, intent),
                     f"Repairing CONOPS {kind} {index}/{total}", f"item {index} of {total}")
-                candidate.update({k:v for k,v in (patch if isinstance(patch,dict) else {}).items()
-                                  if v not in (None,"",[])})
+                try:
+                    patch = clean_model_patch(patch, model_cls, first_error)
+                except ValueError as patch_error:
+                    path = raw_paths.get(f"Repairing CONOPS {kind} {index}/{total}")
+                    raise UserFacingError(
+                        f"stage 'conops': {kind} item {index}/{total} returned an unusable repair patch.",
+                        str(patch_error),
+                        "inspect the raw response at " + (path or "the configured debug output")
+                        + ", then rerun with the same --session id.") from patch_error
+                candidate.update(patch)
                 candidate.update(identity)
                 try:
                     item = model_cls.model_validate(candidate)
@@ -643,7 +662,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     raise UserFacingError(
                         f"stage 'conops': {kind} item {index}/{total} failed targeted repair.",
                         f"identity: {identity}; validation detail: {str(final_error)[:350]}",
-                        "rerun with the same --session id; intent and transcript are checkpointed.") from final_error
+                        "inspect the raw response at "
+                        + (raw_paths.get(f"Repairing CONOPS {kind} {index}/{total}") or "the configured debug output")
+                        + ", then rerun with the same --session id; intent and transcript are checkpointed.") from final_error
             if hasattr(item, "source_turns"):
                 invalid = sorted(set(item.source_turns)-founder_turns)
                 if invalid:
