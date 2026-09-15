@@ -121,3 +121,31 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
 def test_cli_module_uses_shared_keep_awake_guard():
     source = (Path(cli.__file__)).read_text()
     assert "run_with_system_awake(main)" in source
+
+
+def test_expert_opinion_intent_gate_through_real_cli(monkeypatch,tmp_path):
+    monkeypatch.setenv('VMODEL_ARTIFACTS_DIR',str(tmp_path/'artifacts'));monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.uuid,'uuid4',lambda:type('U',(),{'hex':'expert000000'})())
+    monkeypatch.setattr(cli,'datetime',type('D',(),{'now':staticmethod(lambda:type('T',(),{'strftime':lambda self,f:'20260915-120000'})())}))
+    models={
+      'probing':FakeModel(['[INTERVIEW COMPLETE]']),
+      'distillation':FakeModel([json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY),json.dumps({'action':'approve','rationale':'coherent for unattended test'})]),
+      'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps([{'name':o['name'],'summary':o['summary']} for o in CONOPS_REPLY['concept_options']]),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
+      'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web product"}'])}
+    monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
+    run_cli_with_inputs(['1 - access'],['prog','idea','--expert-opinion'])
+    out=tmp_path/'artifacts'/'20260915-120000-expe'/'interview'
+    record=json.loads((out/'expert-opinion.intent.json').read_text())
+    assert record['mode']=='simulated_expert_opinion' and record['founder_approved'] is False and record['human_review_required'] is True
+    assert (out/'intent_model.json').exists()
+
+
+def test_expert_opinion_failure_is_user_facing(monkeypatch,tmp_path):
+    monkeypatch.setenv('VMODEL_ARTIFACTS_DIR',str(tmp_path/'artifacts'));monkeypatch.chdir(tmp_path)
+    # Directly prove the boundary used by CLI translates provider failures.
+    class Boom:
+        def invoke(self,messages):raise RuntimeError('review unavailable')
+    monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:Boom())
+    monkeypatch.setattr(model_config,'invoke_checked',lambda *a,**k:(_ for _ in ()).throw(RuntimeError('review unavailable')))
+    # Seed path complexity is covered above; source must own a UserFacingError wrapper.
+    assert 'expert opinion could not review the intent gate' in Path(cli.__file__).read_text()

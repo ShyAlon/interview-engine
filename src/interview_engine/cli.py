@@ -319,10 +319,14 @@ def main() -> None:
                 "Return strict JSON {action, rationale}; action is approve or reject. Never claim founder approval.\n"
                 + intent.model_dump_json(indent=2))
         model=_mc.build_chat_model("distillation")
-        chunks=[]
-        for chunk in _mc.stream_checked(model,[HumanMessage(content=prompt)],"distillation",item="expert opinion: intent gate"):
-            chunks.append(chunk.content if isinstance(chunk.content,str) else "")
-        try: verdict=json.loads("".join(chunks))
+        try:
+            response=_mc.invoke_checked(model,[HumanMessage(content=prompt)],"distillation",item="expert opinion: intent gate")
+        except UserFacingError:
+            raise
+        except Exception as e:
+            raise UserFacingError("expert opinion could not review the intent gate.",f"{type(e).__name__}: {str(e)[:300]}",f"rerun with --session {session}; the checkpoint is preserved.") from e
+        text=response.content if isinstance(response.content,str) else "".join(b.get("text","") for b in response.content if isinstance(b,dict))
+        try: verdict=json.loads(text)
         except json.JSONDecodeError as e: raise translate_json_error(e,"expert opinion: intent gate") from e
         if verdict.get("action") not in ("approve","reject") or not str(verdict.get("rationale","")).strip():
             raise UserFacingError("expert opinion returned an invalid intent-gate verdict.","Expected action approve|reject and a rationale.",f"rerun with --session {session}; the checkpoint is preserved.")
