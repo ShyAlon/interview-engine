@@ -61,3 +61,37 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     r = g.invoke({"messages": [HumanMessage(content="1 - reliable native APIs")]}, cfg)
     assert r["conops"]["decision"]["selected_concept"] == "Native app"
     assert conops.calls == 1
+
+
+def test_preseed_uses_validated_intent_identity_and_provenance():
+    from interview_engine.conops_stage import preseed_from_intent
+    intent={"target_users":["Supply chain manager"],
+            "stakeholder_needs":[{"statement":"Supply chain managers need early warnings","source_turns":[10,12]}]}
+    assert preseed_from_intent(intent,{0,10,12})=={"stakeholder_context":[{
+        "stakeholder":"Supply chain manager","source_turns":[10,12]}]}
+
+
+def test_missing_stakeholder_fields_converge_through_targeted_repair_not_reroll(monkeypatch):
+    """Live 20260914-210005-68fa failure: goals/environment missing."""
+    from interview_engine import model_config
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel, NEEDS, SCOPE
+    broken=draft()
+    broken["stakeholder_context"]=[{"stakeholder":"runner","role":"tracks habits","source_turns":[0]}]
+    patch={"stakeholder_context":[{"stakeholder":"runner","goals":["quick capture"],
+                                   "operating_environment":"phone, often offline"}]}
+    conops=FakeModel([json.dumps(broken),json.dumps(patch)])
+    models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),
+            "distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),
+            "conops":conops,
+            "scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
+    monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
+    g=build_graph(UsageLog("targeted-repair"),conops_enabled=True);cfg={"configurable":{"thread_id":"targeted-repair"}}
+    r=g.invoke({"messages":[HumanMessage(content="phone habit app, often offline")],
+                "submission":{"free_text":"web-enabled habit app","founder_id":"f","submission_id":"targeted-repair"}},cfg)
+    context=r["conops_draft"]["stakeholder_context"][0]
+    assert context["role"]=="tracks habits"                 # valid first draft retained
+    assert context["goals"]==["quick capture"]             # patch fills only gaps
+    assert context["operating_environment"]=="phone, often offline"
+    assert conops.calls==2                                  # draft + targeted patch, no reroll

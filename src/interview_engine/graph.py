@@ -567,7 +567,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return {}
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from .conops_stage import (CONOPS_SYSTEM, comparison_question, finalize,
-                                   validate_draft)
+                                   merge_draft, preseed_from_intent, repair_prompt, validate_draft)
         from .errors import UserFacingError
         from .repair import extract_json_value
         import json as _json
@@ -594,32 +594,71 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for i, m in enumerate(state.get("messages", [])))
         founder_turns = {i for i, m in enumerate(state.get("messages", []))
                          if getattr(m, "type", "") == "human"}
-        feedback = None
+        seed = preseed_from_intent(state.get("intent_model") or {}, founder_turns)
         with track(progress, "conops", "Building Concept of Operations",
                    "stakeholder context, operational scenarios, concept comparison"):
-            for attempt in (1, 2):
-                messages = [SystemMessage(content=CONOPS_SYSTEM + "\n\nTRANSCRIPT:\n" + transcript)]
-                if feedback:
-                    messages.append(HumanMessage(content=feedback))
+            messages = [SystemMessage(content=CONOPS_SYSTEM + "\n\nVALIDATED INTENT:\n"
+                                      + _json.dumps(state.get("intent_model") or {})
+                                      + "\n\nPRESEEDED STAKEHOLDER IDENTITIES (fill missing fields; do not remove):\n"
+                                      + _json.dumps(seed)
+                                      + "\n\nTRANSCRIPT:\n" + transcript)]
+            t0 = _time.time()
+            resp = model_config.invoke_checked(conops_model, messages, "conops")
+            usage_log.record("conops", model_config.for_stage("conops").provider,
+                             model_config.for_stage("conops").model,
+                             (getattr(resp, "usage_metadata", None) or {}),
+                             duration_s=_time.time() - t0)
+            try:
+                raw = _json.loads(extract_json_value(resp.content))
+            except Exception as exc:
+                raise UserFacingError(
+                    "stage 'conops': the model did not return readable JSON.",
+                    f"parse detail: {str(exc)[:300]}",
+                    "rerun with the same --session id; intent and transcript are checkpointed.") from exc
+            candidate = merge_draft({}, raw, seed)
+            try:
+                draft = validate_draft(candidate, founder_turns)
+            except Exception as first_error:
+                # A targeted repair sees the exact invalid draft and schema
+                # errors. It may fill fields only; deterministic merge retains
+                # every valid context, scenario and concept from attempt one.
+                repair_messages = [SystemMessage(content=CONOPS_SYSTEM),
+                                   HumanMessage(content=repair_prompt(candidate, first_error,
+                                                                      state.get("intent_model") or {}))]
                 t0 = _time.time()
-                resp = model_config.invoke_checked(conops_model, messages, "conops")
+                repaired = model_config.invoke_checked(conops_model, repair_messages, "conops")
                 usage_log.record("conops", model_config.for_stage("conops").provider,
                                  model_config.for_stage("conops").model,
-                                 (getattr(resp, "usage_metadata", None) or {}),
+                                 (getattr(repaired, "usage_metadata", None) or {}),
                                  duration_s=_time.time() - t0)
                 try:
-                    raw = _json.loads(extract_json_value(resp.content))
-                    draft = validate_draft(raw, founder_turns)
-                    break
-                except Exception as exc:
-                    if attempt == 2:
+                    patch = _json.loads(extract_json_value(repaired.content))
+                    candidate = merge_draft(candidate, patch, seed)
+                    draft = validate_draft(candidate, founder_turns)
+                except Exception as repair_error:
+                    # Last resort only: preserve the old operational escape
+                    # hatch, but make it explicit and grounded in intent.
+                    fallback_messages = [SystemMessage(content=CONOPS_SYSTEM + "\n\nVALIDATED INTENT:\n"
+                                                       + _json.dumps(state.get("intent_model") or {})
+                                                       + "\n\nTRANSCRIPT:\n" + transcript),
+                                         HumanMessage(content="The targeted repair still failed: "
+                                                      + str(repair_error)[:350]
+                                                      + ". Last resort: return one complete corrected JSON object only.")]
+                    t0 = _time.time()
+                    fallback = model_config.invoke_checked(conops_model, fallback_messages, "conops")
+                    usage_log.record("conops", model_config.for_stage("conops").provider,
+                                     model_config.for_stage("conops").model,
+                                     (getattr(fallback, "usage_metadata", None) or {}),
+                                     duration_s=_time.time() - t0)
+                    try:
+                        full = _json.loads(extract_json_value(fallback.content))
+                        draft = validate_draft(merge_draft({}, full, seed), founder_turns)
+                    except Exception as final_error:
                         raise UserFacingError(
-                            "stage 'conops': the Concept of Operations draft failed validation twice.",
-                            f"validation detail: {str(exc)[:300]}",
+                            "stage 'conops': targeted repair and last-resort draft both failed validation.",
+                            f"first error: {str(first_error)[:180]}; final error: {str(final_error)[:180]}",
                             "rerun with the same --session id; intent and transcript are checkpointed, "
-                            "or change the shared INTERVIEW_ENGINE_MODEL_DISTILLATION route.") from exc
-                    feedback = ("Previous output failed Concept of Operations validation: "
-                                + str(exc)[:350] + ". Return one corrected JSON object only.")
+                            "or change the shared INTERVIEW_ENGINE_MODEL_CONOPS route.") from final_error
         return {"conops_draft": draft,
                 "messages": [AIMessage(content=comparison_question(draft))]}
 

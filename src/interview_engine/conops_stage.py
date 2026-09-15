@@ -23,6 +23,78 @@ Return strict JSON only with stakeholder_context[], operational_scenarios[], con
 Every context and scenario must cite founder source_turns from the numbered transcript."""
 
 
+
+def preseed_from_intent(intent: dict, founder_turns: set[int]) -> dict:
+    """Code-owned CONOPS skeleton from already-validated intent facts.
+
+    It seeds identities and provenance only. Goals, roles and operating context
+    remain model work because inventing them mechanically would be fabrication.
+    """
+    needs = [n for n in (intent.get("stakeholder_needs") or []) if isinstance(n, dict)]
+    all_turns = sorted({t for n in needs for t in (n.get("source_turns") or []) if t in founder_turns})
+    contexts = []
+    for stakeholder in intent.get("target_users") or []:
+        name = str(stakeholder).strip()
+        if not name:
+            continue
+        words = set(re.findall(r"[a-z0-9]+", name.casefold()))
+        matched = sorted({t for n in needs
+                          if words & set(re.findall(r"[a-z0-9]+", str(n.get("statement", "")).casefold()))
+                          for t in (n.get("source_turns") or []) if t in founder_turns})
+        contexts.append({"stakeholder": name, "source_turns": matched or all_turns})
+    return {"stakeholder_context": contexts}
+
+
+def merge_draft(base: dict, patch: dict, seed: dict | None = None) -> dict:
+    """Merge a targeted repair without allowing it to erase valid draft work."""
+    out = json.loads(json.dumps(base if isinstance(base, dict) else {}))
+
+    def merge_items(existing: list, incoming: list, identity: str) -> list:
+        result = [dict(x) for x in existing if isinstance(x, dict)]
+        by_id = {str(x.get(identity, "")).strip().casefold(): x for x in result if x.get(identity)}
+        for item in incoming:
+            if not isinstance(item, dict):
+                continue
+            ident = str(item.get(identity, "")).strip().casefold()
+            if ident and ident in by_id:
+                by_id[ident].update({k: v for k, v in item.items() if v not in (None, "", [])})
+            else:
+                result.append(dict(item))
+                if ident:
+                    by_id[ident] = result[-1]
+        return result
+
+    identities = {"stakeholder_context": "stakeholder", "operational_scenarios": "scenario_id",
+                  "concept_options": "name"}
+    for key, identity in identities.items():
+        original = out.get(key) or []
+        seeded = (seed or {}).get(key) or []
+        # A draft's explicit identities win. Seeds guarantee identity when the
+        # model omits the collection/item, but never invent a second alias for
+        # a stakeholder the model named differently.
+        repaired = patch.get(key) or []
+        authoritative = original or repaired
+        if authoritative:
+            existing_ids = {str(x.get(identity, "")).strip().casefold()
+                            for x in authoritative if isinstance(x, dict)}
+            seeded = [x for x in seeded if str(x.get(identity, "")).strip().casefold() in existing_ids]
+        out[key] = merge_items(merge_items(seeded, original, identity), repaired, identity)
+    for key, value in patch.items():
+        if key not in identities and value not in (None, "", []):
+            out[key] = value
+    return out
+
+
+def repair_prompt(draft: dict, error: Exception, intent: dict) -> str:
+    """Request only schema-invalid fields; valid draft content is immutable input."""
+    return ("TARGETED CONOPS REPAIR. Do not reroll or rewrite valid content. Return one JSON object "
+            "containing only missing or invalid fields, nested under stakeholder_context, "
+            "operational_scenarios, or concept_options with each item's identity field. "
+            "Use the validation errors and validated intent evidence below. Every repaired context "
+            "or scenario source_turns must cite founder turns already present in the draft/intent.\n\n"
+            f"VALIDATION ERRORS:\n{error}\n\nEXISTING DRAFT (preserve):\n{json.dumps(draft)}"
+            f"\n\nVALIDATED INTENT EVIDENCE:\n{json.dumps(intent)}")
+
 def validate_draft(data: dict, founder_turns: set[int]) -> dict:
     """Validate the model-authored draft and reject fabricated provenance."""
     contexts = TypeAdapter(list[StakeholderContext]).validate_python(
