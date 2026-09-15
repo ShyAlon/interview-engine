@@ -58,7 +58,7 @@ def run_cli_with_inputs(inputs, argv):
 
 
 def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_path, capsys):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VMODEL_ARTIFACTS_DIR",str(tmp_path/"artifacts")); monkeypatch.chdir(tmp_path)
     # timestamped session id with collision suffix: 20260908-181530-a3f9
     monkeypatch.setattr(cli.uuid, "uuid4", lambda: type("U", (), {"hex": "deadbeefcafe"})())
     monkeypatch.setattr(cli, "datetime", type("D", (), {"now": staticmethod(lambda: type("T", (), {"strftime": lambda self, f: "20260908-181530"})())}))
@@ -93,7 +93,7 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     with pytest.raises(Exception):
         run_cli_with_inputs(["the answer", "1 - browser access"], ["prog", "a saas web app for surf schools with booking and logins"])
 
-    outdir = tmp_path / "out" / session
+    outdir = tmp_path / "artifacts" / session / "interview"
     assert (outdir / "intent_model.raw.json").exists(), "raw distillation preserved before validation"
     assert (outdir / "checkpoints.sqlite").exists(), "checkpoint persisted"
 

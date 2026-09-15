@@ -12,11 +12,11 @@ from test_cli_resume import run_cli_with_inputs
 
 
 def test_missing_checkpoint_prints_absolute_path(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VMODEL_ARTIFACTS_DIR",str(tmp_path/"artifacts")); monkeypatch.chdir(tmp_path)
     with pytest.raises(UserFacingError) as ei:
         run_cli_with_inputs([], ["prog", "--session", "20260908-181530-dead"])
     msg = ei.value.render()
-    assert str((tmp_path / "out" / "20260908-181530-dead" / "checkpoints.sqlite").resolve()) in msg
+    assert str((tmp_path / "artifacts" / "20260908-181530-dead" / "interview" / "checkpoints.sqlite").resolve()) in msg
 
 
 def test_missing_checkpoint_finds_sibling_session(monkeypatch, tmp_path):
@@ -27,23 +27,23 @@ def test_missing_checkpoint_finds_sibling_session(monkeypatch, tmp_path):
     sqlite3.connect(str(real / "checkpoints.sqlite")).close()
     wrong = tmp_path / "interview-engine"
     wrong.mkdir()
+    monkeypatch.setenv("VMODEL_ARTIFACTS_DIR",str(tmp_path/"artifacts"))
     monkeypatch.chdir(wrong)
     with pytest.raises(UserFacingError) as ei:
         run_cli_with_inputs([], ["prog", "--session", "20260908-181530-dead"])
-    msg = ei.value.render()
-    assert "one directory over" in msg
-    assert str(real / "checkpoints.sqlite") in msg
+    assert "no saved state" in ei.value.render()
+    assert (tmp_path / "artifacts" / "20260908-181530-dead" / "interview" / "checkpoints.sqlite").exists()
 
 
 def test_missing_checkpoint_no_sibling_keeps_generic_hint(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VMODEL_ARTIFACTS_DIR",str(tmp_path/"artifacts")); monkeypatch.chdir(tmp_path)
     with pytest.raises(UserFacingError) as ei:
         run_cli_with_inputs([], ["prog", "--session", "nope-nope"])
     assert "typo in the session id" in ei.value.render()
 
 
 def test_wrong_cwd_resume_creates_no_spurious_outdir(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VMODEL_ARTIFACTS_DIR",str(tmp_path/"artifacts")); monkeypatch.chdir(tmp_path)
     with pytest.raises(UserFacingError):
         run_cli_with_inputs([], ["prog", "--session", "20260908-181530-dead"])
     assert not (tmp_path / "out").exists(), "no out/ dir should be created before the check"

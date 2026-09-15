@@ -10,6 +10,7 @@ Resume: python -m interview_engine.cli --session <session-id>
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sqlite3
 import sys
@@ -171,27 +172,38 @@ def main() -> None:
     resuming = args.session is not None
     # human-readable session id: local timestamp + short collision suffix
     session = args.session or (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4])
-    outdir = Path("out") / session
+    from vmodel_contracts.runtime import artifacts_root
+    outdir = artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")) / session / "interview"
     db_path = outdir / "checkpoints.sqlite"
     if resuming and not db_path.exists():
         # resuming from a different cwd than the original run is the common
         # miss - say exactly where we looked (absolute) and hunt for the
         # session under sibling project dirs before giving up.
         searched = db_path.resolve()
-        siblings = sorted(
-            p for p in Path.cwd().parent.glob(f"*/out/{session}/checkpoints.sqlite") if p.exists()
-        )
-        hint = "typo in the session id, or the run happened before checkpoints were persisted to disk."
+        # Compatibility search for pre-unified interview checkpoints.
+        siblings = sorted(p for p in Path.cwd().parent.glob(f"*/out/{session}/checkpoints.sqlite") if p.exists())
         if siblings:
-            found = "\n".join(f"  {p}" for p in siblings)
-            hint = (f"the session DOES exist, one directory over - the original run happened from "
+            legacy=siblings[0]
+            outdir.mkdir(parents=True,exist_ok=True)
+            import shutil
+            shutil.copytree(legacy.parent,outdir,dirs_exist_ok=True)
+            db_path=outdir/"checkpoints.sqlite"
+            print(f"Migrated legacy interview artifacts: {legacy.parent} -> {outdir}",file=sys.stderr)
+            siblings=[]
+        if db_path.exists():
+            pass
+        else:
+            hint = "typo in the session id, or the run happened before checkpoints were persisted to disk."
+            if siblings:
+                found = "\n".join(f"  {p}" for p in siblings)
+                hint = (f"the session DOES exist, one directory over - the original run happened from "
                     f"a different working directory:\n{found}")
-        raise UserFacingError(
-            f"no checkpoint found for session {session}. Searched: {searched}",
-            hint,
-            "cd into the directory you started the interview from and retry the same command; "
-            "or run without --session to start a fresh interview.",
-        )
+            raise UserFacingError(
+                f"no checkpoint found for session {session}. Searched: {searched}",
+                hint,
+                "cd into the directory you started the interview from and retry the same command; "
+                "or run without --session to start a fresh interview.",
+            )
     outdir.mkdir(parents=True, exist_ok=True)
 
     bus = ProgressBus()
