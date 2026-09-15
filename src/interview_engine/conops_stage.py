@@ -157,3 +157,44 @@ def item_repair_prompt(kind: str, identity: dict, candidate: dict, error: Except
             "Do not rename the code-owned identity and do not rewrite valid fields. "
             f"Identity: {json.dumps(identity)}\nValidation errors: {error}\n"
             f"Existing item: {json.dumps(candidate)}\nValidated intent evidence: {json.dumps(intent)}")
+
+
+def derive_stakeholder_contexts(intent: dict, founder_turns: set[int]) -> list[dict]:
+    """Derive only facts already present in the validated intent artifact."""
+    seeds = preseed_from_intent(intent, founder_turns)["stakeholder_context"]
+    needs = [n for n in (intent.get("stakeholder_needs") or []) if isinstance(n, dict)]
+    constraints = [str(x).strip() for x in (intent.get("constraints") or []) if str(x).strip()]
+    concepts = [str(x).strip() for x in (intent.get("operational_concepts") or []) if str(x).strip()]
+    for seed in seeds:
+        words = set(re.findall(r"[a-z0-9]+", seed["stakeholder"].casefold()))
+        matched = [n for n in needs if words & set(re.findall(r"[a-z0-9]+", str(n.get("statement","")).casefold()))]
+        if not matched and len(seeds) == 1:
+            matched = needs
+        seed["role"] = seed["stakeholder"]
+        seed["goals"] = [str(n["statement"]).strip() for n in matched if str(n.get("statement","")).strip()]
+        environment = constraints + concepts
+        if environment:
+            seed["operating_environment"] = "; ".join(environment)
+        seed["source_turns"] = sorted({t for n in matched for t in (n.get("source_turns") or [])
+                                       if t in founder_turns}) or seed["source_turns"]
+        seed["_derived_fields"] = [k for k in ("role","goals","operating_environment","source_turns")
+                                    if seed.get(k) not in (None,"",[])]
+    return seeds
+
+
+def derive_scenario(seed: dict, intent: dict) -> dict:
+    """Pre-fill scenario fields only where IntentModel already owns substance."""
+    out = dict(seed)
+    users = [str(x).strip() for x in (intent.get("target_users") or []) if str(x).strip()]
+    flows = [str(x).strip() for x in (intent.get("operational_concepts") or []) if str(x).strip()]
+    if users:
+        out["actors"] = users
+    if flows and out.get("name") in flows:
+        out["operational_flow"] = [out["name"]]
+    value = str(intent.get("core_value_proposition") or "").strip()
+    if value:
+        out["success_outcome"] = value
+    out["exceptions"] = []
+    out["_derived_fields"] = [k for k in ("scenario_id","name","actors","operational_flow",
+                                           "success_outcome","exceptions","source_turns") if k in out]
+    return out

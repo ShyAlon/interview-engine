@@ -46,10 +46,12 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     from interview_engine.telemetry import UsageLog
     from tests.test_coverage import FakeModel, NEEDS, SCOPE
     d=draft()
-    conops = FakeModel([json.dumps(d["stakeholder_context"][0]),
-                        json.dumps(d["operational_scenarios"][0]),
+    conops = FakeModel([json.dumps({"operating_environment":"phone, often offline"}),
+                        json.dumps({"trigger":"habit completed"}),
+                        json.dumps({"operational_flow":["open product","record points"]}),
                         json.dumps([{"name":o["name"],"summary":o["summary"]} for o in d["concept_options"]]),
-                        json.dumps(d["concept_options"][0]), json.dumps(d["concept_options"][1])])
+                        json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["store release"]}),
+                        json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["platform limits"]})])
     models = {"probing": FakeModel(["[INTERVIEW COMPLETE]"]),
               "distillation": FakeModel([json.dumps(NEEDS), json.dumps(SCOPE), "[]"]),
               "conops": conops,
@@ -64,7 +66,7 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     assert "Concept Decision" in r["messages"][-1].content
     r = g.invoke({"messages": [HumanMessage(content="1 - reliable native APIs")]}, cfg)
     assert r["conops"]["decision"]["selected_concept"] == "Native app"
-    assert conops.calls == 5
+    assert conops.calls == 8
 
 
 def test_preseed_uses_validated_intent_identity_and_provenance():
@@ -75,95 +77,69 @@ def test_preseed_uses_validated_intent_identity_and_provenance():
         "stakeholder":"Supply chain manager","source_turns":[10,12]}]}
 
 
-def test_each_item_type_repairs_independently_then_assembly_validates(monkeypatch):
-    """Each small item misses a different field; no whole-document call exists."""
+def test_derivation_fills_stakeholder_fields_from_validated_intent():
+    from interview_engine.conops_stage import derive_stakeholder_contexts
+    intent={"target_users":["Supply chain manager"],
+            "stakeholder_needs":[{"statement":"Supply chain managers need early damage warnings","source_turns":[2,12]}],
+            "constraints":["Used from a global logistics operations desk"]}
+    item=derive_stakeholder_contexts(intent,{2,12})[0]
+    assert item["role"]=="Supply chain manager"
+    assert item["goals"]==["Supply chain managers need early damage warnings"]
+    assert item["operating_environment"]=="Used from a global logistics operations desk"
+    assert item["source_turns"]==[2,12]
+    assert set(item["_derived_fields"]) >= {"role","goals","operating_environment","source_turns"}
+
+
+def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholder(monkeypatch):
+    """A fully-derived stakeholder costs zero calls; model starts at scenario fields."""
     from interview_engine import model_config
     from interview_engine.graph import build_graph
     from interview_engine.telemetry import UsageLog
-    from tests.test_coverage import FakeModel, NEEDS, SCOPE
+    from tests.test_coverage import FakeModel
     d=draft()
-    stakeholder={k:v for k,v in d["stakeholder_context"][0].items() if k not in {"goals","operating_environment"}}
-    stakeholder_patch={"goals":["quick capture"],"operating_environment":"phone, often offline"}
-    scenario={k:v for k,v in d["operational_scenarios"][0].items() if k!="success_outcome"}
-    comparison=[{"name":o["name"],"summary":o["summary"]} for o in d["concept_options"]]
-    option1={k:v for k,v in d["concept_options"][0].items() if k!="disadvantages"}
-    conops=FakeModel([json.dumps(stakeholder),json.dumps(stakeholder_patch),
-                      json.dumps(scenario),json.dumps({"success_outcome":"points sync"}),
-                      json.dumps(comparison),json.dumps(option1),json.dumps({"disadvantages":["store release"]}),
-                      json.dumps(d["concept_options"][1])])
-    models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),
-            "distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),
-            "conops":conops,
-            "scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
+    intent={"session_id":"derived","problem_statement":"p","target_users":["runner"],
+      "core_value_proposition":"points sync","stakeholder_needs":[{"need_id":"SN-1","statement":"runner needs quick capture","kind":"functional","source_turns":[0]}],
+      "in_scope":["Log habit"],"out_of_scope":["native-only"],"external_integrations":[],
+      "constraints":["phone, often offline"],"assumptions":[],"assumption_items":[],"scope_exclusions":[],
+      "done_criteria":[],"tech_preferences":[],"glossary":{},"operational_concepts":["Log habit"],"open_questions":[],
+      "source_turns":{"operational_concepts":[0],"core_value_proposition":[0]}}
+    conops=FakeModel([json.dumps({"trigger":"habit completed"}),
+                      json.dumps([{"name":"Native app","summary":"installed"},{"name":"PWA","summary":"web"}]),
+                      json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["release"]}),
+                      json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
+    models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
     monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
-    g=build_graph(UsageLog("item-repair"),conops_enabled=True);cfg={"configurable":{"thread_id":"item-repair"}}
-    r=g.invoke({"messages":[HumanMessage(content="phone habit app, often offline")],
-                "submission":{"free_text":"a web-enabled phone habit app with logins","founder_id":"f","submission_id":"item-repair"}},cfg)
-    doc=ConOpsDocument.model_validate({"session_id":"item-repair",**r["conops_draft"],
-        "decision":{"selected_concept":"Native app","rationale":"native APIs","founder_confirmed":True,"source_turns":[0]}})
-    assert doc.stakeholder_context[0].goals==["quick capture"]
-    assert doc.operational_scenarios[0].success_outcome=="points sync"
-    assert doc.concept_options[0].disadvantages==["store release"]
-    assert conops.calls==8  # 5 item/plan generations + 3 field-level repairs
-
-
-
-def test_conops_has_no_whole_document_generation_path():
-    from pathlib import Path
-    source=(Path(__file__).parents[1]/"src"/"interview_engine"/"graph.py").read_text()
-    assert "last-resort" not in source
-    assert "complete corrected JSON" not in source
-    assert "generate_item(\"stakeholder\"" in source
-    assert "generate_item(\"scenario\"" in source
-    assert "generate_item(\"concept option\"" in source
-
-
-def test_parroted_validation_text_is_stripped_and_raw_truth_is_logged(monkeypatch,tmp_path):
-    from interview_engine import model_config
-    from interview_engine.graph import build_graph
-    from interview_engine.telemetry import UsageLog
-    from tests.test_coverage import FakeModel, NEEDS, SCOPE
-    d=draft(); broken={k:v for k,v in d["stakeholder_context"][0].items() if k!="goals"}
-    # Exact failure shape from session: wrapper + real field + echoed Pydantic junk.
-    parrot={"stakeholder_context":[{"goals":["quick capture"],
-        "operating_environment":"input_value={'stakeholder': 'Supply c...]}], input_type=list]"}]}
-    replies=[json.dumps(broken),json.dumps(parrot),json.dumps(d["operational_scenarios"][0]),
-             json.dumps([{"name":o["name"],"summary":o["summary"]} for o in d["concept_options"]]),
-             json.dumps(d["concept_options"][0]),json.dumps(d["concept_options"][1])]
-    conops=FakeModel(replies)
-    models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),
-            "distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),"conops":conops,
-            "scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
-    monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
-    g=build_graph(UsageLog("parrot"),conops_enabled=True,raw_output_dir=tmp_path/"debug")
-    r=g.invoke({"messages":[HumanMessage(content="phone habit app, often offline")],
-                "submission":{"free_text":"web-enabled phone habit app with logins","founder_id":"f","submission_id":"parrot"}},
-               {"configurable":{"thread_id":"parrot"}})
+    g=build_graph(UsageLog("derived"),conops_enabled=True);cfg={"configurable":{"thread_id":"derived"}}
+    r=g.invoke({"messages":[HumanMessage(content="runner uses phone offline")],"submission":{"free_text":"web app","founder_id":"f","submission_id":"derived"},
+                "verdict":{"accepted":True},"intent_model":intent},cfg)
     ctx=r["conops_draft"]["stakeholder_context"][0]
-    assert ctx["goals"]==["quick capture"]
-    assert "input_value" not in ctx["operating_environment"]
-    files=list((tmp_path/"debug").glob("conops-*.raw.txt"))
-    assert len(files)==6
-    assert any("input_value={'stakeholder'" in f.read_text() for f in files)
+    assert ctx["goals"]==["runner needs quick capture"] and ctx["operating_environment"].startswith("phone, often offline")
+    assert conops.calls==6  # no stakeholder call; trigger + comparison + 4 option fields
 
 
-def test_empty_cleaned_patch_error_points_to_raw_log(monkeypatch,tmp_path):
+def test_per_field_null_is_a_named_failure_with_raw_path(monkeypatch,tmp_path):
     from interview_engine import model_config
     from interview_engine.errors import UserFacingError
     from interview_engine.graph import build_graph
     from interview_engine.telemetry import UsageLog
     from tests.test_coverage import FakeModel, NEEDS, SCOPE
-    d=draft(); broken={k:v for k,v in d["stakeholder_context"][0].items() if k!="goals"}
-    conops=FakeModel([json.dumps(broken),json.dumps({"goals":"input_value={}, input_type=list]"})])
+    conops=FakeModel([json.dumps({"operating_environment":None})])
     models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),"distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),
             "conops":conops,"scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
     monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
-    g=build_graph(UsageLog("empty-patch"),conops_enabled=True,raw_output_dir=tmp_path/"debug")
+    g=build_graph(UsageLog("null-field"),conops_enabled=True,raw_output_dir=tmp_path/"debug")
     import pytest
     with pytest.raises(UserFacingError) as caught:
-        g.invoke({"messages":[HumanMessage(content="phone habit app, often offline")],
-                  "submission":{"free_text":"web-enabled phone habit app with logins","founder_id":"f","submission_id":"empty-patch"}},
-                 {"configurable":{"thread_id":"empty-patch"}})
+      g.invoke({"messages":[HumanMessage(content="phone habit app")],"submission":{"free_text":"web phone habit app with logins","founder_id":"f","submission_id":"null-field"}},
+               {"configurable":{"thread_id":"null-field"}})
     rendered=caught.value.render()
-    assert "repair patch is empty after cleaning" in rendered
-    assert str((tmp_path/"debug").resolve()) in rendered and ".raw.txt" in rendered
+    assert "field 'operating_environment' was not provided" in rendered
+    assert ".raw.txt" in rendered and str((tmp_path/"debug").resolve()) in rendered
+
+
+def test_conops_has_no_whole_document_or_multifield_repair_path():
+    from pathlib import Path
+    source=(Path(__file__).parents[1]/"src"/"interview_engine"/"graph.py").read_text()
+    assert "last-resort" not in source and "complete corrected JSON" not in source
+    assert "Fill ONLY the" in source
+    assert "clean_model_patch(" not in source

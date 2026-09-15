@@ -573,10 +573,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return {}
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from .conops_stage import (CONOPS_SYSTEM, comparison_question, finalize,
-                                   item_repair_prompt, preseed_from_intent,
+                                   derive_scenario, derive_stakeholder_contexts,
                                    scenario_seeds_from_intent, validate_draft)
         from .errors import UserFacingError
-        from .repair import clean_model_patch, extract_json_value, normalize_model_item
+        from .repair import extract_json_value, normalize_model_item
         import json as _json
 
         draft = state.get("conops_draft")
@@ -602,8 +602,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         founder_turns = {i for i, m in enumerate(state.get("messages", []))
                          if getattr(m, "type", "") == "human"}
         intent = state.get("intent_model") or {}
-        context_seeds = preseed_from_intent(intent, founder_turns)["stakeholder_context"]
-        scenario_seeds = scenario_seeds_from_intent(intent, founder_turns)
+        context_seeds = derive_stakeholder_contexts(intent, founder_turns)
+        scenario_seeds = [derive_scenario(x, intent) for x in scenario_seeds_from_intent(intent, founder_turns)]
 
         raw_paths: dict[str, str] = {}
         def call_json(system_text: str, body: str, label: str, detail: str) -> dict | list:
@@ -631,55 +631,54 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return value
 
         def generate_item(kind: str, identity: dict, model_cls, prompt: str, index: int, total: int) -> dict:
-            label = f"Building CONOPS {kind} {index}/{total}"
-            body = (f"CODE-OWNED IDENTITY (copy exactly): {_json.dumps(identity)}\n"
-                    f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n\n{prompt} "
-                    "Return one JSON object only.")
-            raw = call_json(CONOPS_SYSTEM, body, label, f"item {index} of {total}")
+            derived_fields = identity.pop("_derived_fields", [])
+            candidate = normalize_model_item(identity, model_cls)
+            candidate.update({k:v for k,v in identity.items() if k in model_cls.model_fields})
+            missing=[]
+            for name, field in model_cls.model_fields.items():
+                if name == "contract_version" or not field.is_required():
+                    continue
+                if candidate.get(name) in (None,"",[]):
+                    missing.append(name)
+            for field_name in missing:
+                label=f"Building CONOPS {kind} {index}/{total} field {field_name}"
+                body=(f"Fill ONLY the `{field_name}` field for this {kind}. Return JSON exactly as "
+                      f"{{\"{field_name}\": <value>}}. Do not return null.\n"
+                      f"CODE-DERIVED FIELDS (do not rewrite): {_json.dumps(candidate)}\n"
+                      f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n{prompt}")
+                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}")
+                try:
+                    # A field call is cleaned against a synthetic missing-field
+                    # error contract: normalize wrapper, whitelist, take only it.
+                    normalized=normalize_model_item(raw,model_cls)
+                    value=normalized.get(field_name)
+                    if value in (None,"",[]):
+                        raise ValueError(f"field {field_name} was not provided")
+                    candidate[field_name]=value
+                except ValueError as field_error:
+                    path=raw_paths.get(label)
+                    raise UserFacingError(
+                        f"stage 'conops': {kind} item {index}/{total} field '{field_name}' was not provided.",
+                        str(field_error), "inspect the raw response at "+(path or "the configured debug output")
+                        +", then rerun with the same --session id.") from field_error
             try:
-                raw = normalize_model_item(raw, model_cls)
-            except ValueError as shape_error:
-                path = raw_paths.get(label)
+                item=model_cls.model_validate(candidate)
+            except Exception as final_error:
+                path=raw_paths.get(label) if missing else None
                 raise UserFacingError(
-                    f"stage 'conops': {kind} item {index}/{total} has an unusable response shape.",
-                    str(shape_error), "inspect the raw response at " + (path or "the configured debug output")
-                    + ", then rerun with the same --session id.") from shape_error
-            candidate = {**identity, **raw}
-            # Identity and derivable provenance always win over model output.
-            candidate.update(identity)
-            try:
-                item = model_cls.model_validate(candidate)
-            except Exception as first_error:
-                patch = call_json(CONOPS_SYSTEM,
-                    item_repair_prompt(kind, identity, candidate, first_error, intent),
-                    f"Repairing CONOPS {kind} {index}/{total}", f"item {index} of {total}")
-                try:
-                    patch = clean_model_patch(patch, model_cls, first_error)
-                except ValueError as patch_error:
-                    path = raw_paths.get(f"Repairing CONOPS {kind} {index}/{total}")
-                    raise UserFacingError(
-                        f"stage 'conops': {kind} item {index}/{total} returned an unusable repair patch.",
-                        str(patch_error),
-                        "inspect the raw response at " + (path or "the configured debug output")
-                        + ", then rerun with the same --session id.") from patch_error
-                candidate.update(patch)
-                candidate.update(identity)
-                try:
-                    item = model_cls.model_validate(candidate)
-                except Exception as final_error:
-                    raise UserFacingError(
-                        f"stage 'conops': {kind} item {index}/{total} failed targeted repair.",
-                        f"identity: {identity}; validation detail: {str(final_error)[:350]}",
-                        "inspect the raw response at "
-                        + (raw_paths.get(f"Repairing CONOPS {kind} {index}/{total}") or "the configured debug output")
-                        + ", then rerun with the same --session id; intent and transcript are checkpointed.") from final_error
-            if hasattr(item, "source_turns"):
-                invalid = sorted(set(item.source_turns)-founder_turns)
+                    f"stage 'conops': {kind} item {index}/{total} failed after per-field generation.",
+                    f"validation detail: {str(final_error)[:350]}; code-derived fields: {derived_fields}",
+                    "inspect the raw response at "+(path or "the configured debug output")
+                    +", then rerun with the same --session id.") from final_error
+            if hasattr(item,"source_turns"):
+                invalid=sorted(set(item.source_turns)-founder_turns)
                 if invalid:
-                    raise UserFacingError(
-                        f"stage 'conops': {kind} item {index}/{total} cites invalid provenance.",
+                    raise UserFacingError(f"stage 'conops': {kind} item {index}/{total} cites invalid provenance.",
                         f"non-founder transcript turns: {invalid}",
                         "rerun with the same --session id; the invalid item was not checkpointed.")
+            if progress is not None and derived_fields:
+                progress.emit(ProgressEvent("conops",f"Derived CONOPS {kind} {index}/{total}","completed",
+                    _time.time(),0.0,"code-derived from validated intent: "+", ".join(derived_fields)))
             return item.model_dump(mode="json")
 
         from vmodel_contracts import ConceptOption, OperationalScenario, StakeholderContext
