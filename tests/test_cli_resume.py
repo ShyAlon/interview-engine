@@ -129,7 +129,8 @@ def test_expert_opinion_intent_gate_through_real_cli(monkeypatch,tmp_path):
     monkeypatch.setattr(cli,'datetime',type('D',(),{'now':staticmethod(lambda:type('T',(),{'strftime':lambda self,f:'20260915-120000'})())}))
     models={
       'probing':FakeModel(['[INTERVIEW COMPLETE]']),
-      'distillation':FakeModel([json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY),json.dumps({'action':'approve','rationale':'coherent for unattended test'})]),
+      'distillation':FakeModel([json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY)]),
+      'expert_opinion':FakeModel(['Here is my review.\nAPPROVE\nRATIONALE: coherent for unattended test']),
       'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps([{'name':o['name'],'summary':o['summary']} for o in CONOPS_REPLY['concept_options']]),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
       'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web product"}'])}
     monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])

@@ -313,6 +313,7 @@ _STAGE_DEFAULTS: dict[str, StageModel] = {
     "conops":         StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
     "phrasing":      StageModel("ollama", "qwen2.5-coder:14b", temperature=0.7),
     "scope_tiebreak": StageModel("ollama", "qwen2.5-coder:14b", temperature=0.0),
+    "expert_opinion": StageModel("ollama", "qwen2.5-coder:14b", temperature=0.2),
 }
 
 _BASE_URLS = {
@@ -337,12 +338,12 @@ def for_stage(stage: str) -> StageModel:
     # run exposed why: all configured stages used phi4, while a new CONOPS key
     # silently fell back to qwen. There is deliberately no
     # INTERVIEW_ENGINE_MODEL_CONOPS setting.
-    route = "distillation" if stage == "conops" else stage
+    route = "distillation" if stage in ("conops","expert_opinion") else stage
     override = _env(f"INTERVIEW_ENGINE_MODEL_{route.upper()}")
     if override:
         provider, _, model = override.partition(":")
         return StageModel(provider, model, cfg.temperature, cfg.max_tokens)
-    return _STAGE_DEFAULTS[route] if stage == "conops" else cfg
+    return _STAGE_DEFAULTS[route] if stage in ("conops","expert_opinion") else cfg
 
 
 def _preflight(cfg: "StageModel", stage: str) -> None:
