@@ -246,3 +246,36 @@ def test_expert_reject_prints_reason_and_exits_nonzero(monkeypatch,tmp_path,caps
     assert "model quality has no measurable acceptance intent" in exc.value.cause
     out=capsys.readouterr().out
     assert "RATIONALE: model quality has no measurable acceptance intent" in out
+
+
+def test_expert_gate_prompt_uses_canonical_contract_rubric(monkeypatch):
+    """The reviewer and interviewer import one doctrine rather than copying prompt text."""
+    import inspect
+    from interview_engine import prompts
+    from vmodel_contracts import DELEGATION_DOCTRINE, intent_gate_instructions
+    assert DELEGATION_DOCTRINE in prompts.INTERVIEWER_SYSTEM
+    source=inspect.getsource(cli.main)
+    assert "intent_gate_instructions()" in source
+    assert "Do NOT require the intent artifact to choose APIs" in intent_gate_instructions()
+
+
+def test_session_shape_is_approved_by_canonical_rubric():
+    """A clear intent with typed delegation/open questions is complete at intent stage."""
+    from vmodel_contracts import IntentModel, intent_gate_instructions
+    intent=IntentModel.model_validate({
+      "session_id":"s", "problem_statement":"Predict shipment delay or damage before arrival",
+      "target_users":["Supply chain managers"], "core_value_proposition":"Early predictive risk insight",
+      "stakeholder_needs":[{"need_id":"SN-1","statement":"Managers need model quality to support decisions","kind":"non_functional","source_turns":[0]}],
+      "in_scope":["Predict shipment risk"], "out_of_scope":["Autonomous shipment rerouting"],
+      "research_briefs":[{"topic":"real-time APIs","brief":"Research current API coverage and terms","source_turns":[2]}],
+      "open_questions":["Acceptable F1 threshold"], "source_turns":{}})
+    prompt=intent_gate_instructions()+intent.model_dump_json()
+    assert intent.problem_statement and intent.core_value_proposition and intent.in_scope
+    assert "Research current API" in prompt and "Acceptable F1" in prompt
+    assert "Neither a recorded\ndelegation nor a declared open question is missing intent" in prompt
+
+
+def test_canonical_rubric_rejects_unrecorded_ambiguity():
+    from vmodel_contracts import INTENT_GATE_RUBRIC
+    assert "REJECT only" in INTENT_GATE_RUBRIC
+    assert "material ambiguity that is neither delegated nor declared" in INTENT_GATE_RUBRIC

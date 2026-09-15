@@ -374,9 +374,11 @@ def main() -> None:
     # The review gate: cheapest place to catch a misunderstanding (scoping doc, step 2).
     print("\n" + md)
     if args.expert_opinion:
-        prompt=("Act as an independent expert reviewer for a TEST RUN. Review the exact intent artifact below. "
-                "First line: APPROVE or REJECT. After that write RATIONALE: followed by free prose. "
-                "Never claim founder approval.\n" + intent.model_dump_json(indent=2))
+        from vmodel_contracts import intent_gate_instructions
+        prompt=("Act as an independent expert reviewer for a TEST RUN. Review the exact intent artifact below "
+                "against the canonical rubric. First line: APPROVE or REJECT. After that write RATIONALE: "
+                "followed by free prose. Never claim founder approval.\n\nCANONICAL RUBRIC:\n" +
+                intent_gate_instructions() + "\n\nINTENT ARTIFACT:\n" + intent.model_dump_json(indent=2))
         model=_mc.build_chat_model("expert_opinion")
         text=""
         for attempt in (1,2):

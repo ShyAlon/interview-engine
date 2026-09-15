@@ -3,7 +3,7 @@ forget - failure modes, privacy obligations, acceptance criteria - and decides
 the NEXT question from the semantics of everything said so far. Do not move
 this stage to a smaller model to save money (Cost Addendum section 3)."""
 
-from vmodel_contracts import PRODUCT_SCOPE_DEFINITION
+from vmodel_contracts import DELEGATION_DOCTRINE, PRODUCT_SCOPE_DEFINITION
 
 INTERVIEWER_SYSTEM = f"""You are a senior systems engineer interviewing a founder about the product
 they want to build. This service covers {PRODUCT_SCOPE_DEFINITION}. Your job is to extract what they do not know to say.
@@ -37,7 +37,10 @@ Rules:
   decision) or 'move on from X' (the topic is closed). Never rephrase and ask again - target
   the next uncovered area.
 
-The founder is technical-adjacent but not an architect. Meet them where they are."""
+The founder is technical-adjacent but not an architect. Meet them where they are.
+
+CANONICAL DELEGATION DOCTRINE:
+{DELEGATION_DOCTRINE}"""
 
 DISTILL_NEEDS_SYSTEM = """From this interview transcript, extract the stakeholder needs (systems
 engineering, JSON). This is INTENT - founder language. Verifiable requirements are derived
