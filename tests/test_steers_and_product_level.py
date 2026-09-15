@@ -326,3 +326,19 @@ def test_resume_repairs_bb5b8d4_invalid_delegation_checkpoint(monkeypatch):
     assert fixed.source_turns==[4]
     dumped=fixed.model_dump(mode="json")
     assert "attempted_questions" not in dumped
+
+def test_external_fact_and_quality_method_questions_are_never_sent_to_founder():
+    assert implementation_question("Which APIs exist for real-time port data?")
+    assert implementation_question("How will model quality be verified?")
+    assert implementation_question("What quality metrics should verify the predictive model?")
+    for question in ("Which APIs exist for real-time port data?", "How will model quality be verified?"):
+        assert guard_question(question, [], "data") != question
+
+
+def test_delegation_carries_grounded_research_brief(monkeypatch):
+    probing=FakeModel([structured("Which APIs exist for real-time port data?"), structured("What data must arrive in real time?")])
+    fake_models(monkeypatch,probing); g=build_graph(UsageLog("research-brief")); cfg={"configurable":{"thread_id":"research-brief"}}
+    start(g,thread="research-brief")
+    r=g.invoke({"messages":[HumanMessage(content="You decide")]},cfg)
+    assert r["delegated_decisions"][0]["research_brief"]
+    assert "current" in r["delegated_decisions"][0]["research_brief"]

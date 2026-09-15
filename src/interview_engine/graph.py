@@ -44,7 +44,7 @@ class InterviewState(TypedDict, total=False):
     coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
     coverage_target: str      # the area the last question aimed at ("skip" applies to it)
     parked_topics: list[str]  # founder-deferred sub-topics that must never be re-probed
-    delegated_decisions: list[dict]  # founder-delegated choices: {statement, source_turns} for the intent model
+    delegated_decisions: list[dict]  # founder-delegated choices, captured as research briefs
     question_history: list[dict]  # code-owned emitted questions: {area, question}
     turn_count: int
 
@@ -115,6 +115,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             delegated.append({
                 "statement": f"FOUNDER-DELEGATED: {topic} - the founder explicitly delegated this "
                              f"decision ('{words}'); the spec/architecture stage owns the choice.",
+                "research_brief": f"Research {topic} using current registries, vendor documentation, and web sources; propose a requirement-specific choice for founder review.",
                 "source_turns": [turn_idx]})
             # Explicit delegation or dismissal resolves the current area as
             # covered-by-delegation. The assumption remains visible in the
@@ -147,6 +148,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 "statement": f"FOUNDER-DELEGATED: {_LABELS.get(target, target)} - after two interview attempts, "
                              "the remaining detail is left open for the spec/architecture stage instead of being re-asked. "
                              f"The founder's latest response was: '{getattr(last, 'content', '').strip()[:120]}'.",
+                "research_brief": f"Research the unresolved {_LABELS.get(target, target)} question from current authoritative sources and present the method or choice at the review gate.",
                 "source_turns": [source_turn]})
             coverage[target] = DELEGATED
             target = next_area(coverage)
@@ -550,6 +552,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         "distill_validate", "Glossary gap", "completed", _t3.time(), 0.0,
                         "founder defined terms in the interview but distillation captured none - "
                         "the intent model has no glossary; re-run or add terms manually"))
+            parts["research_briefs"] = [
+                {"topic": str(d.get("statement", "")).split(" - ", 1)[0].removeprefix("FOUNDER-DELEGATED: "),
+                 "brief": str(d.get("research_brief") or "Research this delegated decision using current authoritative sources and present it for founder review."),
+                 "source_turns": list(d.get("source_turns") or [])}
+                for d in state.get("delegated_decisions") or [] if d.get("source_turns")
+            ]
             data = normalize_enums(coerce_for_model(parts, IntentModel), IntentModel)
             try:
                 intent = IntentModel.model_validate(data)
@@ -706,7 +714,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     raise UserFacingError("stage 'conops': comparison plan contains an invalid option identity.",
                                           f"received: {str(raw)[:250]}",
                                           "rerun with the same --session id; intent is checkpointed.")
-                identities.append({"name":str(raw["name"]).strip(),"summary":str(raw["summary"]).strip()})
+                from vmodel_contracts import canonical_concept_id
+                name = str(raw["name"]).strip()
+                identities.append({"concept_id": canonical_concept_id(name), "name": name,
+                                   "summary": str(raw["summary"]).strip()})
             if len({x["name"].casefold() for x in identities}) != len(identities):
                 raise UserFacingError("stage 'conops': comparison plan repeated an option name.",
                                       f"names: {[x['name'] for x in identities]}",

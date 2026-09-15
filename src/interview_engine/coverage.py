@@ -195,10 +195,12 @@ _IMPL_QUESTION_RE = re.compile(
     r"cloud (?:service|services|infrastructure|platform|provider)|"
     r"infrastructure (?:component|components|choice|choices)|"
     r"backend (?:service|services|infrastructure|stack)|free (?:resource|resources)|"
-    r"ui (?:framework|toolkit|library))\b",
+    r"ui (?:framework|toolkit|library)|(?:api|apis|data source|data sources|provider|providers) (?:exist|available)|verification (?:method|approach)|quality (?:verification|metric|metrics)|how (?:will|should) (?:model )?quality be (?:verified|measured|tested))\b",
     re.IGNORECASE)
 # Constraint/affinity questions are product-level and legitimate (the
 # constraints area asks them openly; 'agnostic' closes it too).
+_ENGINEERING_METHOD_RE = re.compile(r"\bhow (?:will|should) (?:the )?(?:model )?quality be (?:verified|measured|tested)\b|\b(?:which|what) (?:quality )?(?:metric|metrics|verification method|verification approach)\b", re.IGNORECASE)
+
 _IMPL_ALLOW_RE = re.compile(
     r"constraint|affinity|mandat|must (?:use|be)|existing|already|locked", re.IGNORECASE)
 
@@ -206,7 +208,7 @@ _IMPL_ALLOW_RE = re.compile(
 def implementation_question(question: str) -> bool:
     """True when the question asks the founder to CHOOSE an implementation."""
     q = question or ""
-    return bool(_IMPL_QUESTION_RE.search(q)) and not _IMPL_ALLOW_RE.search(q)
+    return bool(_ENGINEERING_METHOD_RE.search(q) or _IMPL_QUESTION_RE.search(q)) and not _IMPL_ALLOW_RE.search(q)
 
 
 def question_topic(question: str) -> str | None:

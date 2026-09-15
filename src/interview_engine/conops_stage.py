@@ -52,7 +52,13 @@ def validate_draft(data: dict, founder_turns: set[int]) -> dict:
         data.get("stakeholder_context"))
     scenarios = TypeAdapter(list[OperationalScenario]).validate_python(
         data.get("operational_scenarios"))
-    options = TypeAdapter(list[ConceptOption]).validate_python(data.get("concept_options"))
+    raw_options = []
+    from vmodel_contracts import canonical_concept_id
+    for raw in data.get("concept_options") or []:
+        item = dict(raw)
+        item.setdefault("concept_id", canonical_concept_id(str(item.get("name", ""))))
+        raw_options.append(item)
+    options = TypeAdapter(list[ConceptOption]).validate_python(raw_options)
     if not contexts or not scenarios or len(options) < 2:
         raise ValueError("CONOPS needs context, scenarios, and at least two concepts")
     cited = [t for x in [*contexts, *scenarios] for t in x.source_turns]
@@ -103,6 +109,7 @@ def finalize(draft: dict, session_id: str, founder_reply: str, source_turn: int)
         "session_id": session_id,
         **draft,
         "decision": ConceptDecision(
+            selected_concept_id=selected.concept_id,
             selected_concept=selected.name,
             rationale=rationale,
             founder_confirmed=True,
