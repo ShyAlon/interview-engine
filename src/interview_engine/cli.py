@@ -167,6 +167,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("idea", nargs="*", help="the product idea (omit with --session to resume)")
     ap.add_argument("-s", "--session", help="resume this session id from its checkpoint")
+    ap.add_argument("--expert-opinion", action="store_true", help="simulate intent approval for test runs; leaves explicit human-review provenance")
     args = ap.parse_args()
 
     resuming = args.session is not None
@@ -313,13 +314,31 @@ def main() -> None:
 
     # The review gate: cheapest place to catch a misunderstanding (scoping doc, step 2).
     print("\n" + md)
-    ok = input("\nApprove this intent model? [y/N] ").strip().lower()
+    if args.expert_opinion:
+        prompt=("Act as an independent expert reviewer for a TEST RUN. Review the exact intent artifact below. "
+                "Return strict JSON {action, rationale}; action is approve or reject. Never claim founder approval.\n"
+                + intent.model_dump_json(indent=2))
+        model=_mc.build_chat_model("distillation")
+        chunks=[]
+        for chunk in _mc.stream_checked(model,[HumanMessage(content=prompt)],"distillation",item="expert opinion: intent gate"):
+            chunks.append(chunk.content if isinstance(chunk.content,str) else "")
+        try: verdict=json.loads("".join(chunks))
+        except json.JSONDecodeError as e: raise translate_json_error(e,"expert opinion: intent gate") from e
+        if verdict.get("action") not in ("approve","reject") or not str(verdict.get("rationale","")).strip():
+            raise UserFacingError("expert opinion returned an invalid intent-gate verdict.","Expected action approve|reject and a rationale.",f"rerun with --session {session}; the checkpoint is preserved.")
+        record={"gate":"intent","mode":"simulated_expert_opinion","founder_approved":False,"human_review_required":True,"action":verdict["action"],"rationale":verdict["rationale"],"artifact":"intent_model.json"}
+        (outdir/"expert-opinion.intent.json").write_text(json.dumps(record,indent=2))
+        with (outdir/"audit.jsonl").open("a") as fh:fh.write(json.dumps({"event":"gate.simulated_expert_opinion",**record})+"\n")
+        print(f"\nSIMULATED EXPERT OPINION: {verdict['action']} - not founder approval; human review remains required.")
+        ok="y" if verdict["action"]=="approve" else "n"
+    else:
+        ok = input("\nApprove this intent model? [y/N] ").strip().lower()
     if ok != "y":
         print("Rejected - nothing generated. The interview can resume with corrections.")
         return
     log.write_summary(outdir / "usage_summary.json")
     _print_usage_table(log)
-    print(f"\nApproved. Artifacts in {outdir.resolve()}/")
+    print(f"\n{'Simulated expert accepted for testing' if args.expert_opinion else 'Approved'}. Artifacts in {outdir.resolve()}/")
     print("Next: hand intent_model.json and conops.json to spec-generator.")
 
 
