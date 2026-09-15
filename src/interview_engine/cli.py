@@ -269,6 +269,25 @@ def main() -> None:
         reply = input("You: ")
         state = {"messages": [HumanMessage(content=reply)]}
 
+    # A completed checkpoint is immutable historical state. After a contracts
+    # migration the canonical disk artifact may be newer than that state. On
+    # resume, prefer the explicitly migrated, schema-valid artifact instead of
+    # overwriting it with the stale checkpoint value (the 0.14 -> 0.15 trap).
+    if resuming and (outdir / "intent_model.json").is_file():
+        from vmodel_contracts import check_compatible
+        try:
+            migrated = json.loads((outdir / "intent_model.json").read_text())
+            check_compatible(migrated)
+            validated_migrated = IntentModel.model_validate(migrated)
+            if validated_migrated.session_id == session:
+                result = {**result, "intent_model": validated_migrated.model_dump(mode="json")}
+                graph.update_state(cfg, {"intent_model": result["intent_model"]})
+                print("Loaded migrated intent_model.json into the completed checkpoint.", file=sys.stderr)
+        except Exception:
+            # Existing compatibility/schema handling below remains the single
+            # human-readable failure path; never silently accept a bad file.
+            pass
+
     # Both stage artifacts are contract-validated in-node. CONOPS is separate,
     # never folded into the intent model.
     conops = ConOpsDocument.model_validate(result["conops"])
