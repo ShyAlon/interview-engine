@@ -576,7 +576,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                    item_repair_prompt, preseed_from_intent,
                                    scenario_seeds_from_intent, validate_draft)
         from .errors import UserFacingError
-        from .repair import clean_model_patch, extract_json_value
+        from .repair import clean_model_patch, extract_json_value, normalize_model_item
         import json as _json
 
         draft = state.get("conops_draft")
@@ -636,7 +636,15 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n\n{prompt} "
                     "Return one JSON object only.")
             raw = call_json(CONOPS_SYSTEM, body, label, f"item {index} of {total}")
-            candidate = {**identity, **(raw if isinstance(raw, dict) else {})}
+            try:
+                raw = normalize_model_item(raw, model_cls)
+            except ValueError as shape_error:
+                path = raw_paths.get(label)
+                raise UserFacingError(
+                    f"stage 'conops': {kind} item {index}/{total} has an unusable response shape.",
+                    str(shape_error), "inspect the raw response at " + (path or "the configured debug output")
+                    + ", then rerun with the same --session id.") from shape_error
+            candidate = {**identity, **raw}
             # Identity and derivable provenance always win over model output.
             candidate.update(identity)
             try:
