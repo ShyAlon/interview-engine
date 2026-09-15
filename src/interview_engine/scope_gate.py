@@ -75,9 +75,19 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_outp
     is mixed or silent - ambiguous wording is a semantic problem, pay for it."""
     import json as _json
 
+    from pydantic import BaseModel, ConfigDict, ValidationError
+
     from . import model_config
     from .errors import translate_json_error
     from .model_config import invoke_checked
+    from .repair import extract_json_value
+
+    class _TieBreakResult(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        is_web_app: bool
+        archetype: AppArchetype
+        confidence: float
+        reason: str
 
     resp = invoke_checked(chat_model, TIE_BREAK_PROMPT.format(text=sub.free_text), "scope_tiebreak")
     if usage_log is not None:
@@ -89,9 +99,9 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_outp
                          getattr(resp, "usage_metadata", {}) or {})
     raw_path = raw_output_log.write("scope-tiebreak", "classification", resp.content) if raw_output_log else None
     try:
-        data = _json.loads(resp.content.strip().strip("`").removeprefix("json").strip())
-        accepted = bool(data["is_web_app"])
-    except (_json.JSONDecodeError, KeyError, TypeError) as e:
+        data = _TieBreakResult.model_validate(_json.loads(extract_json_value(resp.content)))
+        accepted = data.is_web_app
+    except (_json.JSONDecodeError, ValueError, ValidationError) as e:
         error = translate_json_error(e, "scope_tiebreak")
         if raw_path:
             error.next_action = f"inspect the raw response at {raw_path}, then " + (error.next_action or "retry.")
@@ -99,11 +109,11 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_outp
     return ScopeVerdict(
         submission_id=sub.submission_id,
         accepted=accepted,
-        archetype=AppArchetype(data["archetype"]),
-        confidence=float(data["confidence"]),
+        archetype=data.archetype,
+        confidence=data.confidence,
         deterministic_signals=classify(sub)[0] + classify(sub)[1],
         llm_tiebreak_used=True,
         decline_message=None if accepted else (
-            SCOPE_DECLINE_PREFIX + " " + f"{data['reason']} - so we'll stop here rather than hand you a spec that doesn't fit."
+            SCOPE_DECLINE_PREFIX + " " + f"{data.reason} - so we'll stop here rather than hand you a spec that doesn't fit."
         ),
     )

@@ -100,3 +100,19 @@ def test_tiebreak_usage_logging_uses_config_not_response_metadata(tmp_path):
     cfg = model_config.for_stage("scope_tiebreak")
     assert (rec.provider, rec.model) == (cfg.provider, cfg.model)
     assert rec.cost_usd == 0.0     # the configured local route prices $0
+
+
+def test_tiebreak_unwraps_json_and_validates_shape():
+    from interview_engine.scope_gate import verdict_with_llm
+
+    class Wrapped(_StubModel):
+        class _Resp:
+            content = ('Here is the classification:\n```json\n'
+                       '{"is_web_app": false, "archetype": "not_web_app", '
+                       '"confidence": 0.75, "reason": "physical product"}\n```')
+            response_metadata = {}
+            usage_metadata = {}
+
+    v = verdict_with_llm(sub("A new physical product"), Wrapped())
+    assert v.accepted is False
+    assert v.archetype == AppArchetype.NOT_WEB_APP
