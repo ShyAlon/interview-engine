@@ -103,6 +103,9 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     import shutil
     shutil.copytree(outdir, legacy)
     shutil.rmtree(tmp_path / "artifacts")
+    resume_cwd = tmp_path / "interview-engine"
+    resume_cwd.mkdir()
+    monkeypatch.chdir(resume_cwd)
 
     # resume after the "fix": no model call should fire - state comes from the migrated checkpoint
     cli_crash["armed"] = False
