@@ -45,55 +45,6 @@ def preseed_from_intent(intent: dict, founder_turns: set[int]) -> dict:
     return {"stakeholder_context": contexts}
 
 
-def merge_draft(base: dict, patch: dict, seed: dict | None = None) -> dict:
-    """Merge a targeted repair without allowing it to erase valid draft work."""
-    out = json.loads(json.dumps(base if isinstance(base, dict) else {}))
-
-    def merge_items(existing: list, incoming: list, identity: str) -> list:
-        result = [dict(x) for x in existing if isinstance(x, dict)]
-        by_id = {str(x.get(identity, "")).strip().casefold(): x for x in result if x.get(identity)}
-        for item in incoming:
-            if not isinstance(item, dict):
-                continue
-            ident = str(item.get(identity, "")).strip().casefold()
-            if ident and ident in by_id:
-                by_id[ident].update({k: v for k, v in item.items() if v not in (None, "", [])})
-            else:
-                result.append(dict(item))
-                if ident:
-                    by_id[ident] = result[-1]
-        return result
-
-    identities = {"stakeholder_context": "stakeholder", "operational_scenarios": "scenario_id",
-                  "concept_options": "name"}
-    for key, identity in identities.items():
-        original = out.get(key) or []
-        seeded = (seed or {}).get(key) or []
-        # A draft's explicit identities win. Seeds guarantee identity when the
-        # model omits the collection/item, but never invent a second alias for
-        # a stakeholder the model named differently.
-        repaired = patch.get(key) or []
-        authoritative = original or repaired
-        if authoritative:
-            existing_ids = {str(x.get(identity, "")).strip().casefold()
-                            for x in authoritative if isinstance(x, dict)}
-            seeded = [x for x in seeded if str(x.get(identity, "")).strip().casefold() in existing_ids]
-        out[key] = merge_items(merge_items(seeded, original, identity), repaired, identity)
-    for key, value in patch.items():
-        if key not in identities and value not in (None, "", []):
-            out[key] = value
-    return out
-
-
-def repair_prompt(draft: dict, error: Exception, intent: dict) -> str:
-    """Request only schema-invalid fields; valid draft content is immutable input."""
-    return ("TARGETED CONOPS REPAIR. Do not reroll or rewrite valid content. Return one JSON object "
-            "containing only missing or invalid fields, nested under stakeholder_context, "
-            "operational_scenarios, or concept_options with each item's identity field. "
-            "Use the validation errors and validated intent evidence below. Every repaired context "
-            "or scenario source_turns must cite founder turns already present in the draft/intent.\n\n"
-            f"VALIDATION ERRORS:\n{error}\n\nEXISTING DRAFT (preserve):\n{json.dumps(draft)}"
-            f"\n\nVALIDATED INTENT EVIDENCE:\n{json.dumps(intent)}")
 
 def validate_draft(data: dict, founder_turns: set[int]) -> dict:
     """Validate the model-authored draft and reject fabricated provenance."""
@@ -182,3 +133,27 @@ def render_conops(doc: ConOpsDocument) -> str:
     lines += ["", "## Founder decision", f"**{doc.decision.selected_concept}**",
               doc.decision.rationale]
     return "\n".join(lines) + "\n"
+
+
+def scenario_seeds_from_intent(intent: dict, founder_turns: set[int]) -> list[dict]:
+    """Derive scenario identities from intent concepts/scope, never model prose."""
+    concepts = [str(x).strip() for x in (intent.get("operational_concepts") or []) if str(x).strip()]
+    if not concepts:
+        concepts = [str(x).strip() for x in (intent.get("in_scope") or []) if str(x).strip()][:3]
+    if not concepts:
+        concepts = [str(intent.get("core_value_proposition") or "Primary operation").strip()]
+    source_map = intent.get("source_turns") or {}
+    source = [t for key in ("operational_concepts", "in_scope", "core_value_proposition")
+              for t in (source_map.get(key) or []) if t in founder_turns]
+    if not source:
+        source = sorted({t for n in (intent.get("stakeholder_needs") or [])
+                         for t in (n.get("source_turns") or []) if t in founder_turns})
+    return [{"scenario_id": f"OS-{i}", "name": name, "source_turns": sorted(set(source))}
+            for i, name in enumerate(concepts, 1)]
+
+
+def item_repair_prompt(kind: str, identity: dict, candidate: dict, error: Exception, intent: dict) -> str:
+    return (f"TARGETED {kind.upper()} REPAIR. Return one JSON object containing only missing or invalid fields. "
+            "Do not rename the code-owned identity and do not rewrite valid fields. "
+            f"Identity: {json.dumps(identity)}\nValidation errors: {error}\n"
+            f"Existing item: {json.dumps(candidate)}\nValidated intent evidence: {json.dumps(intent)}")

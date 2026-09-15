@@ -67,7 +67,11 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     models = {
         "probing": FakeModel([json.dumps({"question": "What is the goal?", "covered": [], "thin": [], "skipped": [], "complete": False}), "[INTERVIEW COMPLETE]"]),
         "distillation": FakeModel([json.dumps(NEEDS_REPLY), json.dumps(SCOPE_REPLY), json.dumps(PREVIEW_REPLY)]),
-        "conops": FakeModel([json.dumps(CONOPS_REPLY)]),
+        "conops": FakeModel([
+            json.dumps({**CONOPS_REPLY["stakeholder_context"][0], "stakeholder": "u"}),
+            json.dumps(CONOPS_REPLY["operational_scenarios"][0]),
+            json.dumps([{"name":o["name"],"summary":o["summary"]} for o in CONOPS_REPLY["concept_options"]]),
+            json.dumps(CONOPS_REPLY["concept_options"][0]), json.dumps(CONOPS_REPLY["concept_options"][1])]),
         "scope_tiebreak": FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']),
     }
     monkeypatch.setattr(model_config, "build_chat_model", lambda stage, **kwargs: models[stage])

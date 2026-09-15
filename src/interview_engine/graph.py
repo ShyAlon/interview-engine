@@ -567,7 +567,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return {}
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from .conops_stage import (CONOPS_SYSTEM, comparison_question, finalize,
-                                   merge_draft, preseed_from_intent, repair_prompt, validate_draft)
+                                   item_repair_prompt, preseed_from_intent,
+                                   scenario_seeds_from_intent, validate_draft)
         from .errors import UserFacingError
         from .repair import extract_json_value
         import json as _json
@@ -594,71 +595,99 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for i, m in enumerate(state.get("messages", [])))
         founder_turns = {i for i, m in enumerate(state.get("messages", []))
                          if getattr(m, "type", "") == "human"}
-        seed = preseed_from_intent(state.get("intent_model") or {}, founder_turns)
-        with track(progress, "conops", "Building Concept of Operations",
-                   "stakeholder context, operational scenarios, concept comparison"):
-            messages = [SystemMessage(content=CONOPS_SYSTEM + "\n\nVALIDATED INTENT:\n"
-                                      + _json.dumps(state.get("intent_model") or {})
-                                      + "\n\nPRESEEDED STAKEHOLDER IDENTITIES (fill missing fields; do not remove):\n"
-                                      + _json.dumps(seed)
-                                      + "\n\nTRANSCRIPT:\n" + transcript)]
+        intent = state.get("intent_model") or {}
+        context_seeds = preseed_from_intent(intent, founder_turns)["stakeholder_context"]
+        scenario_seeds = scenario_seeds_from_intent(intent, founder_turns)
+
+        def call_json(system_text: str, body: str, label: str, detail: str) -> dict | list:
+            if progress is not None:
+                progress.emit(ProgressEvent("conops", label, "started", _time.time(), None, detail))
             t0 = _time.time()
-            resp = model_config.invoke_checked(conops_model, messages, "conops")
+            resp = model_config.invoke_checked(conops_model,
+                [SystemMessage(content=system_text), HumanMessage(content=body)], "conops")
             usage_log.record("conops", model_config.for_stage("conops").provider,
                              model_config.for_stage("conops").model,
-                             (getattr(resp, "usage_metadata", None) or {}),
-                             duration_s=_time.time() - t0)
+                             (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time()-t0)
             try:
-                raw = _json.loads(extract_json_value(resp.content))
+                value = _json.loads(extract_json_value(resp.content))
             except Exception as exc:
                 raise UserFacingError(
-                    "stage 'conops': the model did not return readable JSON.",
+                    f"stage 'conops': {label.lower()} returned unreadable JSON.",
                     f"parse detail: {str(exc)[:300]}",
-                    "rerun with the same --session id; intent and transcript are checkpointed.") from exc
-            candidate = merge_draft({}, raw, seed)
+                    "rerun with the same --session id; completed intent work is checkpointed.") from exc
+            if progress is not None:
+                progress.emit(ProgressEvent("conops", label, "completed", _time.time(), _time.time()-t0, detail))
+            return value
+
+        def generate_item(kind: str, identity: dict, model_cls, prompt: str, index: int, total: int) -> dict:
+            label = f"Building CONOPS {kind} {index}/{total}"
+            body = (f"CODE-OWNED IDENTITY (copy exactly): {_json.dumps(identity)}\n"
+                    f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n\n{prompt} "
+                    "Return one JSON object only.")
+            raw = call_json(CONOPS_SYSTEM, body, label, f"item {index} of {total}")
+            candidate = {**identity, **(raw if isinstance(raw, dict) else {})}
+            # Identity and derivable provenance always win over model output.
+            candidate.update(identity)
             try:
-                draft = validate_draft(candidate, founder_turns)
+                item = model_cls.model_validate(candidate)
             except Exception as first_error:
-                # A targeted repair sees the exact invalid draft and schema
-                # errors. It may fill fields only; deterministic merge retains
-                # every valid context, scenario and concept from attempt one.
-                repair_messages = [SystemMessage(content=CONOPS_SYSTEM),
-                                   HumanMessage(content=repair_prompt(candidate, first_error,
-                                                                      state.get("intent_model") or {}))]
-                t0 = _time.time()
-                repaired = model_config.invoke_checked(conops_model, repair_messages, "conops")
-                usage_log.record("conops", model_config.for_stage("conops").provider,
-                                 model_config.for_stage("conops").model,
-                                 (getattr(repaired, "usage_metadata", None) or {}),
-                                 duration_s=_time.time() - t0)
+                patch = call_json(CONOPS_SYSTEM,
+                    item_repair_prompt(kind, identity, candidate, first_error, intent),
+                    f"Repairing CONOPS {kind} {index}/{total}", f"item {index} of {total}")
+                candidate.update({k:v for k,v in (patch if isinstance(patch,dict) else {}).items()
+                                  if v not in (None,"",[])})
+                candidate.update(identity)
                 try:
-                    patch = _json.loads(extract_json_value(repaired.content))
-                    candidate = merge_draft(candidate, patch, seed)
-                    draft = validate_draft(candidate, founder_turns)
-                except Exception as repair_error:
-                    # Last resort only: preserve the old operational escape
-                    # hatch, but make it explicit and grounded in intent.
-                    fallback_messages = [SystemMessage(content=CONOPS_SYSTEM + "\n\nVALIDATED INTENT:\n"
-                                                       + _json.dumps(state.get("intent_model") or {})
-                                                       + "\n\nTRANSCRIPT:\n" + transcript),
-                                         HumanMessage(content="The targeted repair still failed: "
-                                                      + str(repair_error)[:350]
-                                                      + ". Last resort: return one complete corrected JSON object only.")]
-                    t0 = _time.time()
-                    fallback = model_config.invoke_checked(conops_model, fallback_messages, "conops")
-                    usage_log.record("conops", model_config.for_stage("conops").provider,
-                                     model_config.for_stage("conops").model,
-                                     (getattr(fallback, "usage_metadata", None) or {}),
-                                     duration_s=_time.time() - t0)
-                    try:
-                        full = _json.loads(extract_json_value(fallback.content))
-                        draft = validate_draft(merge_draft({}, full, seed), founder_turns)
-                    except Exception as final_error:
-                        raise UserFacingError(
-                            "stage 'conops': targeted repair and last-resort draft both failed validation.",
-                            f"first error: {str(first_error)[:180]}; final error: {str(final_error)[:180]}",
-                            "rerun with the same --session id; intent and transcript are checkpointed, "
-                            "or change the shared INTERVIEW_ENGINE_MODEL_CONOPS route.") from final_error
+                    item = model_cls.model_validate(candidate)
+                except Exception as final_error:
+                    raise UserFacingError(
+                        f"stage 'conops': {kind} item {index}/{total} failed targeted repair.",
+                        f"identity: {identity}; validation detail: {str(final_error)[:350]}",
+                        "rerun with the same --session id; intent and transcript are checkpointed.") from final_error
+            if hasattr(item, "source_turns"):
+                invalid = sorted(set(item.source_turns)-founder_turns)
+                if invalid:
+                    raise UserFacingError(
+                        f"stage 'conops': {kind} item {index}/{total} cites invalid provenance.",
+                        f"non-founder transcript turns: {invalid}",
+                        "rerun with the same --session id; the invalid item was not checkpointed.")
+            return item.model_dump(mode="json")
+
+        from vmodel_contracts import ConceptOption, OperationalScenario, StakeholderContext
+        with track(progress, "conops", "Building Concept of Operations",
+                   f"{len(context_seeds)} stakeholders, {len(scenario_seeds)} scenarios, comparison + options"):
+            contexts = [generate_item("stakeholder", seed, StakeholderContext,
+                "Fill role, goals, and operating_environment from founder evidence; retain source_turns.",
+                i, len(context_seeds)) for i, seed in enumerate(context_seeds,1)]
+            scenarios = [generate_item("scenario", seed, OperationalScenario,
+                "Fill trigger, actors, ordered operational_flow, success_outcome, exceptions; retain source_turns.",
+                i, len(scenario_seeds)) for i, seed in enumerate(scenario_seeds,1)]
+
+            comparison = call_json(CONOPS_SYSTEM,
+                "VALIDATED INTENT: " + _json.dumps(intent) + "\nPropose 2-4 genuinely distinct product-level operating concepts. "
+                "Return a JSON array of objects with name and summary only. Do not include architecture components.",
+                "Planning CONOPS concept comparison", "known next step: one validated call per option")
+            if not isinstance(comparison,list) or not 2 <= len(comparison) <= 4:
+                raise UserFacingError(
+                    "stage 'conops': concept comparison plan must contain 2-4 options.",
+                    f"received: {str(comparison)[:300]}",
+                    "rerun with the same --session id; stakeholder and scenario work will rerun from intent.")
+            identities=[]
+            for raw in comparison:
+                if not isinstance(raw,dict) or not str(raw.get("name","")).strip() or not str(raw.get("summary","")).strip():
+                    raise UserFacingError("stage 'conops': comparison plan contains an invalid option identity.",
+                                          f"received: {str(raw)[:250]}",
+                                          "rerun with the same --session id; intent is checkpointed.")
+                identities.append({"name":str(raw["name"]).strip(),"summary":str(raw["summary"]).strip()})
+            if len({x["name"].casefold() for x in identities}) != len(identities):
+                raise UserFacingError("stage 'conops': comparison plan repeated an option name.",
+                                      f"names: {[x['name'] for x in identities]}",
+                                      "rerun with the same --session id; intent is checkpointed.")
+            options=[generate_item("concept option", ident, ConceptOption,
+                "Fill concise advantages and disadvantages grounded in the intended operation.",
+                i,len(identities)) for i,ident in enumerate(identities,1)]
+            draft=validate_draft({"stakeholder_context":contexts,"operational_scenarios":scenarios,
+                                  "concept_options":options},founder_turns)
         return {"conops_draft": draft,
                 "messages": [AIMessage(content=comparison_question(draft))]}
 
