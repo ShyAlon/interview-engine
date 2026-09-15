@@ -97,7 +97,14 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
     assert (outdir / "intent_model.raw.json").exists(), "raw distillation preserved before validation"
     assert (outdir / "checkpoints.sqlite").exists(), "checkpoint persisted"
 
-    # resume after the "fix": no model call should fire - state comes from the checkpoint
+    # Simulate a pre-unified run, then prove automatic migration and resume.
+    legacy = tmp_path / "legacy-repo" / "out" / session
+    legacy.parent.mkdir(parents=True)
+    import shutil
+    shutil.copytree(outdir, legacy)
+    shutil.rmtree(tmp_path / "artifacts")
+
+    # resume after the "fix": no model call should fire - state comes from the migrated checkpoint
     cli_crash["armed"] = False
     for m in models.values():
         m.replies.clear()
