@@ -110,7 +110,7 @@ def test_complete_appends_marker_and_stops(monkeypatch):
     probing = FakeModel([structured("Got it all.", covered=[k for k, _, _ in AREAS], complete=True)])
     fake_models(monkeypatch, probing)
     g = build_graph(UsageLog("t1"))
-    # "5000" keeps the NFR guard honest: closing "quantified NFRs" needs numbers
+    # "5000" keeps the NFR guard honest: closing "quality needs" needs numbers
     r = start(g, text="a saas web app for surf schools, booking, logins, 5000 users", thread="c2")
     assert any("[INTERVIEW COMPLETE]" in getattr(m, "content", "") for m in r["messages"])
     assert "intent_model" in r  # same invoke flowed through distillation
@@ -231,7 +231,7 @@ def test_coverage_map_render():
     md = render_coverage_markdown(cov)
     assert "**Covered:** goal & core value" in md
     assert "Skipped by you:** stakeholder context" in md
-    assert "Thin" in md and "quantified NFRs" in md
+    assert "Thin" in md and "quality needs" in md
     assert "Not covered:" in md
 
 

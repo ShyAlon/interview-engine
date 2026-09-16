@@ -19,7 +19,7 @@ AREAS = [
     ("flows", "operational scenarios", "at least one concrete trigger-to-outcome scenario with actors, ordered steps, and exceptions"),
     ("data", "data model & sources", "what data, where it lives, who owns it"),
     ("integrations", "integrations", "named systems/APIs, not categories"),
-    ("nfrs", "quantified NFRs", "NUMBERS: users, volume, latency/freshness fail-point, uptime - 'strict security' is thin"),
+    ("nfrs", "quality needs", "founder-visible business impact; engineering maps it to measurable targets"),
     ("failures", "failure modes", "what breaks, what degrades, what must never happen"),
     ("constraints", "constraints", "budget, deadlines, team - and asked OPENLY: 'any technology constraints - language/ecosystem, cloud affinity?' ('agnostic' closes it too)"),
     ("risks", "risks", "what assumption kills the product if wrong"),
@@ -203,7 +203,33 @@ _IMPL_QUESTION_RE = re.compile(
     re.IGNORECASE)
 # Constraint/affinity questions are product-level and legitimate (the
 # constraints area asks them openly; 'agnostic' closes it too).
-_ENGINEERING_METHOD_RE = re.compile(r"\bhow (?:will|should) (?:the )?(?:model )?quality be (?:verified|measured|tested)\b|\b(?:which|what) (?:quality )?(?:metric|metrics|verification method|verification approach)\b", re.IGNORECASE)
+_ENGINEERING_METHOD_RE = re.compile(
+    r"\bhow (?:will|should) (?:the )?(?:model )?quality be (?:verified|measured|tested)\b|"
+    r"\b(?:which|what) (?:quality )?(?:metric|metrics|verification method|verification approach)\b|"
+    r"\b(?:specific |exact |maximum |minimum |target )*(?:latency|response time|throughput|requests? per second|rps|availability|uptime)\b[^?]*(?:seconds?|milliseconds?|percent|%|number|target|maximum|minimum|budget|sla)\b|"
+    r"\b(?:how many|what number of) (?:concurrent )?(?:users|requests|transactions)\b",
+    re.IGNORECASE)
+
+
+def engineering_default(question: str) -> tuple[str, str] | None:
+    """Classify engineering-owned probes and return a visible provisional default.
+
+    The founder may override these later; the interview asks only for business
+    impact, while architecture/specification owns the numeric translation.
+    """
+    q = question or ""
+    if not implementation_question(q):
+        return None
+    if re.search(r"latency|response time|milliseconds?|seconds?", q, re.I):
+        return ("interactive response-time target",
+                "routine user interactions respond within 2 seconds; slower operations show immediate progress")
+    if re.search(r"throughput|requests? per second|rps|concurrent|how many", q, re.I):
+        return ("capacity target", "size capacity from observed peak demand with tested headroom")
+    if re.search(r"availability|uptime|sla", q, re.I):
+        return ("availability target", "use the standard service tier appropriate to business impact and recovery needs")
+    if re.search(r"verif|metric|quality", q, re.I):
+        return ("verification method", "derive measurable acceptance thresholds from the approved workflows and risks")
+    return (question_topic(q) or "engineering method", "use the relevant industry-standard default")
 
 _IMPL_ALLOW_RE = re.compile(
     r"constraint|affinity|mandat|must (?:use|be)|existing|already|locked", re.IGNORECASE)
@@ -229,7 +255,7 @@ _FALLBACK_QUESTIONS = {
     "flows": "Walk me through the most important operational scenario from trigger to successful outcome, including what can go wrong.",
     "data": "What information goes in, where does it come from, and who owns it?",
     "integrations": "Which external systems must exchange data with it?",
-    "nfrs": "Apart from parked design details, what user volume, response-time, or uptime target matters most?",
+    "nfrs": "Which would hurt the business most: users waiting during ordinary work, the service being unavailable, or work piling up at busy times?",
     "failures": "What failure must the system handle without losing the user's work?",
     "constraints": "What fixed deadline, budget, team, platform, or compliance constraint applies?",
     "risks": "What assumption would most threaten the product if it proved false?",
@@ -251,7 +277,7 @@ def guard_question(question: str, parked_topics: list[str], target: str | None) 
     question is replaced by the product-level fallback for the target area
     (the behavior need stays with the interview; the tech choice moves to the
     spec stage)."""
-    if implementation_question(question):
+    if engineering_default(question):
         return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
     return safe_question(question, parked_topics, target)
 

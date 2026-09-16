@@ -412,3 +412,58 @@ def test_followup_cap_counts_only_consecutive_same_area(monkeypatch):
     assert result["coverage"]["data"] == "thin"
     assert not any("after two interview attempts" in d["statement"]
                    for d in result.get("delegated_decisions", []))
+
+
+def test_latency_budget_is_engineering_owned_and_rephrased_for_founder(monkeypatch):
+    from interview_engine.coverage import engineering_default
+
+    exact = "What is the specific maximum latency (in seconds) for user interactions that would make the application unusable?"
+    owned = engineering_default(exact)
+    assert owned and owned[0] == "interactive response-time target"
+    assert "2 seconds" in owned[1]
+
+    probing = FakeModel([structured(exact, thin=["nfrs"])])
+    fake_models(monkeypatch, probing)
+    graph = build_graph(UsageLog("latency-founder-language"))
+    cov = {k: "covered" for k, _, _ in __import__('interview_engine.coverage', fromlist=['AREAS']).AREAS}
+    cov["nfrs"] = "uncovered"
+    result = graph.invoke({
+        "messages": [HumanMessage(content="garage claims")],
+        "submission": {"free_text": "garage claims", "founder_id": "t", "submission_id": "latency-founder-language"},
+        "verdict": {"accepted": True}, "coverage": cov, "coverage_target": "nfrs",
+    }, {"configurable": {"thread_id": "latency-founder-language"}})
+    asked = result["messages"][-1].content.lower()
+    assert "latency" not in asked and "seconds" not in asked
+    assert "hurt the business" in asked
+    assumption = next(d for d in result["delegated_decisions"]
+                      if "interactive response-time target" in d["statement"])
+    assert "2 seconds" in assumption["statement"]
+    assert "founder-overridable" in assumption["statement"]
+    assert assumption["research_brief"]
+
+
+def test_founder_language_quality_probe_is_allowed():
+    from interview_engine.coverage import engineering_default
+
+    question = "When a garage worker waits after submitting a claim, what delay would disrupt their work?"
+    assert engineering_default(question) is None
+    assert guard_question(question, [], "nfrs") == question
+
+
+def test_business_impact_answer_can_close_nfr_after_engineering_default(monkeypatch):
+    probing = FakeModel([
+        structured("What is the maximum latency in seconds?", thin=["nfrs"]),
+        structured("What failure would hurt the garage most?", covered=["nfrs"]),
+    ])
+    fake_models(monkeypatch, probing)
+    graph = build_graph(UsageLog("nfr-business-impact"))
+    cfg = {"configurable": {"thread_id": "nfr-business-impact"}}
+    cov = {k: "covered" for k, _, _ in __import__('interview_engine.coverage', fromlist=['AREAS']).AREAS}
+    cov["nfrs"] = "uncovered"
+    graph.invoke({
+        "messages": [HumanMessage(content="garage claims")],
+        "submission": {"free_text": "garage claims", "founder_id": "t", "submission_id": "nfr-business-impact"},
+        "verdict": {"accepted": True}, "coverage": cov, "coverage_target": "nfrs",
+    }, cfg)
+    result = graph.invoke({"messages": [HumanMessage(content="Waiting while a customer is at the desk would disrupt service.")]}, cfg)
+    assert result["coverage"]["nfrs"] == "covered"

@@ -25,7 +25,7 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
 from .coverage import (COVERED, THIN, SKIPPED, _LABELS, apply_reply, extract_turn_json, founder_control,
-                         founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, same_question_substance, DELEGATED,
+                         founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
@@ -214,7 +214,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if coverage.get("nfrs") == COVERED and (parsed.get("covered") or []) and "nfrs" in (parsed.get("covered") or []):
                 founder_text = "\n".join(getattr(m, "content", "") for m in history
                                           if getattr(m, "type", "") == "human")
-                if not nfr_quantified(founder_text):
+                has_engineering_default = any(
+                    "engineering-owned provisional default" in d.get("statement", "")
+                    for d in delegated)
+                if not nfr_quantified(founder_text) and not has_engineering_default:
                     coverage["nfrs"] = THIN
                     if progress is not None:
                         progress.emit(ProgressEvent(
@@ -223,6 +226,19 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             "say 'no numbers for the demo' to close it honestly"))
             next_target = next_area(coverage)
             candidate = parsed["question"].strip()
+            owned = engineering_default(candidate)
+            if owned:
+                topic, default = owned
+                source_turn = max(0, len(history) - 1)
+                delegated.append({
+                    "statement": f"FOUNDER-DELEGATED: {topic} - engineering-owned provisional default: "
+                                 f"{default}. This remains founder-overridable.",
+                    "research_brief": f"Validate the provisional {topic} against current industry guidance and "
+                                      "map the founder's business-impact answer to measurable acceptance criteria.",
+                    "source_turns": [source_turn],
+                })
+                if topic not in parked_topics:
+                    parked_topics.append(topic)
             question = guard_question(candidate, parked_topics, next_target)
             question = unique_question(question, list(state.get("question_history") or []), next_target)
             # saturation guard (run-4 audit): the model may only declare the
