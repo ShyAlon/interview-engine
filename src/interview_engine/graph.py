@@ -179,6 +179,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     "coverage_target": target or "", "turn_count": turn}
         parsed = extract_turn_json(resp.content)
         if parsed is None:
+            model_config.log_malformed_response("probing", "prose/non-JSON", resp, snippet=resp.content)
             if progress is not None:
                 progress.emit(ProgressEvent("interview_turn", "Coverage", "started", _t.time(), None,
                                             "unstructured reply - retrying with format feedback"))
@@ -193,6 +194,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                              (getattr(resp2, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
             parsed = extract_turn_json(resp2.content)
             if parsed is None:
+                model_config.log_malformed_response("probing", "prose/non-JSON", resp2, snippet=resp2.content)
                 from .errors import UserFacingError
 
                 cfg = model_config.for_stage("probing")

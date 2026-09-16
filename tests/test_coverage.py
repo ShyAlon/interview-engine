@@ -300,3 +300,12 @@ def test_turn_output_schema_fixes_shape_and_area_keys():
     assert schema["additionalProperties"] is False
     for field in ("covered", "thin", "skipped"):
         assert schema["properties"][field]["items"]["enum"] == AREA_KEYS
+
+
+def test_prose_reply_is_echoed_as_console_error(monkeypatch, capsys):
+    probing = FakeModel(["plain response", structured("Who uses it?")])
+    fake_models(monkeypatch, probing)
+    start(build_graph(UsageLog("t1")))
+    shown = capsys.readouterr().err
+    assert "ERROR malformed response [probing]: prose/non-JSON" in shown
+    assert "plain response" in shown

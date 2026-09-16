@@ -295,3 +295,18 @@ def test_empty_completion_twice_is_provider_aware(tmp_path, monkeypatch):
     assert "empty content twice" in rendered
     assert "OLLAMA_CONTEXT_LENGTH" not in rendered
     assert "llm-calls.jsonl" in rendered
+
+
+def test_empty_completion_is_echoed_as_console_error(monkeypatch, capsys):
+    from langchain_core.messages import AIMessage
+
+    class M:
+        calls = 0
+        def invoke(self, messages):
+            self.calls += 1
+            return AIMessage(content="" if self.calls == 1 else "ok", id="resp_123")
+
+    mc.invoke_checked(M(), [], "probing")
+    shown = capsys.readouterr().err
+    assert "ERROR malformed response [probing]: empty content" in shown
+    assert "response_id=resp_123" in shown

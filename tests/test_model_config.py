@@ -122,8 +122,10 @@ def test_deepseek_schema_request_uses_json_mode_and_warns(monkeypatch, capsys):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     model = model_config.build_chat_model("probing", schema={"type": "object"})
     assert model.model_kwargs["response_format"] == {"type": "json_object"}
+    assert model.extra_body == {"thinking": {"type": "disabled"}}
     warning = capsys.readouterr().err
     assert "WARNING output mode [probing]" in warning
+    assert "thinking disabled" in warning
     assert "field shape remains validation+retry guarded" in warning
 
 def test_anthropic_structured_adapter_preserves_raw_metadata():
