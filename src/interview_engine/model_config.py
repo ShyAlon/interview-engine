@@ -521,6 +521,60 @@ class _StructuredOutputAdapter:
         return raw
 
 
+
+class _DeepSeekToolOutputAdapter:
+    """Expose one forced DeepSeek function call as ordinary JSON content.
+
+    Function parameters must be an object, while our artifact schemas can also
+    be arrays, so every schema is wrapped in a code-owned ``payload`` property.
+    The rest of the pipeline continues to parse and validate plain JSON.
+    """
+    def __init__(self, model, schema: dict, name: str):
+        self.name = name
+        tool = {"type": "function", "function": {"name": name,
+                "description": "Return the requested structured artifact.",
+                "parameters": {"type": "object", "properties": {"payload": schema},
+                               "required": ["payload"], "additionalProperties": False}}}
+        self.model = model
+        self.tool = tool
+        self.runnable = model.bind_tools([tool], tool_choice=name)
+
+    def __getattr__(self, name):
+        # Preserve observability/test access to the underlying transport.
+        return getattr(self.model, name)
+
+    def _content(self, message):
+        import json
+        calls = getattr(message, "tool_calls", None) or []
+        if len(calls) != 1 or calls[0].get("name") != self.name:
+            # Empty content enters the existing bounded human-readable retry;
+            # never disguise a missing/wrong tool call as a valid artifact.
+            return ""
+        args = calls[0].get("args") or {}
+        if "payload" not in args:
+            return ""
+        return json.dumps(args["payload"])
+
+    def invoke(self, messages):
+        message = self.runnable.invoke(messages)
+        message.content = self._content(message)
+        return message
+
+    def stream(self, messages):
+        # LangChain assembles streamed tool-call argument fragments via chunk
+        # addition. Emit one normalized final chunk so downstream sees exactly
+        # one JSON artifact, never partial function syntax.
+        from langchain_core.messages import AIMessageChunk
+        combined = None
+        for chunk in self.runnable.stream(messages):
+            combined = chunk if combined is None else combined + chunk
+        if combined is None:
+            yield AIMessageChunk(content="")
+            return
+        yield AIMessageChunk(content=self._content(combined),
+                             response_metadata=getattr(combined, "response_metadata", {}) or {},
+                             usage_metadata=getattr(combined, "usage_metadata", None))
+
 def build_chat_model(stage: str, schema: dict | None = None):
     """Return a LangChain chat model for the stage.
 
@@ -543,14 +597,8 @@ def build_chat_model(stage: str, schema: dict | None = None):
             extra = {"extra_body": body}
         if schema is not None:
             if cfg.provider == "deepseek":
-                # Do NOT send response_format=json_object. A replay of the exact
-                # 1,940-token probing request returned only whitespace with JSON
-                # mode (max_tokens spelling and thinking mode made no difference),
-                # while the same request without response_format returned valid
-                # prose/JSON. The prompt carries an exact JSON example and the
-                # existing validator + bounded retry own the shape.
                 extra["extra_body"] = {"thinking": {"type": "disabled"}}
-                _console_line(f"  WARNING output mode [{stage}]: DeepSeek prompt-structured mode (thinking disabled); field shape remains validation+retry guarded")
+                _console_line(f"  output mode [{stage}]: DeepSeek forced function call; field shape provider-constrained, semantic validation+retry retained")
             else:
                 extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
                                          {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
@@ -563,7 +611,7 @@ def build_chat_model(stage: str, schema: dict | None = None):
                 if debug_path not in _DEBUG_HTTP_ANNOUNCED:
                     _DEBUG_HTTP_ANNOUNCED.add(debug_path)
                     _console_line(f"  WARNING full LLM HTTP debug enabled: {debug_path} (request messages included; no authorization headers)")
-        return ChatOpenAI(
+        model = ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,
             timeout=_guard_limits()[0],  # the socket dies with the guardrail deadline
@@ -572,6 +620,9 @@ def build_chat_model(stage: str, schema: dict | None = None):
             api_key=(_env(env) or "" if env else "") or "ollama",
             **extra,
         )
+        if cfg.provider == "deepseek" and schema is not None:
+            return _DeepSeekToolOutputAdapter(model, schema, f"return_{stage}_artifact")
+        return model
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
