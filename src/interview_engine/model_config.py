@@ -499,8 +499,14 @@ def build_chat_model(stage: str, schema: dict | None = None):
                 body["think"] = False
             extra = {"extra_body": body}
         if schema is not None:
-            extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
-                                     {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
+            if cfg.provider == "deepseek":
+                # DeepSeek chat-completions guarantees valid JSON, not arbitrary
+                # JSON-schema adherence. Existing validators/retry own field shape.
+                extra["model_kwargs"] = {"response_format": {"type": "json_object"}}
+                _console_line(f"  WARNING output mode [{stage}]: DeepSeek JSON mode constrains syntax; field shape remains validation+retry guarded")
+            else:
+                extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
+                                         {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
         return ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,
