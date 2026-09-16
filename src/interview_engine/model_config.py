@@ -188,12 +188,21 @@ def _console_line(msg: str) -> None:
         sys.stderr.flush()
 
 
+def _debug_http_path() -> str | None:
+    """Current payload-bearing debug sink, only when VMODEL_DEBUG_HTTP opts in."""
+    from vmodel_contracts.runtime import debug_http_enabled, debug_http_path
+    return str(debug_http_path(_llm_log_sink())) if debug_http_enabled() else None
+
+
 def log_malformed_response(stage: str, kind: str, resp, *, snippet: str | None = None) -> None:
     """Make a malformed provider reply visible immediately, without prompts."""
     response_id = getattr(resp, "id", None) or (getattr(resp, "response_metadata", None) or {}).get("id") or "unknown"
     text = f"  ERROR malformed response [{stage}]: {kind}; response_id={response_id}"
     if snippet:
         text += f"; reply began: {snippet.strip()[:160]!r}"
+    debug_path = _debug_http_path()
+    if debug_path:
+        text += f"; full HTTP exchange: {debug_path}"
     _console_line(text)
 
 
@@ -536,6 +545,12 @@ def build_chat_model(stage: str, schema: dict | None = None):
             else:
                 extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
                                          {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
+        if cfg.provider in ("deepseek", "openai"):
+            from vmodel_contracts.runtime import debug_http_client
+            client = debug_http_client(llm_log=_llm_log_sink(), mask=_mask_secrets)
+            if client is not None:
+                extra["http_client"] = client
+                _console_line(f"  WARNING full LLM HTTP debug enabled: {_debug_http_path()} (request messages included; no authorization headers)")
         return ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,

@@ -158,3 +158,17 @@ def test_conops_uses_shared_distillation_route_never_its_own_default(monkeypatch
     assert model_config.for_stage("distillation").model == "phi4"
     assert model_config.for_stage("conops").model == "phi4"
     assert "conops=ollama/phi4" in model_config.describe_models()
+
+
+def test_deepseek_debug_http_wires_payload_capture(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-flash")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("VMODEL_DEBUG_HTTP", "1")
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(tmp_path / "llm-calls.jsonl"))
+    model = model_config.build_chat_model("probing", schema={"type": "object"})
+    assert model.http_client is not None
+    assert model.http_client.event_hooks["request"]
+    assert model.http_client.event_hooks["response"]
+    shown = capsys.readouterr().err
+    assert str(tmp_path / "debug-http.jsonl") in shown
+    assert "request messages included" in shown
