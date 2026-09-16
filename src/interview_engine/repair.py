@@ -187,6 +187,8 @@ def normalize_model_item(value, model_cls) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"model item must be one JSON object, got {type(value).__name__}")
     out={k:v for k,v in value.items() if k in allowed}
+    from vmodel_contracts.normalize import normalize_list_string_fields
+    out = normalize_list_string_fields(out, model_cls)
     for key,field in model_cls.model_fields.items():
         if key not in out:
             continue

@@ -174,3 +174,16 @@ def test_conops_comparison_wrong_shape_retries_with_contract_last(monkeypatch):
     assert len(result["conops_draft"]["concept_options"]) == 2
     assert conops.messages[1][-1].content.startswith("FINAL RESPONSE CONTRACT:")
     assert "previous response failed" in conops.messages[2][-1].content
+
+
+def test_conops_option_dict_statements_normalize_at_assembly(monkeypatch):
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import ConceptOption
+
+    live={"concept_id":"concept:agent","name":"Agent","summary":"acts for garage",
+          "advantages":[{"statement":"Processes responses in one go","source_turns":[12]}],
+          "disadvantages":[{"statement":"Must handle insurer variation","source_turns":[12]}]}
+    normalized=normalize_model_item(live,ConceptOption)
+    option=ConceptOption.model_validate(normalized)
+    assert option.advantages == ["Processes responses in one go"]
+    assert option.disadvantages == ["Must handle insurer variation"]
