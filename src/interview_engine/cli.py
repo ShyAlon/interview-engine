@@ -229,6 +229,10 @@ def main() -> None:
                 "or run without --session to start a fresh interview.",
             )
     outdir.mkdir(parents=True, exist_ok=True)
+    from vmodel_contracts.runtime import install_plain_log
+    run_log = outdir / "run.log"
+    sys.stderr = install_plain_log(run_log, sys.stderr)
+    print(f"Run log: {run_log.resolve()} (plain text)", file=sys.stderr)
 
     bus = ProgressBus()
     bus.subscribe(stderr_printer())
