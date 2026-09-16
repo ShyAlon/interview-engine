@@ -344,7 +344,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 super().__init__(str(err))
 
         def _call(system: str, extra: str, feedback: str | None = None):
-            messages = [SystemMessage(content=system + "\n\n" + extra)]
+            messages = [SystemMessage(content=system + "\n\n" + extra),
+                        HumanMessage(content="FINAL RESPONSE CONTRACT: " + system.rsplit("Output", 1)[-1]
+                                     if "Output" in system else
+                                     "FINAL RESPONSE CONTRACT: Return only the requested JSON value; no prose or markdown fences.")]
             if feedback:
                 messages.append(HumanMessage(content=feedback))
             _t0 = _time.time()
@@ -674,29 +677,48 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         scenario_seeds = [derive_scenario(x, intent) for x in scenario_seeds_from_intent(intent, founder_turns)]
 
         raw_paths: dict[str, str] = {}
-        def call_json(system_text: str, body: str, label: str, detail: str) -> dict | list:
+        def call_json(system_text: str, body: str, label: str, detail: str,
+                      validate=None) -> dict | list:
+            """Contract-last structured call with one parse/shape feedback retry."""
             if progress is not None:
                 progress.emit(ProgressEvent("conops", label, "started", _time.time(), None, detail))
-            t0 = _time.time()
-            resp = model_config.invoke_checked(conops_model,
-                [SystemMessage(content=system_text), HumanMessage(content=body)], "conops")
-            usage_log.record("conops", model_config.for_stage("conops").provider,
-                             model_config.for_stage("conops").model,
-                             (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time()-t0)
-            raw_path = raw_log.write("conops", label, resp.content)
-            if raw_path:
-                raw_paths[label] = str(raw_path)
-            try:
-                value = _json.loads(extract_json_value(resp.content))
-            except Exception as exc:
-                raise UserFacingError(
-                    f"stage 'conops': {label.lower()} returned unreadable JSON.",
-                    f"parse detail: {str(exc)[:300]}",
-                    "inspect the raw response at " + (str(raw_path) if raw_path else "the configured debug output")
-                    + ", then rerun with the same --session id; completed intent work is checkpointed.") from exc
-            if progress is not None:
-                progress.emit(ProgressEvent("conops", label, "completed", _time.time(), _time.time()-t0, detail))
-            return value
+            last_exc = None
+            last_path = None
+            for attempt in (1, 2):
+                reminder = ("FINAL RESPONSE CONTRACT: Return only the JSON value requested in the "
+                            "preceding message; no prose or markdown fences.")
+                messages = [SystemMessage(content=system_text), HumanMessage(content=body),
+                            HumanMessage(content=reminder)]
+                if last_exc is not None:
+                    messages.append(HumanMessage(content=
+                        f"The previous response failed this contract: {str(last_exc)[:500]}. "
+                        "Correct it and return only the requested JSON value."))
+                t0 = _time.time()
+                resp = model_config.invoke_checked(conops_model, messages, "conops")
+                usage_log.record("conops", model_config.for_stage("conops").provider,
+                                 model_config.for_stage("conops").model,
+                                 (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time()-t0)
+                raw_path = raw_log.write("conops", label + ("-repair" if attempt == 2 else ""), resp.content)
+                if raw_path:
+                    raw_paths[label] = str(raw_path)
+                    last_path = raw_path
+                try:
+                    value = _json.loads(extract_json_value(resp.content))
+                    if validate is not None:
+                        validate(value)
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt == 1:
+                        continue
+                    raise UserFacingError(
+                        f"stage 'conops': {label.lower()} failed its JSON contract after one automatic retry.",
+                        f"validation detail: {str(exc)[:300]}",
+                        "inspect the raw response at " + (str(last_path) if last_path else "the configured debug output")
+                        + ", then rerun with the same --session id; completed intent work is checkpointed.") from exc
+                if progress is not None:
+                    progress.emit(ProgressEvent("conops", label, "completed", _time.time(), _time.time()-t0, detail))
+                return value
+            raise AssertionError("bounded CONOPS retry exhausted without result")
 
         def generate_item(kind: str, identity: dict, model_cls, prompt: str, index: int, total: int) -> dict:
             derived_fields = identity.pop("_derived_fields", [])
@@ -714,7 +736,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                       f"{{\"{field_name}\": <value>}}. Do not return null.\n"
                       f"CODE-DERIVED FIELDS (do not rewrite): {_json.dumps(candidate)}\n"
                       f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n{prompt}")
-                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}")
+                def field_contract(value):
+                    if not isinstance(value, dict) or value.get(field_name) in (None, "", []):
+                        raise ValueError(f"expected object with non-empty field {field_name!r}, got {str(value)[:250]}")
+                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}", field_contract)
                 try:
                     # A field call is cleaned against a synthetic missing-field
                     # error contract: normalize wrapper, whitelist, take only it.
@@ -759,10 +784,17 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 "Fill trigger, actors, ordered operational_flow, success_outcome, exceptions; retain source_turns.",
                 i, len(scenario_seeds)) for i, seed in enumerate(scenario_seeds,1)]
 
+            def comparison_contract(value):
+                if not isinstance(value, list) or not 2 <= len(value) <= 4:
+                    raise ValueError(f"concept comparison plan must contain 2-4 options; received {str(value)[:300]}")
+                for option in value:
+                    if not isinstance(option, dict) or not str(option.get("name", "")).strip() or not str(option.get("summary", "")).strip():
+                        raise ValueError(f"each option needs non-empty name and summary; received {str(option)[:250]}")
             comparison = call_json(CONOPS_SYSTEM,
                 "VALIDATED INTENT: " + _json.dumps(intent) + "\nPropose 2-4 genuinely distinct product-level operating concepts. "
                 "Return a JSON array of objects with name and summary only. Do not include architecture components.",
-                "Planning CONOPS concept comparison", "known next step: one validated call per option")
+                "Planning CONOPS concept comparison", "known next step: one validated call per option",
+                comparison_contract)
             if not isinstance(comparison,list) or not 2 <= len(comparison) <= 4:
                 raise UserFacingError(
                     "stage 'conops': concept comparison plan must contain 2-4 options.",

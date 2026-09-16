@@ -164,6 +164,7 @@ def _log_llm(event: dict) -> None:
 
 
 _CONSOLE_LOCK = threading.Lock()
+_DEBUG_HTTP_ANNOUNCED: set[str] = set()
 
 
 def _console_level(msg: str) -> str | None:
@@ -558,7 +559,10 @@ def build_chat_model(stage: str, schema: dict | None = None):
             client = debug_http_client(llm_log=_llm_log_sink(), mask=_mask_secrets)
             if client is not None:
                 extra["http_client"] = client
-                _console_line(f"  WARNING full LLM HTTP debug enabled: {_debug_http_path()} (request messages included; no authorization headers)")
+                debug_path = _debug_http_path()
+                if debug_path not in _DEBUG_HTTP_ANNOUNCED:
+                    _DEBUG_HTTP_ANNOUNCED.add(debug_path)
+                    _console_line(f"  WARNING full LLM HTTP debug enabled: {debug_path} (request messages included; no authorization headers)")
         return ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,

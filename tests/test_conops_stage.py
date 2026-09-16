@@ -123,7 +123,7 @@ def test_per_field_null_is_a_named_failure_with_raw_path(monkeypatch,tmp_path):
     from interview_engine.graph import build_graph
     from interview_engine.telemetry import UsageLog
     from tests.test_coverage import FakeModel, NEEDS, SCOPE
-    conops=FakeModel([json.dumps({"operating_environment":None})])
+    conops=FakeModel([json.dumps({"operating_environment":None}), json.dumps({"operating_environment":None})])
     models={"probing":FakeModel(["[INTERVIEW COMPLETE]"]),"distillation":FakeModel([json.dumps(NEEDS),json.dumps(SCOPE),"[]"]),
             "conops":conops,"scope_tiebreak":FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
     monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
@@ -133,7 +133,7 @@ def test_per_field_null_is_a_named_failure_with_raw_path(monkeypatch,tmp_path):
       g.invoke({"messages":[HumanMessage(content="phone habit app")],"submission":{"free_text":"web phone habit app with logins","founder_id":"f","submission_id":"null-field"}},
                {"configurable":{"thread_id":"null-field"}})
     rendered=caught.value.render()
-    assert "field 'operating_environment' was not provided" in rendered
+    assert "field operating_environment failed its JSON contract after one automatic retry" in rendered
     assert ".raw.txt" in rendered and str((tmp_path/"debug").resolve()) in rendered
 
 
@@ -143,3 +143,34 @@ def test_conops_has_no_whole_document_or_multifield_repair_path():
     assert "last-resort" not in source and "complete corrected JSON" not in source
     assert "Fill ONLY the" in source
     assert "clean_model_patch(" not in source
+
+
+def test_conops_comparison_wrong_shape_retries_with_contract_last(monkeypatch):
+    from interview_engine import model_config
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel
+
+    intent={"session_id":"repair","problem_statement":"p","target_users":["runner"],
+      "core_value_proposition":"points sync","stakeholder_needs":[{"need_id":"SN-1","statement":"runner needs quick capture","kind":"functional","source_turns":[0]}],
+      "in_scope":["Log habit"],"out_of_scope":["native-only"],"external_integrations":[],
+      "constraints":["phone, often offline"],"assumptions":[],"assumption_items":[],"scope_exclusions":[],
+      "done_criteria":[],"tech_preferences":[],"glossary":{},"operational_concepts":["Log habit"],"open_questions":[],
+      "source_turns":{"operational_concepts":[0],"core_value_proposition":[0]}}
+    class Capture(FakeModel):
+        def __init__(self, outputs): super().__init__(outputs); self.messages=[]
+        def invoke(self, messages): self.messages.append(messages); return super().invoke(messages)
+    conops=Capture([json.dumps({"trigger":"habit completed"}),
+                    json.dumps({"stakeholder_context": []}),
+                    json.dumps([{"name":"Native","summary":"installed"},{"name":"PWA","summary":"web"}]),
+                    json.dumps({"advantages":["native"]}),json.dumps({"disadvantages":["release"]}),
+                    json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
+    models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
+    monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
+    graph=build_graph(UsageLog("repair"),conops_enabled=True)
+    result=graph.invoke({"messages":[HumanMessage(content="runner uses phone offline")],
+      "submission":{"free_text":"web app","founder_id":"f","submission_id":"repair"},
+      "verdict":{"accepted":True},"intent_model":intent},{"configurable":{"thread_id":"repair"}})
+    assert len(result["conops_draft"]["concept_options"]) == 2
+    assert conops.messages[1][-1].content.startswith("FINAL RESPONSE CONTRACT:")
+    assert "previous response failed" in conops.messages[2][-1].content

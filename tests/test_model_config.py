@@ -172,3 +172,15 @@ def test_deepseek_debug_http_wires_payload_capture(monkeypatch, tmp_path, capsys
     shown = capsys.readouterr().err
     assert str(tmp_path / "debug-http.jsonl") in shown
     assert "request messages included" in shown
+
+
+def test_debug_http_startup_warning_is_deduplicated(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-flash")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("VMODEL_DEBUG_HTTP", "1")
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(tmp_path / "llm-calls.jsonl"))
+    monkeypatch.setattr(model_config, "_DEBUG_HTTP_ANNOUNCED", set())
+    model_config.build_chat_model("probing", schema={"type":"object"})
+    model_config.build_chat_model("probing", schema={"type":"object"})
+    shown = capsys.readouterr().err
+    assert shown.count("full LLM HTTP debug enabled") == 1
