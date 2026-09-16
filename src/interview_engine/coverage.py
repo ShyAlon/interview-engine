@@ -110,12 +110,15 @@ _ENOUGH_RE = re.compile(
     r"^\s*(enough|that'?s enough|wrap ?up|let'?s wrap|finish|done here|"
     r"move to (the )?(spec|distill)|end( the)? interview|end|stop|quit|exit|"
     r"(?:i (?:think|believe) )?you have enough(?: (?:to )?(?:move on|continue|proceed))?|"
-    r"(?:i (?:think|believe) )?(?:we|you) can (?:move on|continue|proceed))\s*[.!]?\s*$",
+    r"(?:i (?:think|believe) )?(?:we|you) can (?:continue|proceed))\s*[.!]?\s*$",
     re.IGNORECASE)
 
 
 _DEFERRAL_RE = re.compile(
-    r"^\s*(?:i (?:do not|don't) know|not sure|no (?:idea|preference)|"
+    r"^\s*(?:i (?:do not|don't) know(?![^.!?]*(?:but i can|i can get|will find|will check))\b.*|not sure(?![^.!?]*(?:but i can|i can get|will find|will check))\b.*|no (?:idea|preference)\b.*|"
+    r"(?:that is|that's|this is|it is|it's) (?:for|up to) (?:the )?(?:subject matter )?experts?\b.*|"
+    r"(?:the )?(?:subject matter )?experts? (?:will|should|can|need to) (?:answer|decide|define|specify|determine)\b.*|"
+    r"(?:it|that|this) (?:does not|doesn't) need to\b.*|"
     r"(?:that is|that's|it is|it's|this is) (?:up to you|your call)|"
     r"you decide|your call|use (?:the )?(?:standard|best practice|state of the art)|"
     r"state[- ]of[- ]the[- ]art(?:[.! ]+you decide)?|whatever (?:is )?(?:standard|best)|"
@@ -134,6 +137,7 @@ _DEFERRAL_RE = re.compile(
 # (delegate ONE detail): the founder closes the current AREA.
 _DISMISS_RE = re.compile(
     r"^this is (?:an? )?implementation\b|"
+    r"^(?:please )?move on\b|"
     r"\bmove on from\b|"
     r"^(?:can|could) (?:we|you) (?:please )?move on\b|"
     r"^(?:next|another) (?:topic|question|area)\b|"

@@ -121,7 +121,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # covered-by-delegation. The assumption remains visible in the
             # intent artifact; this is neither a non-answer nor silent coverage.
             if area_label in coverage:
-                coverage[area_label] = (DELEGATED if steer == "delegate" or parked else SKIPPED)
+                coverage[area_label] = DELEGATED
 
         # founder control (ADR-0016): deterministic, never costs a model call
         control = founder_control(getattr(last, "content", "")) if last is not None else None
@@ -137,9 +137,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         # Two unanswered attempts are enough. Close the stubborn area as a
         # visible assumption and move on rather than phrasing the same ask a
         # third way. This is code-owned and survives model drift.
-        attempts = sum(1 for q in (state.get("question_history") or []) if q.get("area") == target)
+        # Count only the trailing run for this target. An old question from an
+        # earlier visit must not consume today's budget; conversely, two
+        # consecutive questions with no coverage advance must close the thread.
+        attempts = 0
+        for asked in reversed(state.get("question_history") or []):
+            if asked.get("area") != target:
+                break
+            attempts += 1
         if target and attempts >= 2 and coverage.get(target) in ("uncovered", "thin"):
-            prior = [q.get("question", "") for q in (state.get("question_history") or []) if q.get("area") == target]
+            prior = [q.get("question", "") for q in (state.get("question_history") or [])[-attempts:]]
             # The current founder turn is the evidence for deferring this
             # unresolved detail. Keep the question history in graph state; the
             # contract assumption carries only its statement and real source.

@@ -4,6 +4,7 @@ it.' and 'Can you move on from the UI?'. Steers are terminal; implementation
 questions are suppressed; delegations land in the intent model."""
 import json
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from interview_engine import model_config
@@ -93,7 +94,7 @@ def test_dismiss_without_topic_skips_the_area(monkeypatch):
     start(g, thread="steer2b")
     r = g.invoke({"messages": [HumanMessage(content="Can we move on?")]},
                  {"configurable": {"thread_id": "steer2b"}})
-    assert r["coverage"]["goal"] == "skipped"
+    assert r["coverage"]["goal"] == "delegated"
     assert r["messages"][-1].content == "Who besides the primary user is affected?"
 
 
@@ -342,3 +343,72 @@ def test_delegation_carries_grounded_research_brief(monkeypatch):
     r=g.invoke({"messages":[HumanMessage(content="You decide")]},cfg)
     assert r["delegated_decisions"][0]["research_brief"]
     assert "current" in r["delegated_decisions"][0]["research_brief"]
+
+
+@pytest.mark.parametrize("answer", [
+    "That's for the subject matter experts to answer, but it's structured and well defined.",
+    "It doesn't need to validate the registration number.",
+    "Not sure - the insurance experts should define it.",
+])
+def test_expert_deflection_forms_delegate_and_close_thread(monkeypatch, answer):
+    probing = FakeModel([
+        structured("Which registration-number rules must the claim form validate?"),
+        structured("What operational scenario should happen first?"),
+    ])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("expert-deflection"))
+    cfg = {"configurable": {"thread_id": "expert-deflection-" + str(abs(hash(answer)))}}
+    cov = {k: "covered" for k, _, _ in __import__('interview_engine.coverage', fromlist=['AREAS']).AREAS}
+    cov["data"] = "uncovered"
+    cov["flows"] = "thin"
+    initial = {"messages": [HumanMessage(content="garage insurance claims")],
+               "submission": {"free_text": "garage claims", "founder_id": "t", "submission_id": "expert-deflection"},
+               "verdict": {"accepted": True}, "coverage": cov, "coverage_target": "data"}
+    g.invoke(initial, cfg)
+    result = g.invoke({"messages": [HumanMessage(content=answer)]}, cfg)
+    assert result["coverage"]["data"] == "delegated"
+    assert result["coverage_target"] == "flows"
+    assert result["delegated_decisions"][0]["research_brief"]
+    assert "registration" not in result["messages"][-1].content.lower()
+
+
+def test_direct_move_on_closes_current_subject_not_whole_interview(monkeypatch):
+    probing = FakeModel([
+        structured("Which registration-number rules must be checked?"),
+        structured("What is the main claim workflow?"),
+    ])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("move-on-subject"))
+    cfg = {"configurable": {"thread_id": "move-on-subject"}}
+    cov = {k: "covered" for k, _, _ in __import__('interview_engine.coverage', fromlist=['AREAS']).AREAS}
+    cov["data"] = "uncovered"
+    cov["flows"] = "thin"
+    initial = {"messages": [HumanMessage(content="garage claims")],
+               "submission": {"free_text": "garage claims", "founder_id": "t", "submission_id": "move-on-subject"},
+               "verdict": {"accepted": True}, "coverage": cov, "coverage_target": "data"}
+    g.invoke(initial, cfg)
+    result = g.invoke({"messages": [HumanMessage(content="Move on.")]}, cfg)
+    assert "[INTERVIEW COMPLETE]" not in result["messages"][-1].content
+    assert result["coverage"]["data"] == "delegated"
+    assert result["coverage_target"] == "flows"
+
+
+def test_followup_cap_counts_only_consecutive_same_area(monkeypatch):
+    probing = FakeModel([structured("What is still missing?")])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("consecutive-cap"))
+    cfg = {"configurable": {"thread_id": "consecutive-cap"}}
+    cov = {k: "covered" for k, _, _ in __import__('interview_engine.coverage', fromlist=['AREAS']).AREAS}
+    cov["data"] = "thin"
+    state = {"messages": [HumanMessage(content="A useful answer")],
+             "submission": {"free_text": "garage claims", "founder_id": "t", "submission_id": "consecutive-cap"},
+             "verdict": {"accepted": True}, "coverage": cov, "coverage_target": "data",
+             "question_history": [
+                 {"area": "data", "question": "Old data question?"},
+                 {"area": "risks", "question": "Intervening risk question?"},
+                 {"area": "data", "question": "Current data question?"},
+             ]}
+    result = g.invoke(state, cfg)
+    assert result["coverage"]["data"] == "thin"
+    assert not any("after two interview attempts" in d["statement"]
+                   for d in result.get("delegated_decisions", []))
