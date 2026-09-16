@@ -344,12 +344,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 super().__init__(str(err))
 
         def _call(system: str, extra: str, feedback: str | None = None):
-            messages = [SystemMessage(content=system + "\n\n" + extra),
-                        HumanMessage(content="FINAL RESPONSE CONTRACT: " + system.rsplit("Output", 1)[-1]
-                                     if "Output" in system else
-                                     "FINAL RESPONSE CONTRACT: Return only the requested JSON value; no prose or markdown fences.")]
+            messages = [SystemMessage(content=system + "\n\n" + extra)]
             if feedback:
                 messages.append(HumanMessage(content=feedback))
+            messages.append(HumanMessage(content="FINAL RESPONSE CONTRACT: " + system.rsplit("Output", 1)[-1]
+                                         if "Output" in system else
+                                         "FINAL RESPONSE CONTRACT: Return only the requested JSON value; no prose or markdown fences."))
             _t0 = _time.time()
             resp = model_config.invoke_checked(distill_model, messages, "distillation")
             usage_log.record("distillation", model_config.for_stage("distillation").provider,
@@ -506,26 +506,37 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         preview: list[dict] = []
         with track(progress, "distill_preview", "Drafting requirement preview", "phase 3/4"):
             try:
-                _, raw = _call(DISTILL_PREVIEW_SYSTEM, "NEEDS:\n" + _json.dumps(parts["stakeholder_needs"]))
-                if isinstance(raw, list):
-                    preview = [p for p in raw
-                               if isinstance(p, dict) and isinstance(p.get("statement"), str)][:3]
-                    turns_text = [str(getattr(m, "content", "")) for m in state["messages"]
-                                  if getattr(m, "type", "") == "human"]
-                    for p in preview:
-                        crit = str(p.get("example_criterion") or "")
-                        if not crit:
-                            continue
-                        if is_solution_language(crit):
-                            p.pop("example_criterion")  # implementation mechanics/named tech are not a check
-                            if progress is not None:
-                                progress.emit(ProgressEvent("distill_preview", "Dropped invented-tech criterion",
-                                                            "completed", _time.time(), 0.0, crit[:70]))
-                        elif not grounded_in(crit, turns_text):
-                            p.pop("example_criterion")  # invented artifact - not from stakeholder language
-                            if progress is not None:
-                                progress.emit(ProgressEvent("distill_preview", "Dropped ungrounded criterion",
-                                                            "completed", _time.time(), 0.0, crit[:70]))
+                raw = None
+                preview_error = None
+                for attempt in (1, 2):
+                    _, raw = _call(DISTILL_PREVIEW_SYSTEM,
+                                   "NEEDS:\n" + _json.dumps(parts["stakeholder_needs"]),
+                                   (("Your previous output failed validation: " + str(preview_error)[:400]
+                                     + ". Return only a corrected JSON array.") if preview_error else None))
+                    if (isinstance(raw, list) and all(isinstance(p, dict)
+                            and isinstance(p.get("statement"), str) and p["statement"].strip()
+                            for p in raw)):
+                        break
+                    preview_error = ValueError("preview must be a JSON array of objects with non-empty statement")
+                    if attempt == 2:
+                        raise preview_error
+                preview = raw[:3]
+                turns_text = [str(getattr(m, "content", "")) for m in state["messages"]
+                              if getattr(m, "type", "") == "human"]
+                for p in preview:
+                    crit = str(p.get("example_criterion") or "")
+                    if not crit:
+                        continue
+                    if is_solution_language(crit):
+                        p.pop("example_criterion")  # implementation mechanics/named tech are not a check
+                        if progress is not None:
+                            progress.emit(ProgressEvent("distill_preview", "Dropped invented-tech criterion",
+                                                        "completed", _time.time(), 0.0, crit[:70]))
+                    elif not grounded_in(crit, turns_text):
+                        p.pop("example_criterion")  # invented artifact - not from stakeholder language
+                        if progress is not None:
+                            progress.emit(ProgressEvent("distill_preview", "Dropped ungrounded criterion",
+                                                        "completed", _time.time(), 0.0, crit[:70]))
             except Exception:  # noqa: BLE001 - decoration, not the system of record
                 preview = []
         if not preview and progress is not None:
@@ -687,12 +698,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for attempt in (1, 2):
                 reminder = ("FINAL RESPONSE CONTRACT: Return only the JSON value requested in the "
                             "preceding message; no prose or markdown fences.")
-                messages = [SystemMessage(content=system_text), HumanMessage(content=body),
-                            HumanMessage(content=reminder)]
+                messages = [SystemMessage(content=system_text), HumanMessage(content=body)]
                 if last_exc is not None:
                     messages.append(HumanMessage(content=
                         f"The previous response failed this contract: {str(last_exc)[:500]}. "
                         "Correct it and return only the requested JSON value."))
+                messages.append(HumanMessage(content=reminder))
                 t0 = _time.time()
                 resp = model_config.invoke_checked(conops_model, messages, "conops")
                 usage_log.record("conops", model_config.for_stage("conops").provider,

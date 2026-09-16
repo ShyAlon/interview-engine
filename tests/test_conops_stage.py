@@ -173,7 +173,8 @@ def test_conops_comparison_wrong_shape_retries_with_contract_last(monkeypatch):
       "verdict":{"accepted":True},"intent_model":intent},{"configurable":{"thread_id":"repair"}})
     assert len(result["conops_draft"]["concept_options"]) == 2
     assert conops.messages[1][-1].content.startswith("FINAL RESPONSE CONTRACT:")
-    assert "previous response failed" in conops.messages[2][-1].content
+    assert conops.messages[2][-1].content.startswith("FINAL RESPONSE CONTRACT:")
+    assert any("previous response failed" in m.content.lower() for m in conops.messages[2][:-1])
 
 
 def test_conops_option_dict_statements_normalize_at_assembly(monkeypatch):

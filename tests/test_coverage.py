@@ -215,7 +215,7 @@ def test_retry_with_feedback_recovers_structured_turn(monkeypatch):
 
 
 def test_prose_wrapped_json_is_tolerated(monkeypatch):
-    probing = FakeModel(['Sure! {"question": "Risks?", "covered": ["goal"], "complete": false} done.'])
+    probing = FakeModel(['Sure! {"question": "Risks?", "covered": ["goal"], "thin": [], "skipped": [], "complete": false} done.'])
     fake_models(monkeypatch, probing)
     g = build_graph(UsageLog("t1"))
     r = start(g)
@@ -335,3 +335,10 @@ def test_final_contract_reminder_is_last_after_conversation(monkeypatch):
     assert sent[-1].type == "human"
     assert sent[-1].content.startswith("FINAL RESPONSE CONTRACT:")
     assert '"covered"' in sent[-1].content and '"complete"' in sent[-1].content
+
+
+def test_turn_parser_rejects_incomplete_or_invalid_envelope():
+    from interview_engine.coverage import extract_turn_json
+    assert extract_turn_json('{"question":"Q?","covered":[],"complete":false}') is None
+    assert extract_turn_json('{"question":"Q?","covered":["made_up"],"thin":[],"skipped":[],"complete":false}') is None
+    assert extract_turn_json('{"question":"Q?","covered":[],"thin":[],"skipped":[],"complete":false}') is not None

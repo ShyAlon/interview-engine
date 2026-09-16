@@ -75,7 +75,7 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_outp
     is mixed or silent - ambiguous wording is a semantic problem, pay for it."""
     import json as _json
 
-    from pydantic import BaseModel, ConfigDict, ValidationError
+    from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
     from . import model_config
     from .errors import translate_json_error
@@ -86,26 +86,36 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_outp
         model_config = ConfigDict(extra="forbid")
         is_web_app: bool
         archetype: AppArchetype
-        confidence: float
-        reason: str
+        confidence: float = Field(ge=0.0, le=1.0)
+        reason: str = Field(min_length=1)
 
-    resp = invoke_checked(chat_model, TIE_BREAK_PROMPT.format(text=sub.free_text), "scope_tiebreak")
-    if usage_log is not None:
-        # Price from the CONFIGURED route, never scraped off response_metadata:
-        # langchain does not guarantee model_provider (2026-09-12: absent on the
-        # founder's ChatOllama, a $0 local call crashed as "unpriced").
-        cfg = model_config.for_stage("scope_tiebreak")
-        usage_log.record("scope_tiebreak", cfg.provider, cfg.model,
-                         getattr(resp, "usage_metadata", {}) or {})
-    raw_path = raw_output_log.write("scope-tiebreak", "classification", resp.content) if raw_output_log else None
-    try:
-        data = _TieBreakResult.model_validate(_json.loads(extract_json_value(resp.content)))
-        accepted = data.is_web_app
-    except (_json.JSONDecodeError, ValueError, ValidationError) as e:
-        error = translate_json_error(e, "scope_tiebreak")
-        if raw_path:
-            error.next_action = f"inspect the raw response at {raw_path}, then " + (error.next_action or "retry.")
-        raise error from e
+    prompt = TIE_BREAK_PROMPT.format(text=sub.free_text)
+    reminder = ("\n\nFINAL RESPONSE CONTRACT: Return only the JSON object requested above; "
+                "all five fields are required; no prose or markdown fences.")
+    last_error = None
+    raw_path = None
+    for attempt in (1, 2):
+        feedback = ("\nYour previous response failed validation: " + str(last_error)[:400]
+                    + "\nCorrect it and return only the complete JSON object.") if last_error else ""
+        resp = invoke_checked(chat_model, prompt + feedback + reminder, "scope_tiebreak")
+        if usage_log is not None:
+            # Price from the configured route, not response metadata.
+            cfg = model_config.for_stage("scope_tiebreak")
+            usage_log.record("scope_tiebreak", cfg.provider, cfg.model,
+                             getattr(resp, "usage_metadata", {}) or {})
+        raw_path = raw_output_log.write("scope-tiebreak", "classification" + ("-repair" if attempt == 2 else ""), resp.content) if raw_output_log else None
+        try:
+            data = _TieBreakResult.model_validate(_json.loads(extract_json_value(resp.content)))
+            accepted = data.is_web_app
+            break
+        except (_json.JSONDecodeError, ValueError, ValidationError) as e:
+            last_error = e
+            if attempt == 1:
+                continue
+            error = translate_json_error(e, "scope_tiebreak")
+            if raw_path:
+                error.next_action = f"inspect the raw response at {raw_path}, then " + (error.next_action or "retry.")
+            raise error from e
     return ScopeVerdict(
         submission_id=sub.submission_id,
         accepted=accepted,

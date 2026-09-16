@@ -324,6 +324,18 @@ def founder_control(text: str) -> str | None:
     return None
 
 
+
+def _valid_turn_object(obj) -> bool:
+    """Require the complete interview-turn envelope before coverage can change."""
+    if not isinstance(obj, dict) or set(obj) != {"question", "covered", "thin", "skipped", "complete"}:
+        return False
+    if not isinstance(obj["question"], str) or not isinstance(obj["complete"], bool):
+        return False
+    for key in ("covered", "thin", "skipped"):
+        if not isinstance(obj[key], list) or any(x not in AREA_KEYS for x in obj[key]):
+            return False
+    return True
+
 def extract_turn_json(text: str) -> dict | None:
     """Tolerant structured-turn parse: whole-body JSON, fenced JSON, or the
     first balanced {...} object embedded in prose. Returns None if no object
@@ -337,13 +349,13 @@ def extract_turn_json(text: str) -> dict | None:
             obj = json.loads(attempt)
         except (ValueError, TypeError):
             obj = None
-        if isinstance(obj, dict) and isinstance(obj.get("question"), str):
+        if _valid_turn_object(obj):
             return obj
     start = text.find("{")
     if start >= 0:
         try:
             obj, _ = json.JSONDecoder().raw_decode(text[start:])
-            if isinstance(obj, dict) and isinstance(obj.get("question"), str):
+            if _valid_turn_object(obj):
                 return obj
         except ValueError:
             pass
