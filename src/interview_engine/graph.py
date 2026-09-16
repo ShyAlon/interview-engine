@@ -195,12 +195,19 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if parsed is None:
                 from .errors import UserFacingError
 
+                cfg = model_config.for_stage("probing")
+                if cfg.provider == "ollama":
+                    next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
+                                   "Confirm the server started with OLLAMA_CONTEXT_LENGTH=32768; if it repeats, "
+                                   "route probing to DeepSeek with vmodel-spec-app/scripts/switch-model.sh deepseek.")
+                else:
+                    next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
+                                   f"If it repeats, check {cfg.provider}'s status and the configured model "
+                                   f"({cfg.model}).")
                 raise UserFacingError(
                     "stage 'probing': the model ignored the structured interview-turn contract twice.",
                     f"provider returned prose instead of the required JSON object; second reply began: {resp2.content.strip()[:160]!r}.",
-                    "rerun with the same --session id; the checkpoint preserves prior answers. If this is Ollama, "
-                    "confirm the server started with OLLAMA_CONTEXT_LENGTH=32768; otherwise route probing to "
-                    "deepseek-flash with vmodel-spec-app/scripts/switch-model.sh deepseek.",
+                    next_action,
                 )
         question, complete = resp.content, False
         if parsed is not None:

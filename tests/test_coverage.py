@@ -188,6 +188,22 @@ def test_unstructured_reply_fails_actionably_after_one_retry(monkeypatch):
     assert "OLLAMA_CONTEXT_LENGTH=32768" in message and "--session" in message
 
 
+def test_unstructured_reply_guidance_is_deepseek_aware(monkeypatch):
+    class AlwaysProse:
+        def invoke(self, messages):
+            return AIMessage(content="Just a plain question?")
+
+    monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-flash")
+    fake_models(monkeypatch, AlwaysProse())
+    g = build_graph(UsageLog("t1"))
+    from interview_engine.errors import UserFacingError
+    with pytest.raises(UserFacingError) as ei:
+        start(g)
+    message = ei.value.render()
+    assert "deepseek" in message.lower() and "deepseek-flash" in message
+    assert "OLLAMA_CONTEXT_LENGTH" not in message
+
+
 def test_retry_with_feedback_recovers_structured_turn(monkeypatch):
     probing = FakeModel(["Here you go, some prose first",
                          structured("Who else touches this?", covered=["goal"])])
