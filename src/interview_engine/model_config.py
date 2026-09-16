@@ -166,13 +166,25 @@ def _log_llm(event: dict) -> None:
 _CONSOLE_LOCK = threading.Lock()
 
 
+def _console_level(msg: str) -> str | None:
+    """Conservative severity classification for shared terminal colors."""
+    lower = msg.lower()
+    if any(token in lower for token in ("error", "failed", "failure", "!!")):
+        return "error"
+    if any(token in lower for token in ("warning", "fallback", "retry", "still working", "simulated")):
+        return "warning"
+    if " ok " in f" {lower} " or "success" in lower or "approved" in lower:
+        return "success"
+    return None
+
+
 def _console_line(msg: str) -> None:
     """One stderr line, atomically - the heartbeat thread and the progress
     printer share this lock so lines never interleave mid-call."""
-    from vmodel_contracts.runtime import timestamp_console_line
+    from vmodel_contracts.runtime import format_console_line
 
     with _CONSOLE_LOCK:
-        sys.stderr.write(timestamp_console_line(msg) + "\n")
+        sys.stderr.write(format_console_line(msg, level=_console_level(msg), stream=sys.stderr) + "\n")
         sys.stderr.flush()
 
 

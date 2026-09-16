@@ -413,3 +413,13 @@ def test_progress_printer_prepends_local_wall_clock_timestamp(capsys):
     assert all(line.startswith("[") and line[3] == ":" and line[6] == ":" and line[9] == "]" for line in lines)
     assert "  -> Working..." in lines[0]
     assert "  ok Working [1.0s]" in lines[1]
+
+
+def test_console_severity_color_is_absent_when_captured_or_no_color(monkeypatch, capsys):
+    from interview_engine import model_config as mc
+
+    mc._console_line("WARNING fallback")
+    assert "\x1b[" not in capsys.readouterr().err
+    monkeypatch.setenv("NO_COLOR", "1")
+    mc._console_line("ERROR failed")
+    assert "\x1b[" not in capsys.readouterr().err
