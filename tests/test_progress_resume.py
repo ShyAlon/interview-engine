@@ -423,3 +423,11 @@ def test_console_severity_color_is_absent_when_captured_or_no_color(monkeypatch,
     monkeypatch.setenv("NO_COLOR", "1")
     mc._console_line("ERROR failed")
     assert "\x1b[" not in capsys.readouterr().err
+
+
+def test_normal_cli_defaults_llm_call_log_to_interview_dir():
+    import inspect
+    from interview_engine import cli
+    source = inspect.getsource(cli.main)
+    assert 'os.environ.setdefault("VMODEL_LLM_LOG", str(outdir / "llm-calls.jsonl"))' in source
+    assert source.index('os.environ.setdefault("VMODEL_LLM_LOG"') < source.index('graph = build_graph')

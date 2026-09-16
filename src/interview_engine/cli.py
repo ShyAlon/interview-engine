@@ -232,6 +232,9 @@ def main() -> None:
     from vmodel_contracts.runtime import install_plain_log
     run_log = outdir / "run.log"
     sys.stderr = install_plain_log(run_log, sys.stderr)
+    # Per-call telemetry is part of every normal run. Respect an explicit
+    # external sink, otherwise keep it beside the interview artifacts.
+    os.environ.setdefault("VMODEL_LLM_LOG", str(outdir / "llm-calls.jsonl"))
     print(f"Run log: {run_log.resolve()} (plain text)", file=sys.stderr)
 
     bus = ProgressBus()
