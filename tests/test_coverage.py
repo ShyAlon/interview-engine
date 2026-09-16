@@ -174,7 +174,7 @@ def test_unstructured_reply_fails_actionably_after_one_retry(monkeypatch):
 
         def invoke(self, messages):
             self.calls += 1
-            return AIMessage(content="Just a plain question?")
+            return AIMessage(content="not a usable response")
 
     probing = AlwaysProse()
     fake_models(monkeypatch, probing)
@@ -191,7 +191,7 @@ def test_unstructured_reply_fails_actionably_after_one_retry(monkeypatch):
 def test_unstructured_reply_guidance_is_deepseek_aware(monkeypatch):
     class AlwaysProse:
         def invoke(self, messages):
-            return AIMessage(content="Just a plain question?")
+            return AIMessage(content="not a usable response")
 
     monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-flash")
     fake_models(monkeypatch, AlwaysProse())
@@ -302,10 +302,36 @@ def test_turn_output_schema_fixes_shape_and_area_keys():
         assert schema["properties"][field]["items"]["enum"] == AREA_KEYS
 
 
-def test_prose_reply_is_echoed_as_console_error(monkeypatch, capsys):
-    probing = FakeModel(["plain response", structured("Who uses it?")])
+def test_clean_prose_question_is_supported_with_warning(monkeypatch, capsys):
+    probing = FakeModel(["Who uses it?", "Which users operate it?"])
+    fake_models(monkeypatch, probing)
+    result = start(build_graph(UsageLog("t1")))
+    shown = capsys.readouterr().err
+    assert "WARNING response mode [probing]: clean question without JSON envelope" in shown
+    assert "ERROR malformed response" not in shown
+    assert result["messages"][-1].content == "Who uses it?"
+
+
+def test_garbage_non_json_stays_a_red_failure(monkeypatch, capsys):
+    probing = FakeModel(["garbage", "still garbage"])
+    fake_models(monkeypatch, probing)
+    from interview_engine.errors import UserFacingError
+    with pytest.raises(UserFacingError):
+        start(build_graph(UsageLog("t1")))
+    shown = capsys.readouterr().err
+    assert "ERROR malformed response [probing]: unparseable non-JSON" in shown
+
+
+def test_final_contract_reminder_is_last_after_conversation(monkeypatch):
+    class Capture:
+        calls = []
+        def invoke(self, messages):
+            self.calls.append(messages)
+            return AIMessage(content=structured("Who uses it?"))
+    probing = Capture()
     fake_models(monkeypatch, probing)
     start(build_graph(UsageLog("t1")))
-    shown = capsys.readouterr().err
-    assert "ERROR malformed response [probing]: prose/non-JSON" in shown
-    assert "plain response" in shown
+    sent = probing.calls[0]
+    assert sent[-1].type == "human"
+    assert sent[-1].content.startswith("FINAL RESPONSE CONTRACT:")
+    assert '"covered"' in sent[-1].content and '"complete"' in sent[-1].content

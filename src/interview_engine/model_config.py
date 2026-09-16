@@ -194,6 +194,13 @@ def _debug_http_path() -> str | None:
     return str(debug_http_path(_llm_log_sink())) if debug_http_enabled() else None
 
 
+def log_supported_prose_response(stage: str, resp) -> None:
+    """Visible degraded mode: a usable single question arrived without JSON."""
+    response_id = getattr(resp, "id", None) or (getattr(resp, "response_metadata", None) or {}).get("id") or "unknown"
+    _console_line(f"  WARNING response mode [{stage}]: clean question without JSON envelope; "
+                  f"response_id={response_id}; coverage metadata requested separately")
+
+
 def log_malformed_response(stage: str, kind: str, resp, *, snippet: str | None = None) -> None:
     """Make a malformed provider reply visible immediately, without prompts."""
     response_id = getattr(resp, "id", None) or (getattr(resp, "response_metadata", None) or {}).get("id") or "unknown"

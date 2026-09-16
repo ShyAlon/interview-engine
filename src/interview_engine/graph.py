@@ -52,6 +52,19 @@ class InterviewState(TypedDict, total=False):
 MAX_TURNS = 60  # hard stop: 30-60 min target; a runaway interview is a cost leak
 
 
+
+def _clean_single_question(text: str) -> str | None:
+    """A plain one-question completion is useful even without its JSON envelope."""
+    candidate = (text or "").strip()
+    if not candidate or len(candidate) > 500 or "\n" in candidate:
+        return None
+    if not candidate.endswith("?") or candidate.count("?") != 1:
+        return None
+    if candidate.startswith(("{", "[", "```")):
+        return None
+    return candidate
+
+
 def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
@@ -165,7 +178,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             + ", ".join(parked_topics)) if parked_topics else ""
             system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + parked_block + "\n\n" + STRUCTURED_TURN_FORMAT
             _t0 = _time.time()
-            resp = model_config.invoke_checked(probing_model, [SystemMessage(content=system), *history], "probing")
+            request_messages = [SystemMessage(content=system), *history,
+                                HumanMessage(content="FINAL RESPONSE CONTRACT: " + STRUCTURED_TURN_FORMAT)]
+            resp = model_config.invoke_checked(probing_model, request_messages, "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
                              (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
 
@@ -178,11 +193,17 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return {"messages": [AIMessage(content=resp.content)], "coverage": coverage,
                     "coverage_target": target or "", "turn_count": turn}
         parsed = extract_turn_json(resp.content)
+        prose_question = _clean_single_question(resp.content) if parsed is None else None
         if parsed is None:
-            model_config.log_malformed_response("probing", "prose/non-JSON", resp, snippet=resp.content)
+            if prose_question:
+                model_config.log_supported_prose_response("probing", resp)
+            else:
+                model_config.log_malformed_response("probing", "unparseable non-JSON", resp, snippet=resp.content)
             if progress is not None:
                 progress.emit(ProgressEvent("interview_turn", "Coverage", "started", _t.time(), None,
-                                            "unstructured reply - retrying with format feedback"))
+                                            ("clean question received - requesting coverage metadata"
+                                             if prose_question else
+                                             "unstructured reply - retrying with format feedback")))
             retry_msgs = [SystemMessage(content=system), *history,
                           AIMessage(content=resp.content),
                           HumanMessage(content="Your reply was not valid JSON. Reply with ONLY the JSON object, "
@@ -194,24 +215,31 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                              (getattr(resp2, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
             parsed = extract_turn_json(resp2.content)
             if parsed is None:
-                model_config.log_malformed_response("probing", "prose/non-JSON", resp2, snippet=resp2.content)
-                from .errors import UserFacingError
-
-                cfg = model_config.for_stage("probing")
-                if cfg.provider == "ollama":
-                    next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
-                                   "Confirm the server started with OLLAMA_CONTEXT_LENGTH=32768; if it repeats, "
-                                   "route probing to DeepSeek with vmodel-spec-app/scripts/switch-model.sh deepseek.")
+                second_question = _clean_single_question(resp2.content)
+                if prose_question and second_question:
+                    # DeepSeek can reliably author the question while omitting
+                    # the envelope. Keep the first question and unchanged
+                    # coverage rather than turning useful output into failure.
+                    model_config.log_supported_prose_response("probing", resp2)
                 else:
-                    next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
-                                   f"If it repeats, check {cfg.provider}'s status and the configured model "
-                                   f"({cfg.model}).")
-                raise UserFacingError(
-                    "stage 'probing': the model ignored the structured interview-turn contract twice.",
-                    f"provider returned prose instead of the required JSON object; second reply began: {resp2.content.strip()[:160]!r}.",
-                    next_action,
-                )
-        question, complete = resp.content, False
+                    model_config.log_malformed_response("probing", "unparseable non-JSON", resp2, snippet=resp2.content)
+                    from .errors import UserFacingError
+
+                    cfg = model_config.for_stage("probing")
+                    if cfg.provider == "ollama":
+                        next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
+                                       "Confirm the server started with OLLAMA_CONTEXT_LENGTH=32768; if it repeats, "
+                                       "route probing to DeepSeek with vmodel-spec-app/scripts/switch-model.sh deepseek.")
+                    else:
+                        next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
+                                       f"If it repeats, check {cfg.provider}'s status and the configured model "
+                                       f"({cfg.model}).")
+                    raise UserFacingError(
+                        "stage 'probing': the model ignored the structured interview-turn contract twice.",
+                        f"provider returned unusable output instead of the required JSON object; second reply began: {resp2.content.strip()[:160]!r}.",
+                        next_action,
+                    )
+        question, complete = prose_question or resp.content, False
         if parsed is not None:
             coverage = apply_reply(coverage, parsed)
             if control == "skip" and target:
