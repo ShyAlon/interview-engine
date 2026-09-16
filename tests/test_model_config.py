@@ -117,15 +117,15 @@ def test_probing_schema_is_sent_as_strict_response_format(monkeypatch):
 
 
 
-def test_deepseek_schema_request_uses_json_mode_and_warns(monkeypatch, capsys):
+def test_deepseek_schema_request_avoids_broken_json_mode_and_warns(monkeypatch, capsys):
     monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-flash")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     model = model_config.build_chat_model("probing", schema={"type": "object"})
-    assert model.model_kwargs["response_format"] == {"type": "json_object"}
+    assert "response_format" not in model.model_kwargs
     assert model.extra_body == {"thinking": {"type": "disabled"}}
     warning = capsys.readouterr().err
     assert "WARNING output mode [probing]" in warning
-    assert "thinking disabled" in warning
+    assert "prompt-structured mode (thinking disabled)" in warning
     assert "field shape remains validation+retry guarded" in warning
 
 def test_anthropic_structured_adapter_preserves_raw_metadata():

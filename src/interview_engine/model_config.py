@@ -535,13 +535,14 @@ def build_chat_model(stage: str, schema: dict | None = None):
             extra = {"extra_body": body}
         if schema is not None:
             if cfg.provider == "deepseek":
-                # DeepSeek JSON mode constrains syntax, not schema. Disable its
-                # default thinking mode for structured calls: max_tokens includes
-                # hidden reasoning, so the provider can exhaust the budget and
-                # return an empty final content field.
-                extra["model_kwargs"] = {"response_format": {"type": "json_object"}}
+                # Do NOT send response_format=json_object. A replay of the exact
+                # 1,940-token probing request returned only whitespace with JSON
+                # mode (max_tokens spelling and thinking mode made no difference),
+                # while the same request without response_format returned valid
+                # prose/JSON. The prompt carries an exact JSON example and the
+                # existing validator + bounded retry own the shape.
                 extra["extra_body"] = {"thinking": {"type": "disabled"}}
-                _console_line(f"  WARNING output mode [{stage}]: DeepSeek JSON mode (thinking disabled) constrains syntax; field shape remains validation+retry guarded")
+                _console_line(f"  WARNING output mode [{stage}]: DeepSeek prompt-structured mode (thinking disabled); field shape remains validation+retry guarded")
             else:
                 extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
                                          {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
