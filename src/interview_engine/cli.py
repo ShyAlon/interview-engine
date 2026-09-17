@@ -382,7 +382,10 @@ def main() -> None:
     print("\n" + md)
     if args.expert_opinion:
         from vmodel_contracts import intent_gate_instructions
-        prompt=("Act as an independent expert reviewer for a TEST RUN. Review the exact intent artifact below "
+        prompt=("Act as an independent expert reviewer. You are judging an Intent Model: the product problem, "
+                "target users, value, stakeholder needs, scope, constraints, and open questions. It is not an SRS, "
+                "architecture, implementation spec, or executable test artifact. Judge it for the intent stage only "
+                "and do not demand artifacts owned by later V-model stages. Review the exact intent artifact below "
                 "against the canonical rubric. First line: APPROVE or REJECT. APPROVE when there is no blocking "
                 "contradiction, missing trace, unsafe assumption, or build-stopping ambiguity. Non-blocking "
                 "improvements and polish MUST stay as suggestions in RATIONALE under APPROVE; they are not grounds "

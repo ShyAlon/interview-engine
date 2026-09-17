@@ -37,8 +37,10 @@ CONOPS_REPLY = {"stakeholder_context": [{"stakeholder": "founder", "role": "auth
 class FakeModel:
     def __init__(self, replies):
         self.replies = list(replies)
+        self.messages = []
 
     def invoke(self, messages):
+        self.messages.append(messages)
         # exhausted queue -> terminal marker (the structured-turn retry legitimately
         # consumes one extra reply since the format-feedback retry, run-4 fix)
         return AIMessage(content=self.replies.pop(0) if self.replies else "[INTERVIEW COMPLETE]")
@@ -139,6 +141,11 @@ def test_expert_opinion_intent_gate_through_real_cli(monkeypatch,tmp_path):
     record=json.loads((out/'expert-opinion.intent.json').read_text())
     assert record['mode']=='simulated_expert_opinion' and record['founder_approved'] is False and record['human_review_required'] is True
     assert (out/'intent_model.json').exists()
+    prompt = '\n'.join(str(m.content) for m in models['expert_opinion'].messages[0])
+    assert "You are judging an Intent Model" in prompt
+    assert "It is not an SRS, architecture, implementation spec, or executable test artifact" in prompt
+    assert "do not demand artifacts owned by later V-model stages" in prompt
+    assert "reviewer for a TEST RUN" not in prompt
 
 
 def test_expert_opinion_failure_is_user_facing(monkeypatch,tmp_path):
@@ -288,3 +295,12 @@ def test_intent_expert_bar_approves_polish_and_rejects_only_named_blockers():
     assert "Non-blocking improvements and polish MUST stay as suggestions in RATIONALE under APPROVE" in source
     assert "REJECT only for a named blocking defect" in source
     assert "name that blocker plus a concrete correction" in source
+
+
+def test_intent_expert_prompt_names_intent_and_excludes_later_artifacts():
+    source = Path(cli.__file__).read_text()
+    assert "You are judging an Intent Model" in source
+    assert "It is not an SRS" in source
+    assert "architecture, implementation spec, or executable test artifact" in source
+    assert "do not demand artifacts owned by later V-model stages" in source
+    assert "reviewer for a TEST RUN" not in source
