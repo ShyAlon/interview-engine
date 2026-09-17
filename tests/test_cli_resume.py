@@ -279,3 +279,12 @@ def test_canonical_rubric_rejects_unrecorded_ambiguity():
     from vmodel_contracts import INTENT_GATE_RUBRIC
     assert "REJECT only" in INTENT_GATE_RUBRIC
     assert "material ambiguity that is neither delegated nor declared" in INTENT_GATE_RUBRIC
+
+
+def test_intent_expert_bar_approves_polish_and_rejects_only_named_blockers():
+    source = Path(cli.__file__).read_text()
+    assert "APPROVE when there is no blocking" in source
+    assert "contradiction, missing trace, unsafe assumption, or build-stopping ambiguity" in source
+    assert "Non-blocking improvements and polish MUST stay as suggestions in RATIONALE under APPROVE" in source
+    assert "REJECT only for a named blocking defect" in source
+    assert "name that blocker plus a concrete correction" in source

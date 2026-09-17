@@ -383,8 +383,11 @@ def main() -> None:
     if args.expert_opinion:
         from vmodel_contracts import intent_gate_instructions
         prompt=("Act as an independent expert reviewer for a TEST RUN. Review the exact intent artifact below "
-                "against the canonical rubric. First line: APPROVE or REJECT. After that write RATIONALE: "
-                "followed by free prose. Never claim founder approval.\n\nCANONICAL RUBRIC:\n" +
+                "against the canonical rubric. First line: APPROVE or REJECT. APPROVE when there is no blocking "
+                "contradiction, missing trace, unsafe assumption, or build-stopping ambiguity. Non-blocking "
+                "improvements and polish MUST stay as suggestions in RATIONALE under APPROVE; they are not grounds "
+                "to reject. REJECT only for a named blocking defect, and name that blocker plus a concrete correction "
+                "in RATIONALE. Never claim founder approval.\n\nCANONICAL RUBRIC:\n" +
                 intent_gate_instructions() + "\n\nINTENT ARTIFACT:\n" + intent.model_dump_json(indent=2))
         model=_mc.build_chat_model("expert_opinion")
         text=""
