@@ -396,19 +396,20 @@ def main() -> None:
         text=""
         for attempt in (1,2):
           try:
-            response=_mc.invoke_checked(model,[HumanMessage(content=prompt + ("\nYour prior answer had no valid first-line verdict. Start exactly with APPROVE or REJECT." if attempt==2 else ""))],"expert_opinion",item="intent gate")
+            response=_mc.invoke_checked(model,[HumanMessage(content=prompt + ("\nFORMAT ERROR: return APPROVE or REJECT on the first nonblank line, followed by RATIONALE:. You may instead return a JSON object with action and rationale." if attempt==2 else ""))],"expert_opinion",item="intent gate")
           except UserFacingError:
             raise
           except Exception as e:
             raise UserFacingError("expert opinion could not review the intent gate.",f"{type(e).__name__}: {str(e)[:300]}",f"rerun with --session {session}; the checkpoint is preserved.") from e
           text=response.content if isinstance(response.content,str) else "".join(b.get("text","") for b in response.content if isinstance(b,dict))
-          lines=[line.strip() for line in text.strip().splitlines() if line.strip()]
-          verdict_index=next((i for i,line in enumerate(lines) if line.rstrip(":.").lower() in ("approve","reject")),None)
-          action=lines[verdict_index].rstrip(":.").lower() if verdict_index is not None else ""
-          if action in ("approve","reject"):break
+          from vmodel_contracts.runtime import parse_expert_verdict
+          verdict = parse_expert_verdict(text, ("approve", "reject"))
+          if verdict is not None:
+              action = verdict["action"]
+              break
         else:
-          raise UserFacingError("expert opinion returned an unparseable intent-gate verdict.",f"First nonblank line was not APPROVE or REJECT. Output began: {text[:200]!r}",f"rerun with --session {session}; the checkpoint is preserved.")
-        rationale="\n".join(lines[verdict_index+1:]).removeprefix("RATIONALE:").strip() or "No separate rationale supplied."
+          raise UserFacingError("expert opinion returned an unparseable intent-gate verdict.",f"Expected APPROVE or REJECT, or a JSON object with a valid action. Output began: {text[:200]!r}",f"rerun with --session {session}; the checkpoint is preserved.")
+        rationale=verdict["rationale"]
         verdict={"action":action,"rationale":rationale}
         record={"gate":"intent","mode":"simulated_expert_opinion","founder_approved":False,"human_review_required":True,"action":verdict["action"],"rationale":verdict["rationale"],"artifact":"intent_model.json"}
         (outdir/"expert-opinion.intent.json").write_text(json.dumps(record,indent=2))

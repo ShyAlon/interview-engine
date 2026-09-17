@@ -310,3 +310,26 @@ def test_empty_completion_is_echoed_as_console_error(monkeypatch, capsys):
     shown = capsys.readouterr().err
     assert "ERROR malformed response [probing]: empty content" in shown
     assert "response_id=resp_123" in shown
+
+
+def test_adaptive_watchdog_kills_retries_and_cold_start_floor(monkeypatch, capsys):
+    from langchain_core.messages import AIMessage
+    from interview_engine import model_config as mc
+    class Watch:
+        def deadline(self, stage): return (0.01, 0.001)
+        def complete(self, stage, duration): pass
+    class Model:
+        def __init__(self): self.calls = 0
+        def invoke(self, messages):
+            import time
+            self.calls += 1
+            if self.calls == 1: time.sleep(0.03)
+            return AIMessage(content="done")
+    monkeypatch.setattr(mc, "_ADAPTIVE_WATCHDOG", Watch())
+    monkeypatch.setenv("VMODEL_LLM_CALL_TIMEOUT_S", "60")
+    model = Model()
+    assert mc.invoke_checked(model, [], "probing").content == "done"
+    assert model.calls == 2
+    assert "WARNING self-heal" in capsys.readouterr().err
+    from vmodel_contracts.runtime import AdaptiveCallWatchdog
+    assert AdaptiveCallWatchdog(8, 240).deadline("probing") == (240, None)

@@ -304,3 +304,12 @@ def test_intent_expert_prompt_names_intent_and_excludes_later_artifacts():
     assert "architecture, implementation spec, or executable test artifact" in source
     assert "do not demand artifacts owned by later V-model stages" in source
     assert "reviewer for a TEST RUN" not in source
+
+
+def test_intent_expert_json_verdict_and_garbage_format_retry():
+    from vmodel_contracts.runtime import parse_expert_verdict
+    blob='```json\n{"action":"APPROVE","rationale":"intent is coherent","stakeholderNeeds":[]}\n```'
+    assert parse_expert_verdict(blob,("approve","reject"))["action"] == "approve"
+    assert parse_expert_verdict("garbage",("approve","reject")) is None
+    source=Path(cli.__file__).read_text()
+    assert "FORMAT ERROR: return APPROVE or REJECT" in source

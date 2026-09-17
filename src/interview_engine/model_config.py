@@ -74,6 +74,11 @@ _STALL_TIMEOUT_S = 180  # a stream this quiet is hung, not thinking
 _MAX_CALLS = 200        # what ONE process run may spend, in LLM calls
 _CALLS_USED = 0
 
+# Shared conservative policy: 8x the same-stage running median, never less
+# than four minutes, including cold start and unusually quick early calls.
+from vmodel_contracts.runtime import AdaptiveCallWatchdog, AdaptiveWatchdogTimeout
+_ADAPTIVE_WATCHDOG = AdaptiveCallWatchdog(multiplier=8.0, floor_s=240.0)
+
 
 _MAX_TOKENS_ENV = "VMODEL_LLM_MAX_TOKENS"  # per-call generation ceiling override (unset: stage default)
 
@@ -327,13 +332,35 @@ def _run_with_deadline(fn, timeout_s: int, stage: str):
     gets an informative error instead of a hang."""
     import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(fn)
-        try:
-            return future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            raise TimeoutError from None
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(fn)
+    try:
+        return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        raise TimeoutError from None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _set_model_timeout(chat_model, timeout_s: float) -> None:
+    """Put the adaptive deadline on the live provider socket."""
+    model = getattr(chat_model, "runnable", chat_model)
+    try:
+        model.request_timeout = timeout_s
+        root = getattr(model, "root_client", None)
+        if root is not None:
+            root.timeout = timeout_s
+            if getattr(root, "_client", None) is not None:
+                import httpx
+                root._client.timeout = httpx.Timeout(timeout_s)
+    except Exception:
+        pass
+    try:
+        import httpx
+        model._client._client.timeout = httpx.Timeout(timeout_s)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -419,6 +446,8 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
     cfg = for_stage(stage)
     call_timeout = _guard_limits()[0]
     for attempt in (1, 2):
+        adaptive_deadline, stage_median = _ADAPTIVE_WATCHDOG.deadline(stage)
+        effective_timeout = min(call_timeout, adaptive_deadline)
         _guard_enter(stage)
         base = {"provider": cfg.provider, "model": cfg.model, "stage": stage,
                 "attempt": attempt, **({"item": item} if item else {}),
@@ -427,7 +456,10 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
         stop_heartbeat = _start_heartbeat(f"stage '{stage}'" + (f" [{item}]" if item else "") + " call")
         t0 = time.monotonic()
         try:
-            resp = _run_with_deadline(lambda: chat_model.invoke(messages), call_timeout, stage)
+            _set_model_timeout(chat_model, effective_timeout)
+            resp = _run_with_deadline(lambda: chat_model.invoke(messages), effective_timeout, stage)
+            elapsed = time.monotonic() - t0
+            _ADAPTIVE_WATCHDOG.complete(stage, elapsed)
             _check_truncated(resp, stage, cfg)
             content = getattr(resp, "content", None)
             if isinstance(content, str) and not content.strip():
@@ -447,9 +479,19 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
                       "usage": _usage_of(resp)})
             return resp
         except TimeoutError:
-            _log_llm({"event": "llm_call_error", **base, "latency_s": round(time.monotonic() - t0, 2),
-                      "error": {"kind": "timeout", "limit_s": call_timeout}})
-            raise _guard_killed(stage, "no completion within the call budget", call_timeout, call_timeout) from None
+            elapsed = time.monotonic() - t0
+            adaptive = effective_timeout < call_timeout or adaptive_deadline <= call_timeout
+            _log_llm({"event": "llm_call_error", **base, "latency_s": round(elapsed, 2),
+                      "error": {"kind": "adaptive_watchdog" if adaptive else "timeout", "limit_s": effective_timeout,
+                                "stage_median_s": stage_median}})
+            if adaptive and attempt == 1:
+                ratio = elapsed / stage_median if stage_median else None
+                basis = f"{ratio:.1f}x stage median" if ratio is not None else "cold-start floor"
+                _console_line(f"  WARNING self-heal: call ran past {basis} ({effective_timeout:.0f}s); killed and retrying")
+                continue
+            if adaptive:
+                raise _guard_killed(stage, "adaptive watchdog retry exhausted", elapsed, effective_timeout) from None
+            raise _guard_killed(stage, "no completion within the call budget", elapsed, call_timeout) from None
         except UserFacingError:
             raise
         except Exception as e:  # noqa: BLE001
