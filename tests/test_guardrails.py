@@ -330,6 +330,6 @@ def test_adaptive_watchdog_kills_retries_and_cold_start_floor(monkeypatch, capsy
     model = Model()
     assert mc.invoke_checked(model, [], "probing").content == "done"
     assert model.calls == 2
-    assert "WARNING self-heal" in capsys.readouterr().err
+    assert "WARNING boundary=watchdog" in capsys.readouterr().err
     from vmodel_contracts.runtime import AdaptiveCallWatchdog
     assert AdaptiveCallWatchdog(8, 240).deadline("probing") == (240, None)

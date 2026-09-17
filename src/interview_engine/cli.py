@@ -406,7 +406,14 @@ def main() -> None:
           verdict = parse_expert_verdict(text, ("approve", "reject"))
           if verdict is not None:
               action = verdict["action"]
+              if verdict.get("extracted_from") == "json_object":
+                  _mc._console_line(
+                      f"  boundary=expert-verdict gate=intent input=json-object allowed=APPROVE,REJECT "
+                      f"action={action} decision=accept-deterministic-extraction")
               break
+          _mc._console_line(
+              f"  boundary=expert-verdict gate=intent attempt={attempt} allowed=APPROVE,REJECT "
+              f"parsed=false decision={'format-retry' if attempt == 1 else 'reject'}")
         else:
           raise UserFacingError("expert opinion returned an unparseable intent-gate verdict.",f"Expected APPROVE or REJECT, or a JSON object with a valid action. Output began: {text[:200]!r}",f"rerun with --session {session}; the checkpoint is preserved.")
         rationale=verdict["rationale"]

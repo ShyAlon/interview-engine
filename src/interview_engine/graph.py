@@ -720,6 +720,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 except Exception as exc:
                     last_exc = exc
                     if attempt == 1:
+                        model_config._console_line(
+                            f"  boundary=contract-repair stage=conops label={label} attempt=1 "
+                            f"decision=retry reason={type(exc).__name__}:{str(exc)[:160]}")
                         continue
                     raise UserFacingError(
                         f"stage 'conops': {label.lower()} failed its JSON contract after one automatic retry.",
