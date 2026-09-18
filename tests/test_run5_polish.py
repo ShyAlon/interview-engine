@@ -97,8 +97,8 @@ def test_nfr_quantified_requires_numbers_or_explicit_waiver():
 
 def test_model_cannot_close_nfrs_without_numbers(monkeypatch):
     from interview_engine.coverage import initial_coverage, next_area
-    turn = json.dumps({"question": "q", "covered": ["nfrs"], "thin": [], "skipped": []})
-    probing = FakeModel([turn, "[INTERVIEW COMPLETE]"])
+    turn = json.dumps({"question": "q", "covered": ["nfrs"], "thin": [], "skipped": [], "complete": False})
+    probing = FakeModel([turn, turn])
     distills = [json.dumps(NEEDS), json.dumps(SCOPE), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
                         lambda stage, **kwargs: probing if stage == "probing"
