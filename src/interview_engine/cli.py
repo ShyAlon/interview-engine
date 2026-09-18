@@ -407,8 +407,9 @@ def main() -> None:
           verdict = parse_expert_verdict(text, ("approve", "reject"))
           specificity_errors=[]; objections=[]
           if verdict is not None and verdict["action"] == "reject":
-              from vmodel_contracts.runtime import validate_expert_objections
-              objections, specificity_errors = validate_expert_objections(verdict["feedback"], ("intent",))
+              from vmodel_contracts.runtime import classify_expert_objections
+              objections, upstream_advisories, specificity_errors = classify_expert_objections(
+                  verdict["feedback"], "intent", ())
               if specificity_errors:
                   retry_feedback = ("SPECIFICITY ERROR: " + "; ".join(specificity_errors) + ". Return REJECT with "
                                     "one OBJECTION line per blocker using artifact, rule, location, and resolution fields.")
