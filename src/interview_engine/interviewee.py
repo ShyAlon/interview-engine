@@ -4,9 +4,25 @@ import hashlib,json,re
 from pathlib import Path
 
 def load_persona(path: str|Path) -> dict:
- d=json.loads(Path(path).read_text())
- if not str(d.get("idea") or "").strip() or not isinstance(d.get("answers"),list):
-  raise ValueError("persona requires non-empty idea and answers[]")
+ from .errors import UserFacingError
+ source = Path(path)
+ try:
+  d=json.loads(source.read_text())
+ except FileNotFoundError as e:
+  raise UserFacingError(
+   f"hands-free persona file not found: {source}.",
+   "the path was resolved from a different working directory, the file was moved, or it was not pulled.",
+   "pass an existing JSON persona with --interviewee; the hands-free driver resolves it to an absolute path.") from e
+ except (OSError, json.JSONDecodeError) as e:
+  raise UserFacingError(
+   f"hands-free persona could not be read: {source}.",
+   f"{type(e).__name__}: {str(e)[:240]}",
+   "fix the file permissions/JSON and retry the same command.") from e
+ if not isinstance(d, dict) or not str(d.get("idea") or "").strip() or not isinstance(d.get("answers"),list):
+  raise UserFacingError(
+   f"hands-free persona is invalid: {source}.",
+   "the JSON must be an object with a non-empty idea and answers array.",
+   "add {idea: string, answers: [{keywords: [string], answer: string}]} and retry.")
  return d
 
 def question_id(question: str) -> str:
