@@ -389,11 +389,12 @@ def main() -> None:
                 "against the canonical rubric. First line: APPROVE or REJECT. APPROVE when there is no blocking "
                 "contradiction, missing trace, unsafe assumption, or build-stopping ambiguity. Non-blocking "
                 "improvements and polish MUST stay as suggestions in RATIONALE under APPROVE; they are not grounds "
-                "to reject. REJECT only for a named blocking defect, and name that blocker plus a concrete correction "
-                "in RATIONALE. Never claim founder approval.\n\nCANONICAL RUBRIC:\n" +
+                "to reject. REJECT only for a named blocking defect. For each blocker write one FEEDBACK line in this exact form: "
+                "OBJECTION: artifact=intent | rule=<named rule or criterion> | location=<section, id, field, or quoted fragment> | resolution=<concrete change>. "
+                "Every objection must include all four fields. Then write RATIONALE. Never claim founder approval.\n\nCANONICAL RUBRIC:\n" +
                 intent_gate_instructions() + "\n\nINTENT ARTIFACT:\n" + intent.model_dump_json(indent=2))
         model=_mc.build_chat_model("expert_opinion")
-        text=""
+        text=""; objections=[]; specificity_errors=[]; retry_feedback=""
         for attempt in (1,2):
           try:
             response=_mc.invoke_checked(model,[HumanMessage(content=prompt + ("\nFORMAT ERROR: return APPROVE or REJECT on the first nonblank line, followed by RATIONALE:. You may instead return a JSON object with action and rationale." if attempt==2 else ""))],"expert_opinion",item="intent gate")
@@ -404,6 +405,14 @@ def main() -> None:
           text=response.content if isinstance(response.content,str) else "".join(b.get("text","") for b in response.content if isinstance(b,dict))
           from vmodel_contracts.runtime import parse_expert_verdict
           verdict = parse_expert_verdict(text, ("approve", "reject"))
+          specificity_errors=[]; objections=[]
+          if verdict is not None and verdict["action"] == "reject":
+              from vmodel_contracts.runtime import validate_expert_objections
+              objections, specificity_errors = validate_expert_objections(verdict["feedback"], ("intent",))
+              if specificity_errors:
+                  retry_feedback = ("SPECIFICITY ERROR: " + "; ".join(specificity_errors) + ". Return REJECT with "
+                                    "one OBJECTION line per blocker using artifact, rule, location, and resolution fields.")
+                  verdict = None
           if verdict is not None:
               action = verdict["action"]
               if verdict.get("extracted_from") == "json_object":
@@ -411,19 +420,26 @@ def main() -> None:
                       f"  boundary=expert-verdict gate=intent input=json-object allowed=APPROVE,REJECT "
                       f"action={action} decision=accept-deterministic-extraction")
               break
+          if attempt == 1 and not retry_feedback:
+              retry_feedback = ("FORMAT ERROR: return APPROVE or REJECT on the first nonblank line. For REJECT, add "
+                                "FEEDBACK: with one structured OBJECTION line per blocker, then RATIONALE:.")
           _mc._console_line(
               f"  boundary=expert-verdict gate=intent attempt={attempt} allowed=APPROVE,REJECT "
               f"parsed=false decision={'format-retry' if attempt == 1 else 'reject'}")
         else:
+          if specificity_errors:
+              raise UserFacingError("expert opinion returned low-specificity intent objections twice.",
+                  "LOW-SPECIFICITY: " + "; ".join(specificity_errors) + f". Output began: {text[:300]!r}",
+                  "inspect the preserved output; each objection must name artifact, rule, location, and resolution.")
           raise UserFacingError("expert opinion returned an unparseable intent-gate verdict.",f"Expected APPROVE or REJECT, or a JSON object with a valid action. Output began: {text[:200]!r}",f"rerun with --session {session}; the checkpoint is preserved.")
         rationale=verdict["rationale"]
-        verdict={"action":action,"rationale":rationale}
-        record={"gate":"intent","mode":"simulated_expert_opinion","founder_approved":False,"human_review_required":True,"action":verdict["action"],"rationale":verdict["rationale"],"artifact":"intent_model.json"}
+        verdict={"action":action,"rationale":rationale,"feedback":verdict.get("feedback", "")}
+        record={"gate":"intent","mode":"simulated_expert_opinion","founder_approved":False,"human_review_required":True,"action":verdict["action"],"rationale":verdict["rationale"],"feedback":verdict.get("feedback", ""),"objections":objections,"artifact":"intent_model.json"}
         (outdir/"expert-opinion.intent.json").write_text(json.dumps(record,indent=2))
         with (outdir/"audit.jsonl").open("a") as fh:fh.write(json.dumps({"event":"gate.simulated_expert_opinion",**record})+"\n")
         print(f"\nSIMULATED EXPERT OPINION: {verdict['action']} - not founder approval; human review remains required.")
         from vmodel_contracts.runtime import format_expert_review_rounds
-        formatted = format_expert_review_rounds([{"rationale": verdict["rationale"], "feedback": "(none)"}])
+        formatted = format_expert_review_rounds([{"rationale": verdict["rationale"], "feedback": verdict.get("feedback") or "(none)", "objections": objections}])
         print("\n" + formatted.replace("Reviewer objections:", "Expert review:"))
         ok="y" if verdict["action"]=="approve" else "n"
     else:

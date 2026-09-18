@@ -244,7 +244,7 @@ def test_expert_reject_prints_reason_and_exits_nonzero(monkeypatch,tmp_path,caps
     models={
       'probing':FakeModel(['[INTERVIEW COMPLETE]']),
       'distillation':FakeModel([json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY)]),
-      'expert_opinion':FakeModel(['REJECT\nRATIONALE: model quality has no measurable acceptance intent']),
+      'expert_opinion':FakeModel(['REJECT\nFEEDBACK: OBJECTION: artifact=intent | rule=measurable acceptance intent criterion | location=SN-1 field success_signals | resolution=Add a numeric success threshold to SN-1\nRATIONALE: model quality has no measurable acceptance intent']),
       'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps([{'name':o['name'],'summary':o['summary']} for o in CONOPS_REPLY['concept_options']]),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
       'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
     monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
@@ -252,7 +252,8 @@ def test_expert_reject_prints_reason_and_exits_nonzero(monkeypatch,tmp_path,caps
         run_cli_with_inputs(['1 - access'],['prog','idea','--expert-opinion'])
     assert "model quality has no measurable acceptance intent" in exc.value.cause
     out=capsys.readouterr().out
-    assert "RATIONALE: model quality has no measurable acceptance intent" in out
+    assert "Rationale:\n  model quality has no measurable acceptance intent" in out
+    assert "Artifact: intent" in out and "Location: SN-1 field success_signals" in out
 
 
 def test_expert_gate_prompt_uses_canonical_contract_rubric(monkeypatch):
