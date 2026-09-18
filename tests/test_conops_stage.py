@@ -23,7 +23,9 @@ def draft():
 
 def test_draft_provenance_and_explicit_selection():
     d = validate_draft(draft(), {0, 2})
-    assert "Concept Decision" in comparison_question(d)
+    rendered=comparison_question(d)
+    assert "Concept Decision" in rendered
+    assert "1. Native app:" in rendered and "2. PWA:" in rendered
     assert decision_reply("1 - native APIs are required", d["concept_options"])[0].name == "Native app"
     assert decision_reply("PWA - one deployment", d["concept_options"])[0].name == "PWA"
     assert decision_reply("1", d["concept_options"]) is None
@@ -191,3 +193,21 @@ def test_conops_option_dict_statements_normalize_at_assembly(monkeypatch):
     option=ConceptOption.model_validate(normalized)
     assert option.advantages == ["Processes responses in one go"]
     assert option.disadvantages == ["Must handle insurer variation"]
+
+def test_invalid_concept_gate_is_bounded_with_diagnostics(monkeypatch,capsys):
+ from interview_engine import model_config
+ from interview_engine.errors import UserFacingError
+ from interview_engine.graph import build_graph
+ from interview_engine.telemetry import UsageLog
+ from tests.test_coverage import FakeModel
+ import pytest
+ d=validate_draft(draft(),{0,4,8,12}); g=build_graph(UsageLog("bounded"),conops_enabled=True)
+ cfg={"configurable":{"thread_id":"bounded"}}
+ state={"messages":[HumanMessage(content="Use email notifications for assignment")],"submission":{"submission_id":"bounded","free_text":"web app","founder_id":"f"},"verdict":{"accepted":True},"intent_model":{"session_id":"bounded"},"conops_draft":d}
+ first=g.invoke(state,cfg)
+ assert first["conops_decision_attempts"]==1 and "couldn't match" in first["messages"][-1].content
+ with pytest.raises(UserFacingError) as caught:
+  g.invoke({"messages":[HumanMessage(content="Use email notifications for assignment")]},cfg)
+ assert "after 2 attempts" in caught.value.render()
+ log=capsys.readouterr().err
+ assert "attempt=1" in log and "attempt=2" in log and "decision=unmatched" in log and "answer='Use email" in log

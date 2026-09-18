@@ -21,3 +21,9 @@ def test_malformed_persona_is_human_readable(tmp_path):
  p=tmp_path/"bad.json";p.write_text("{")
  with pytest.raises(UserFacingError) as ei: load_persona(p)
  assert all(x in ei.value.render() for x in ("Error:","Likely cause:","Next:"))
+
+def test_concept_decision_uses_explicit_persona_preference_and_numbering():
+ from interview_engine.interviewee import decision_answer
+ q="Concept Decision - choose:\n1. Native Mobile Application: installed\n2. Progressive Web Application (PWA): browser"
+ p={"decisions":{"concept":{"prefer_keywords":["pwa"],"rationale":"browser first"}}}
+ assert decision_answer(p,q)[1]=="2 - browser first"

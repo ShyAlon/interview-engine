@@ -291,6 +291,8 @@ def main() -> None:
         state = {"messages": [HumanMessage(content=idea)], "submission": submission.model_dump(mode="json")}
 
     result = current.values if finished else None
+    hands_free_gate_attempts = {}
+    hands_free_last_answers = {}
     while not finished:
         result = graph.invoke(state, cfg)
         state = None  # further invokes resume from the checkpoint with new input only
@@ -306,11 +308,36 @@ def main() -> None:
             continue
         print(f"\nInterviewer: {last}")
         if persona:
-            from .interviewee import llm_answer, scripted_answer
+            from .interviewee import decision_answer, llm_answer, scripted_answer
             history = [{"role": getattr(m, "type", "unknown"), "content": str(m.content)}
                        for m in result["messages"]]
-            qid, reply = (scripted_answer(persona, last) if args.interviewee_mode == "scripted"
-                          else llm_answer(persona, last, history))
+            decision = decision_answer(persona, last)
+            qid = __import__("interview_engine.interviewee", fromlist=["question_id"]).question_id(last)
+            gate_attempt = hands_free_gate_attempts.get(qid, 0) + 1
+            hands_free_gate_attempts[qid] = gate_attempt
+            if "I couldn't match" in last:
+                reason = "previous answer did not select an exact option plus rationale"
+                prior = hands_free_last_answers.get(qid, "")
+                print(f"  boundary=hands-free-gate gate=concept attempt={gate_attempt} decision=unmatched "
+                      f"reason={reason!r} answer={prior!r}", file=sys.stderr)
+                with (outdir / "audit.jsonl").open("a") as fh:
+                    fh.write(json.dumps({"event":"gate.match_failure","gate":"concept","attempt":gate_attempt,
+                        "answer":prior,"reason":reason})+"\n")
+            if decision is not None:
+                qid, reply = decision
+                print(f"  boundary=hands-free-gate gate=concept attempt={gate_attempt} action=select "
+                      f"answer={reply!r} source=persona decision=continue", file=sys.stderr)
+                with (outdir / "audit.jsonl").open("a") as fh:
+                    fh.write(json.dumps({"event":"gate.auto_decision","gate":"concept","attempt":gate_attempt,
+                        "action":"select","answer":reply,"source":"persona","persona":str(args.interviewee.resolve())})+"\n")
+            elif gate_attempt >= 3 and "Concept Decision" in last:
+                raise UserFacingError("hands-free concept decision has no persona preference.",
+                    "2 scripted/LLM answers failed to match and decisions.concept did not identify one rendered option.",
+                    "add decisions.concept.prefer_keywords and rationale to the persona, then resume this session.")
+            else:
+                qid, reply = (scripted_answer(persona, last) if args.interviewee_mode == "scripted"
+                              else llm_answer(persona, last, history))
+            hands_free_last_answers[qid] = reply
             print(f"Interviewee: {reply}")
             with (outdir / "audit.jsonl").open("a") as fh:
                 fh.write(json.dumps({"event":"interviewee.answer", "mode":args.interviewee_mode,

@@ -44,7 +44,19 @@ def llm_answer(persona: dict, question: str, history: list[dict]) -> tuple[str,s
  from . import model_config
  model=model_config.build_chat_model("probing")
  prompt=("Act as the product founder in a test interview. Answer only the latest question, in first person, "
-         "using the persona as ground truth. Never invent facts; say 'you decide' for unspecified technical choices. "
+         "using the persona as ground truth. For a decision gate, select the rendered option matching persona.decisions and include a rationale in the requested format. Never invent facts; say 'you decide' for unspecified technical choices. "
          "Return only the answer.\nPERSONA:\n"+json.dumps(persona)+"\nRECENT:\n"+json.dumps(history[-6:])+"\nQUESTION:\n"+question)
  resp=model_config.invoke_checked(model,[HumanMessage(content=prompt)],"probing",item="hands-free interviewee")
  return question_id(question),str(resp.content).strip()
+
+def decision_answer(persona: dict, question: str) -> tuple[str, str] | None:
+ """Resolve a named persona decision against the options code rendered."""
+ if "concept decision" not in question.casefold(): return None
+ decision=(persona.get("decisions") or {}).get("concept") or {}
+ prefer=[str(x).casefold() for x in decision.get("prefer_keywords") or [] if str(x).strip()]
+ rationale=str(decision.get("rationale") or "This best matches the stated first-release constraints.").strip()
+ options=re.findall(r"(?m)^(\d+)\.\s+([^:\n]+):",question)
+ matches=[(number,name) for number,name in options if any(k in name.casefold() for k in prefer)]
+ if len(matches)!=1: return None
+ number,name=matches[0]
+ return question_id(question),f"{number} - {rationale}"

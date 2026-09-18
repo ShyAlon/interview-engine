@@ -38,6 +38,7 @@ class InterviewState(TypedDict, total=False):
     verdict: dict             # ScopeVerdict as dict
     intent_model: dict        # IntentModel as dict, after distillation
     conops_draft: dict        # validated context/scenarios/options, awaiting founder choice
+    conops_decision_attempts: int  # bounded invalid founder replies at the decision gate
     conops: dict              # founder-confirmed ConOpsDocument
     distill_warnings: list[str]  # non-blocking flags for the approval gate (e.g. unrecognized ecosystem name)
     requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
@@ -670,9 +671,19 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             try:
                 doc = finalize(draft, state["submission"]["submission_id"],
                                getattr(last, "content", ""), source_turn)
-            except ValueError:
-                return {"messages": [AIMessage(content=comparison_question(draft)
-                    + "\n\nI couldn't match an exact option plus rationale. Reply as `<number or exact name> - <why you chose it>`.")]}
+            except ValueError as exc:
+                attempts = int(state.get("conops_decision_attempts") or 0) + 1
+                model_config._console_line(
+                    f"  boundary=interactive-gate gate=concept attempt={attempts} decision=unmatched "
+                    f"reason={str(exc)} answer={getattr(last, 'content', '')!r}")
+                if attempts >= 2:
+                    raise UserFacingError(
+                        "concept decision could not be matched after 2 attempts.",
+                        f"last answer did not select an exact option plus rationale: {getattr(last, 'content', '')!r}",
+                        "reply once with `<number or exact name> - <why you chose it>`, then resume this session.") from exc
+                return {"conops_decision_attempts": attempts,
+                        "messages": [AIMessage(content=comparison_question(draft)
+                    + "\n\nI couldn't match an exact option plus rationale. Reply as `<number or exact name> - <why you chose it>`." )]}
             if progress is not None:
                 progress.emit(ProgressEvent("conops", "Concept of Operations decision", "completed",
                                             _time.time(), 0.0, doc.decision.selected_concept))
