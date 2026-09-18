@@ -313,3 +313,9 @@ def test_intent_expert_json_verdict_and_garbage_format_retry():
     assert parse_expert_verdict("garbage",("approve","reject")) is None
     source=Path(cli.__file__).read_text()
     assert "FORMAT ERROR: return APPROVE or REJECT" in source
+
+
+def test_intent_expert_output_uses_shared_human_readable_sections():
+    source=Path(cli.__file__).read_text()
+    assert "format_expert_review_rounds" in source
+    assert 'replace("Reviewer objections:", "Expert review:")' in source

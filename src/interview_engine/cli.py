@@ -422,7 +422,9 @@ def main() -> None:
         (outdir/"expert-opinion.intent.json").write_text(json.dumps(record,indent=2))
         with (outdir/"audit.jsonl").open("a") as fh:fh.write(json.dumps({"event":"gate.simulated_expert_opinion",**record})+"\n")
         print(f"\nSIMULATED EXPERT OPINION: {verdict['action']} - not founder approval; human review remains required.")
-        print(f"RATIONALE: {verdict['rationale']}")
+        from vmodel_contracts.runtime import format_expert_review_rounds
+        formatted = format_expert_review_rounds([{"rationale": verdict["rationale"], "feedback": "(none)"}])
+        print("\n" + formatted.replace("Reviewer objections:", "Expert review:"))
         ok="y" if verdict["action"]=="approve" else "n"
     else:
         ok = input("\nApprove this intent model? [y/N] ").strip().lower()
