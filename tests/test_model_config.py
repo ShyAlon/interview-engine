@@ -162,6 +162,19 @@ def test_conops_uses_shared_distillation_route_never_its_own_default(monkeypatch
     assert "conops=ollama/phi4" in model_config.describe_models()
 
 
+def test_expert_opinion_uses_its_explicit_shared_route(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "INTERVIEW_ENGINE_MODEL_DISTILLATION=ollama:phi4\n"
+        "INTERVIEW_ENGINE_MODEL_EXPERT_OPINION=deepseek:deepseek-flash\n"
+    )
+    monkeypatch.setattr(model_config, "_DOTENV", None)
+    monkeypatch.delenv("INTERVIEW_ENGINE_MODEL_DISTILLATION", raising=False)
+    monkeypatch.delenv("INTERVIEW_ENGINE_MODEL_EXPERT_OPINION", raising=False)
+    assert model_config.for_stage("conops").model == "phi4"
+    assert model_config.for_stage("expert_opinion").model == "deepseek-flash"
+
+
 def test_deepseek_debug_http_wires_payload_capture(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-flash")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
