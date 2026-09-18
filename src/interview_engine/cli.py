@@ -191,8 +191,17 @@ def main() -> None:
     ap.add_argument("idea", nargs="*", help="the product idea (omit with --session to resume)")
     ap.add_argument("-s", "--session", help="resume this session id from its checkpoint")
     ap.add_argument("--expert-opinion", action="store_true", help="simulate intent approval for test runs; leaves explicit human-review provenance")
+    ap.add_argument("--interviewee", type=Path, help="persona JSON for a hands-free interview")
+    ap.add_argument("--interviewee-mode", choices=("scripted", "llm"), default="scripted")
+    ap.add_argument("--auto-approve", action="store_true", help="accept the final intent gate unattended and log that decision")
     args = ap.parse_args()
 
+    if args.auto_approve and args.interviewee is None:
+        ap.error("--auto-approve requires --interviewee so unattended approval has a named ground-truth source")
+    persona = None
+    if args.interviewee:
+        from .interviewee import load_persona
+        persona = load_persona(args.interviewee)
     resuming = args.session is not None
     # human-readable session id: local timestamp + short collision suffix
     session = args.session or (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4])
@@ -268,7 +277,7 @@ def main() -> None:
     else:
         finished = False
         current = None
-        idea = " ".join(args.idea) or input("Describe your product idea: ")
+        idea = " ".join(args.idea) or (str(persona["idea"]) if persona else input("Describe your product idea: "))
         print(f"session: {session}", file=sys.stderr)
         print(f"(if anything crashes, resume with: python -m interview_engine.cli --session {session})",
               file=sys.stderr)
@@ -296,7 +305,20 @@ def main() -> None:
             state = {}  # marker already in checkpoint; route onward to distill
             continue
         print(f"\nInterviewer: {last}")
-        reply = input("You: ")
+        if persona:
+            from .interviewee import llm_answer, scripted_answer
+            history = [{"role": getattr(m, "type", "unknown"), "content": str(m.content)}
+                       for m in result["messages"]]
+            qid, reply = (scripted_answer(persona, last) if args.interviewee_mode == "scripted"
+                          else llm_answer(persona, last, history))
+            print(f"Interviewee: {reply}")
+            with (outdir / "audit.jsonl").open("a") as fh:
+                fh.write(json.dumps({"event":"interviewee.answer", "mode":args.interviewee_mode,
+                    "persona":str(args.interviewee.resolve()), "question_id":qid, "answer":reply})+"\n")
+            print(f"  boundary=hands-free-interview question_id={qid} mode={args.interviewee_mode} "
+                  f"answer_chars={len(reply)} decision=answer", file=sys.stderr)
+        else:
+            reply = input("You: ")
         state = {"messages": [HumanMessage(content=reply)]}
 
     # A completed checkpoint is immutable historical state. After a contracts
@@ -387,9 +409,9 @@ def main() -> None:
                 "architecture, implementation spec, or executable test artifact. Judge it for the intent stage only "
                 "and do not demand artifacts owned by later V-model stages. Review the exact intent artifact below "
                 "against the canonical rubric. First line: APPROVE or REJECT. APPROVE when there is no blocking "
-                "contradiction, missing trace, unsafe assumption, or build-stopping ambiguity. Non-blocking "
-                "improvements and polish MUST stay as suggestions in RATIONALE under APPROVE; they are not grounds "
-                "to reject. REJECT only for a named blocking defect. For each blocker write one FEEDBACK line in this exact form: "
+                "contradiction, missing trace, unsafe assumption, or build-stopping ambiguity. "
+                "Non-blocking improvements and polish MUST stay as suggestions in RATIONALE under APPROVE; they are not grounds "
+                "to reject. REJECT only for a named blocking defect; name that blocker plus a concrete correction. For each blocker write one FEEDBACK line in this exact form: "
                 "OBJECTION: artifact=intent | rule=<named rule or criterion> | location=<section, id, field, or quoted fragment> | resolution=<concrete change>. "
                 "Every objection must include all four fields. Then write RATIONALE. Never claim founder approval.\n\nCANONICAL RUBRIC:\n" +
                 intent_gate_instructions() + "\n\nINTENT ARTIFACT:\n" + intent.model_dump_json(indent=2))
@@ -443,6 +465,12 @@ def main() -> None:
         formatted = format_expert_review_rounds([{"rationale": verdict["rationale"], "feedback": verdict.get("feedback") or "(none)", "objections": objections}])
         print("\n" + formatted.replace("Reviewer objections:", "Expert review:"))
         ok="y" if verdict["action"]=="approve" else "n"
+    elif args.auto_approve:
+        ok = "y"
+        record={"event":"gate.auto_decision", "gate":"intent", "action":"accept", "mode":"hands_free",
+                "persona":str(args.interviewee.resolve()), "artifact":"intent_model.json"}
+        with (outdir/"audit.jsonl").open("a") as fh: fh.write(json.dumps(record)+"\n")
+        print("  boundary=hands-free-gate gate=intent action=accept source=persona decision=continue", file=sys.stderr)
     else:
         ok = input("\nApprove this intent model? [y/N] ").strip().lower()
     if ok != "y":
