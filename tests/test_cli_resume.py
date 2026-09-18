@@ -72,7 +72,8 @@ def test_fresh_run_then_session_resume_after_validation_crash(monkeypatch, tmp_p
         "conops": FakeModel([
             json.dumps({"operating_environment": "desktop"}),
             json.dumps({"trigger":"idea"}), json.dumps({"operational_flow":["describe idea","review output"]}),
-            json.dumps([{"name":o["name"],"summary":o["summary"]} for o in CONOPS_REPLY["concept_options"]]),
+            json.dumps({"name":CONOPS_REPLY["concept_options"][0]["name"],"summary":CONOPS_REPLY["concept_options"][0]["summary"]}),
+            json.dumps({"name":CONOPS_REPLY["concept_options"][1]["name"],"summary":CONOPS_REPLY["concept_options"][1]["summary"]}),
             json.dumps({"advantages":["access"]}),json.dumps({"disadvantages":["browser limits"]}),
             json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["distribution"]})]),
         "scope_tiebreak": FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}']),
@@ -133,7 +134,7 @@ def test_expert_opinion_intent_gate_through_real_cli(monkeypatch,tmp_path):
       'probing':FakeModel(['[INTERVIEW COMPLETE]']),
       'distillation':FakeModel([json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY)]),
       'expert_opinion':FakeModel(['Here is my review.\nAPPROVE\nRATIONALE: coherent for unattended test']),
-      'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps([{'name':o['name'],'summary':o['summary']} for o in CONOPS_REPLY['concept_options']]),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
+      'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps({'name':CONOPS_REPLY['concept_options'][0]['name'],'summary':CONOPS_REPLY['concept_options'][0]['summary']}),json.dumps({'name':CONOPS_REPLY['concept_options'][1]['name'],'summary':CONOPS_REPLY['concept_options'][1]['summary']}),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
       'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web product"}'])}
     monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
     run_cli_with_inputs(['1 - access'],['prog','idea','--expert-opinion'])
@@ -245,7 +246,7 @@ def test_expert_reject_prints_reason_and_exits_nonzero(monkeypatch,tmp_path,caps
       'probing':FakeModel(['[INTERVIEW COMPLETE]']),
       'distillation':FakeModel([json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY)]),
       'expert_opinion':FakeModel(['REJECT\nFEEDBACK: OBJECTION: artifact=intent | rule=measurable acceptance intent criterion | location=SN-1 field success_signals | resolution=Add a numeric success threshold to SN-1\nRATIONALE: model quality has no measurable acceptance intent']),
-      'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps([{'name':o['name'],'summary':o['summary']} for o in CONOPS_REPLY['concept_options']]),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
+      'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps({'name':CONOPS_REPLY['concept_options'][0]['name'],'summary':CONOPS_REPLY['concept_options'][0]['summary']}),json.dumps({'name':CONOPS_REPLY['concept_options'][1]['name'],'summary':CONOPS_REPLY['concept_options'][1]['summary']}),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
       'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
     monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
     with pytest.raises(cli.UserFacingError, match="intent gate rejected") as exc:

@@ -49,7 +49,8 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     conops = FakeModel([json.dumps({"operating_environment":"phone, often offline"}),
                         json.dumps({"trigger":"habit completed"}),
                         json.dumps({"operational_flow":["open product","record points"]}),
-                        json.dumps([{"name":o["name"],"summary":o["summary"]} for o in d["concept_options"]]),
+                        json.dumps({"name":d["concept_options"][0]["name"],"summary":d["concept_options"][0]["summary"]}),
+                        json.dumps({"name":d["concept_options"][1]["name"],"summary":d["concept_options"][1]["summary"]}),
                         json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["store release"]}),
                         json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["platform limits"]})])
     models = {"probing": FakeModel(["[INTERVIEW COMPLETE]"]),
@@ -66,7 +67,7 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     assert "Concept Decision" in r["messages"][-1].content
     r = g.invoke({"messages": [HumanMessage(content="1 - reliable native APIs")]}, cfg)
     assert r["conops"]["decision"]["selected_concept"] == "Native app"
-    assert conops.calls == 8
+    assert conops.calls == 9
 
 
 def test_preseed_uses_validated_intent_identity_and_provenance():
@@ -104,7 +105,8 @@ def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholde
       "done_criteria":[],"tech_preferences":[],"glossary":{},"operational_concepts":["Log habit"],"open_questions":[],
       "source_turns":{"operational_concepts":[0],"core_value_proposition":[0]}}
     conops=FakeModel([json.dumps({"trigger":"habit completed"}),
-                      json.dumps([{"name":"Native app","summary":"installed"},{"name":"PWA","summary":"web"}]),
+                      json.dumps({"name":"Native app","summary":"installed"}),
+                      json.dumps({"name":"PWA","summary":"web"}),
                       json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["release"]}),
                       json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
     models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
@@ -114,7 +116,7 @@ def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholde
                 "verdict":{"accepted":True},"intent_model":intent},cfg)
     ctx=r["conops_draft"]["stakeholder_context"][0]
     assert ctx["goals"]==["runner needs quick capture"] and ctx["operating_environment"].startswith("phone, often offline")
-    assert conops.calls==6  # no stakeholder call; trigger + comparison + 4 option fields
+    assert conops.calls==7  # no stakeholder call; trigger + 2 identity micro-calls + 4 option fields
 
 
 def test_per_field_null_is_a_named_failure_with_raw_path(monkeypatch,tmp_path):
@@ -145,12 +147,11 @@ def test_conops_has_no_whole_document_or_multifield_repair_path():
     assert "clean_model_patch(" not in source
 
 
-def test_conops_comparison_wrong_shape_retries_with_contract_last(monkeypatch):
+def test_conops_weak_model_container_echo_retries_one_option_then_assembles(monkeypatch):
     from interview_engine import model_config
     from interview_engine.graph import build_graph
     from interview_engine.telemetry import UsageLog
     from tests.test_coverage import FakeModel
-
     intent={"session_id":"repair","problem_statement":"p","target_users":["runner"],
       "core_value_proposition":"points sync","stakeholder_needs":[{"need_id":"SN-1","statement":"runner needs quick capture","kind":"functional","source_turns":[0]}],
       "in_scope":["Log habit"],"out_of_scope":["native-only"],"external_integrations":[],
@@ -162,7 +163,8 @@ def test_conops_comparison_wrong_shape_retries_with_contract_last(monkeypatch):
         def invoke(self, messages): self.messages.append(messages); return super().invoke(messages)
     conops=Capture([json.dumps({"trigger":"habit completed"}),
                     json.dumps({"stakeholder_context": []}),
-                    json.dumps([{"name":"Native","summary":"installed"},{"name":"PWA","summary":"web"}]),
+                    json.dumps({"name":"Native","summary":"installed"}),
+                    json.dumps({"name":"PWA","summary":"web"}),
                     json.dumps({"advantages":["native"]}),json.dumps({"disadvantages":["release"]}),
                     json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
     models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
@@ -171,10 +173,11 @@ def test_conops_comparison_wrong_shape_retries_with_contract_last(monkeypatch):
     result=graph.invoke({"messages":[HumanMessage(content="runner uses phone offline")],
       "submission":{"free_text":"web app","founder_id":"f","submission_id":"repair"},
       "verdict":{"accepted":True},"intent_model":intent},{"configurable":{"thread_id":"repair"}})
-    assert len(result["conops_draft"]["concept_options"]) == 2
-    assert conops.messages[1][-1].content.startswith("FINAL RESPONSE CONTRACT:")
-    assert conops.messages[2][-1].content.startswith("FINAL RESPONSE CONTRACT:")
-    assert any("previous response failed" in m.content.lower() for m in conops.messages[2][:-1])
+    options=result["conops_draft"]["concept_options"]
+    assert [x["name"] for x in options] == ["Native", "PWA"]
+    assert any("previous response failed" in m.content.lower() for m in conops.messages[2] for _ in [0])
+    assert "concept 2 of 2" in conops.messages[3][1].content
+    assert "Native" in conops.messages[3][1].content
 
 
 def test_conops_option_dict_statements_normalize_at_assembly(monkeypatch):

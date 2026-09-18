@@ -798,36 +798,28 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 "Fill trigger, actors, ordered operational_flow, success_outcome, exceptions; retain source_turns.",
                 i, len(scenario_seeds)) for i, seed in enumerate(scenario_seeds,1)]
 
-            def comparison_contract(value):
-                if not isinstance(value, list) or not 2 <= len(value) <= 4:
-                    raise ValueError(f"concept comparison plan must contain 2-4 options; received {str(value)[:300]}")
-                for option in value:
-                    if not isinstance(option, dict) or not str(option.get("name", "")).strip() or not str(option.get("summary", "")).strip():
-                        raise ValueError(f"each option needs non-empty name and summary; received {str(option)[:250]}")
-            comparison = call_json(CONOPS_SYSTEM,
-                "VALIDATED INTENT: " + _json.dumps(intent) + "\nPropose 2-4 genuinely distinct product-level operating concepts. "
-                "Return a JSON array of objects with name and summary only. Do not include architecture components.",
-                "Planning CONOPS concept comparison", "known next step: one validated call per option",
-                comparison_contract)
-            if not isinstance(comparison,list) or not 2 <= len(comparison) <= 4:
-                raise UserFacingError(
-                    "stage 'conops': concept comparison plan must contain 2-4 options.",
-                    f"received: {str(comparison)[:300]}",
-                    "rerun with the same --session id; stakeholder and scenario work will rerun from intent.")
+            # Weak local models often echo a nearby top-level CONOPS container when
+            # asked for a list. Bound the task instead: two independently validated
+            # option identities, assembled into the comparison by code.
             identities=[]
-            for raw in comparison:
-                if not isinstance(raw,dict) or not str(raw.get("name","")).strip() or not str(raw.get("summary","")).strip():
-                    raise UserFacingError("stage 'conops': comparison plan contains an invalid option identity.",
-                                          f"received: {str(raw)[:250]}",
-                                          "rerun with the same --session id; intent is checkpointed.")
-                from vmodel_contracts import canonical_concept_id
-                name = str(raw["name"]).strip()
-                identities.append({"concept_id": canonical_concept_id(name), "name": name,
-                                   "summary": str(raw["summary"]).strip()})
-            if len({x["name"].casefold() for x in identities}) != len(identities):
-                raise UserFacingError("stage 'conops': comparison plan repeated an option name.",
-                                      f"names: {[x['name'] for x in identities]}",
-                                      "rerun with the same --session id; intent is checkpointed.")
+            from vmodel_contracts import canonical_concept_id
+            for option_index in (1, 2):
+                prior=[x["name"] for x in identities]
+                def option_identity_contract(value):
+                    if not isinstance(value, dict) or not str(value.get("name", "")).strip() or not str(value.get("summary", "")).strip():
+                        raise ValueError(f"option identity needs non-empty name and summary; received {str(value)[:300]}")
+                    if str(value["name"]).strip().casefold() in {x.casefold() for x in prior}:
+                        raise ValueError(f"option name duplicates a prior option: {value['name']!r}")
+                raw = call_json(CONOPS_SYSTEM,
+                    "VALIDATED INTENT: " + _json.dumps(intent)
+                    + f"\nPropose product-level operating concept {option_index} of 2. "
+                    + (f"It must be genuinely distinct from prior concepts: {_json.dumps(prior)}. " if prior else "")
+                    + "Return one JSON object with name and summary only. Do not include architecture components or any CONOPS container.",
+                    f"Planning CONOPS concept option {option_index}/2",
+                    f"one option identity; prior option names: {prior}", option_identity_contract)
+                name=str(raw["name"]).strip()
+                identities.append({"concept_id":canonical_concept_id(name),"name":name,
+                                   "summary":str(raw["summary"]).strip()})
             options=[generate_item("concept option", ident, ConceptOption,
                 "Fill concise advantages and disadvantages grounded in the intended operation.",
                 i,len(identities)) for i,ident in enumerate(identities,1)]
