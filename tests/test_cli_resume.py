@@ -137,7 +137,7 @@ def test_expert_opinion_intent_gate_through_real_cli(monkeypatch,tmp_path):
       'conops':FakeModel([json.dumps({'operating_environment':'desktop'}),json.dumps({'trigger':'idea'}),json.dumps({'operational_flow':['describe','review']}),json.dumps({'name':CONOPS_REPLY['concept_options'][0]['name'],'summary':CONOPS_REPLY['concept_options'][0]['summary']}),json.dumps({'name':CONOPS_REPLY['concept_options'][1]['name'],'summary':CONOPS_REPLY['concept_options'][1]['summary']}),json.dumps({'advantages':['access']}),json.dumps({'disadvantages':['limits']}),json.dumps({'advantages':['api']}),json.dumps({'disadvantages':['distribution']})]),
       'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web product"}'])}
     monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
-    run_cli_with_inputs(['1 - access'],['prog','idea','--expert-opinion'])
+    run_cli_with_inputs(['1 - access','1 - access'],['prog','idea','--expert-opinion'])
     out=tmp_path/'artifacts'/'20260915-120000-expe'/'interview'
     record=json.loads((out/'expert-opinion.intent.json').read_text())
     assert record['mode']=='simulated_expert_opinion' and record['founder_approved'] is False and record['human_review_required'] is True
@@ -250,7 +250,7 @@ def test_expert_reject_prints_reason_and_exits_nonzero(monkeypatch,tmp_path,caps
       'scope_tiebreak':FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web"}'])}
     monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
     with pytest.raises(cli.UserFacingError, match="intent gate rejected") as exc:
-        run_cli_with_inputs(['1 - access'],['prog','idea','--expert-opinion'])
+        run_cli_with_inputs(['1 - access','1 - access'],['prog','idea','--expert-opinion'])
     assert "model quality has no measurable acceptance intent" in exc.value.cause
     out=capsys.readouterr().out
     assert "Rationale:\n  model quality has no measurable acceptance intent" in out
