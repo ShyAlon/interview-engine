@@ -328,3 +328,14 @@ def test_binary_approval_is_a_typed_founder_decision():
     assert event['rationale_required'] is False
     assert [(o['value'],o['label']) for o in event['options']]==[('y','Approve'),('n','Reject')]
     assert event['answer_format']=='<value>'
+
+def test_intent_reject_records_redo_and_returns_to_typed_concept(monkeypatch,tmp_path):
+    from interview_engine.cli import binary_approval_decision
+    from interview_engine.conops_stage import founder_decision
+    approval=binary_approval_decision('intent-approval','Approve','Approve?')
+    concept=founder_decision({'concept_options':[{'concept_id':'concept:web-app',**CONOPS_REPLY['concept_options'][0]},{'concept_id':'concept:native-app',**CONOPS_REPLY['concept_options'][1]}]})
+    assert [o['value'] for o in approval['options']]==['y','n']
+    assert concept['rationale_required'] is True and len(concept['options'])==2
+    source=Path(cli.__file__).read_text()
+    assert '"event":"gate.redo"' in source and 'emit_founder_decision(founder_decision(result["conops_draft"]))' in source
+    assert 'graph.update_state(cfg,{"conops":result["conops"]})' in source

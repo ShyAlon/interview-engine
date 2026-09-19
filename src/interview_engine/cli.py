@@ -518,17 +518,30 @@ def main() -> None:
         with (outdir/"audit.jsonl").open("a") as fh: fh.write(json.dumps(record)+"\n")
         print("  boundary=hands-free-gate gate=intent action=accept source=persona decision=continue", file=sys.stderr)
     else:
-        approval=binary_approval_decision("intent-approval","Approve the intent model","Approve this intent model?")
-        emit_founder_decision(approval)
-        ok = input("\nApprove this intent model? [y/N] ").strip().lower()
+        from .conops_stage import founder_decision,finalize,render_conops
+        while True:
+            approval=binary_approval_decision("intent-approval","Approve the intent model","Approve this intent model?")
+            emit_founder_decision(approval)
+            ok = input("\nApprove this intent model? [y/N] ").strip().lower()
+            if ok == "y":break
+            # Rejection is redo, not terminal failure: return to the typed
+            # decision that produced this gated artifact, record provenance,
+            # and invalidate the selected CONOPS before asking again.
+            with (outdir/"audit.jsonl").open("a") as fh:fh.write(json.dumps({"event":"gate.redo","gate":"intent","returns_to":"concept decision","prior_selection":result["conops"]["decision"]["selected_concept"]})+"\n")
+            emit_founder_decision(founder_decision(result["conops_draft"]))
+            replacement=input("\nChoose a different operating concept: ").strip()
+            turn=max(result["conops"]["decision"].get("source_turns") or [0])+1
+            try:revised=finalize(result["conops_draft"],session,replacement,turn)
+            except ValueError:
+                raise UserFacingError("replacement concept decision could not be matched.","the answer did not select an exact option plus rationale.",f"resume with --session {session} and choose `<number> - <why>`.")
+            result={**result,"conops":revised.model_dump(mode="json")}
+            graph.update_state(cfg,{"conops":result["conops"]})
+            (outdir/"conops.json").write_text(revised.model_dump_json(indent=2))
+            (outdir/"conops.md").write_text(render_conops(revised))
+            print(f"Concept changed to {revised.decision.selected_concept}; intent approval reopened.",file=sys.stderr)
     if ok != "y":
-        cause = (verdict["rationale"] if args.expert_opinion else
-                 "the founder did not approve the intent model")
-        raise UserFacingError(
-            "intent gate rejected - nothing downstream may be generated.",
-            cause,
-            f"correct the interview intent, then resume with --session {session}.",
-        )
+        cause = (verdict["rationale"] if args.expert_opinion else "the founder did not approve the intent model")
+        raise UserFacingError("intent gate rejected - nothing downstream may be generated.",cause,f"correct the interview intent, then resume with --session {session}.")
     log.write_summary(outdir / "usage_summary.json")
     _print_usage_table(log)
     print(f"\n{'Simulated expert accepted for testing' if args.expert_opinion else 'Approved'}. Artifacts in {outdir.resolve()}/")
