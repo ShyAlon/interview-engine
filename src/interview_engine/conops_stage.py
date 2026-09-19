@@ -84,6 +84,23 @@ def comparison_question(draft: dict) -> str:
     return "\n".join(lines)
 
 
+def founder_decision(draft: dict) -> dict:
+    """Code-owned UI contract for every CONOPS option choice.
+
+    The model owns option substance. Code owns stable values, ordering and the
+    exact answer format consumed by ``decision_reply``.
+    """
+    options=[]
+    for index,raw in enumerate(draft["concept_options"],1):
+        option=ConceptOption.model_validate(raw)
+        options.append({"value":str(index),"label":option.name,"summary":option.summary,
+                        "advantages":list(option.advantages),"disadvantages":list(option.disadvantages)})
+    return {"type":"founder_decision","decision_id":CONCEPT_DECISION,
+            "title":"Choose the operating concept","prompt":"Which concept should the architecture execute?",
+            "options":options,"rationale_required":True,
+            "rationale_label":"Why is this the right concept?","answer_format":"<value> - <rationale>"}
+
+
 def decision_reply(reply: str, options: list[dict]) -> tuple[ConceptOption, str] | None:
     """Exact option + founder rationale. No fuzzy/model inference."""
     choice, sep, rationale = reply.strip().partition(" - ")

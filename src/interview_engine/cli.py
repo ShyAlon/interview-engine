@@ -307,6 +307,13 @@ def main() -> None:
             state = {}  # marker already in checkpoint; route onward to distill
             continue
         print(f"\nInterviewer: {last}")
+        decision_payload=None
+        if result.get("conops_draft") and not result.get("conops"):
+            from .conops_stage import founder_decision
+            decision_payload=founder_decision(result["conops_draft"])
+            # Stable machine event on stderr; the human-readable question stays
+            # on stdout. Consumers must never parse options back out of prose.
+            print("REQUIRE_EVENT " + json.dumps(decision_payload,separators=(",",":")),file=sys.stderr)
         if persona:
             from .interviewee import decision_answer, llm_answer, scripted_answer
             history = [{"role": getattr(m, "type", "unknown"), "content": str(m.content)}

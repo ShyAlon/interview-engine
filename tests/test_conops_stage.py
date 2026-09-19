@@ -211,3 +211,15 @@ def test_invalid_concept_gate_is_bounded_with_diagnostics(monkeypatch,capsys):
  assert "after 2 attempts" in caught.value.render()
  log=capsys.readouterr().err
  assert "attempt=1" in log and "attempt=2" in log and "decision=unmatched" in log and "answer='Use email" in log
+
+def test_founder_decision_is_structured_code_owned_contract():
+    from interview_engine.conops_stage import founder_decision
+    draft={"concept_options":[
+        {"concept_id":"concept:native","name":"Native app","summary":"Installed experience","advantages":["Fast"],"disadvantages":["Two stores"]},
+        {"concept_id":"concept:pwa","name":"PWA","summary":"Browser first","advantages":["One deploy"],"disadvantages":["Limited APIs"]},
+    ]}
+    event=founder_decision(draft)
+    assert event["type"]=="founder_decision" and event["rationale_required"] is True
+    assert [(x["value"],x["label"]) for x in event["options"]]==[("1","Native app"),("2","PWA")]
+    assert event["options"][1]["advantages"]==["One deploy"]
+    assert event["answer_format"]=="<value> - <rationale>"
