@@ -321,3 +321,10 @@ def test_intent_expert_output_uses_shared_human_readable_sections():
     source=Path(cli.__file__).read_text()
     assert "format_expert_review_rounds" in source
     assert 'replace("Reviewer objections:", "Expert review:")' in source
+
+def test_binary_approval_is_a_typed_founder_decision():
+    from interview_engine.cli import binary_approval_decision
+    event=binary_approval_decision('intent-approval','Approve intent','Approve this intent model?')
+    assert event['rationale_required'] is False
+    assert [(o['value'],o['label']) for o in event['options']]==[('y','Approve'),('n','Reject')]
+    assert event['answer_format']=='<value>'

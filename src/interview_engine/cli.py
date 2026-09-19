@@ -186,6 +186,18 @@ def _print_usage_table(log) -> None:
           file=sys.stderr)
 
 
+def emit_founder_decision(payload: dict) -> None:
+    """Emit one typed choice contract; human-readable prompts stay separate."""
+    print("REQUIRE_EVENT " + json.dumps({"type":"founder_decision",**payload},separators=(",",":")),file=sys.stderr)
+
+
+def binary_approval_decision(decision_id: str, title: str, prompt: str) -> dict:
+    return {"decision_id":decision_id,"title":title,"prompt":prompt,
+            "options":[{"value":"y","label":"Approve","summary":"Accept this artifact and continue."},
+                       {"value":"n","label":"Reject","summary":"Do not approve; stop before the next phase."}],
+            "rationale_required":False,"answer_format":"<value>"}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("idea", nargs="*", help="the product idea (omit with --session to resume)")
@@ -313,7 +325,7 @@ def main() -> None:
             decision_payload=founder_decision(result["conops_draft"])
             # Stable machine event on stderr; the human-readable question stays
             # on stdout. Consumers must never parse options back out of prose.
-            print("REQUIRE_EVENT " + json.dumps(decision_payload,separators=(",",":")),file=sys.stderr)
+            emit_founder_decision(decision_payload)
         if persona:
             from .interviewee import decision_answer, llm_answer, scripted_answer
             history = [{"role": getattr(m, "type", "unknown"), "content": str(m.content)}
@@ -506,6 +518,8 @@ def main() -> None:
         with (outdir/"audit.jsonl").open("a") as fh: fh.write(json.dumps(record)+"\n")
         print("  boundary=hands-free-gate gate=intent action=accept source=persona decision=continue", file=sys.stderr)
     else:
+        approval=binary_approval_decision("intent-approval","Approve the intent model","Approve this intent model?")
+        emit_founder_decision(approval)
         ok = input("\nApprove this intent model? [y/N] ").strip().lower()
     if ok != "y":
         cause = (verdict["rationale"] if args.expert_opinion else
