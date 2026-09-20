@@ -250,25 +250,28 @@ def question_topic(question: str) -> str | None:
 
 
 _FALLBACK_QUESTIONS = {
-    "goal": "What outcome would make this product worth building?",
-    "users": "Who operates, supports, or is affected by it, and where or when do they do that work?",
-    "flows": "Walk me through the most important operational scenario from trigger to successful outcome, including what can go wrong.",
-    "data": "What information goes in, where does it come from, and who owns it?",
-    "integrations": "Which external systems must exchange data with it?",
-    "nfrs": "During the most important user workflow, what kind of slowness, outage, or busy-period failure would make the product unacceptable?",
-    "failures": "What failure must the system handle without losing the user's work?",
-    "constraints": "What fixed deadline, budget, team, platform, or compliance constraint applies?",
-    "risks": "What assumption would most threaten the product if it proved false?",
-    "done": "What observable result will tell you the product is ready?",
-    "glossary": "Which domain terms need a precise shared meaning?",
+    "goal": "What change should people see in their work or lives if this product succeeds?",
+    "users": "Who will use, support, or be affected by this product, and in what situation?",
+    "flows": "Please walk through one important real-world use from the moment it starts to a successful result.",
+    "data": "What information does that use need, where does it come from, and who is responsible for it?",
+    "integrations": "Which existing tools or services must this product exchange information with?",
+    "nfrs": "In that important use, what kind of slowness, outage, or busy-period failure would make the product unacceptable?",
+    "failures": "If something goes wrong during that use, what must be preserved or recoverable for the user?",
+    "constraints": "What real deadline, budget, staffing, platform, legal, or policy limit must the solution respect?",
+    "risks": "Which assumption about the users, problem, or operating environment are you least certain about?",
+    "done": "What would you need to observe before calling the first useful version ready?",
+    "glossary": "Are there any business or domain terms here that different people might interpret differently?",
 }
+
+_LAST_RESORT_QUESTION = "What important product fact have we not captured yet?"
+
 
 
 def safe_question(question: str, parked_topics: list[str], target: str | None) -> str:
     """Mechanically prevent a model from re-probing a parked sub-topic."""
     topic = question_topic(question)
     if topic and topic in parked_topics:
-        return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
+        return _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
     return question
 
 
@@ -278,7 +281,7 @@ def guard_question(question: str, parked_topics: list[str], target: str | None) 
     (the behavior need stays with the interview; the tech choice moves to the
     spec stage)."""
     if engineering_default(question):
-        return _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
+        return _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
     return safe_question(question, parked_topics, target)
 
 
@@ -306,12 +309,12 @@ def unique_question(question: str, prior_questions: list[dict], target: str | No
     prior = [str(x.get("question", "")) for x in prior_questions]
     if not any(same_question_substance(question, old) for old in prior):
         return question
-    fallback = _FALLBACK_QUESTIONS.get(target or "", "What important detail have we not covered yet?")
+    fallback = _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
     if not any(same_question_substance(fallback, old) for old in prior):
         return fallback
     # A deterministic, target-specific final reframe. The graph parks the area
     # after two attempts, so this is only a compatibility safety net.
-    return f"For {_LABELS.get(target or '', 'the remaining area')}, what single missing fact should the specification preserve?"
+    return f"What else should we understand about {_LABELS.get(target or '', 'this part of the product')} before moving on?"
 
 def founder_control(text: str) -> str | None:
     """'skip' -> skip the current target area; 'enough' -> end the interview.
