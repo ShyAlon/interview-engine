@@ -187,15 +187,14 @@ def _print_usage_table(log) -> None:
 
 
 def emit_founder_decision(payload: dict) -> None:
-    """Emit one typed choice contract; human-readable prompts stay separate."""
-    print("REQUIRE_EVENT " + json.dumps({"type":"founder_decision",**payload},separators=(",",":")),file=sys.stderr)
+    """Emit one shared typed choice contract; visible prose stays separate."""
+    from vmodel_contracts.decisions import emit_decision
+    emit_decision({"type":"founder_decision",**payload})
 
 
 def binary_approval_decision(decision_id: str, title: str, prompt: str, *, context: dict | None = None) -> dict:
-    return {"decision_id":decision_id,"title":title,"prompt":prompt,**({"context":context} if context else {}),
-            "options":[{"value":"y","label":"Approve","summary":"Accept this artifact and continue."},
-                       {"value":"n","label":"Reject","summary":"Do not approve; stop before the next phase."}],
-            "rationale_required":False,"answer_format":"<value>"}
+    from vmodel_contracts.decisions import binary_decision
+    return binary_decision(decision_id,title,prompt,context=context)
 
 
 def main() -> None:

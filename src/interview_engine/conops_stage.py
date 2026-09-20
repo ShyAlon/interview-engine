@@ -95,10 +95,9 @@ def founder_decision(draft: dict) -> dict:
         option=ConceptOption.model_validate(raw)
         options.append({"value":str(index),"label":option.name,"summary":option.summary,
                         "advantages":list(option.advantages),"disadvantages":list(option.disadvantages)})
-    return {"type":"founder_decision","decision_id":CONCEPT_DECISION,
-            "title":"Choose the operating concept","prompt":"Which concept should the architecture execute?",
-            "options":options,"rationale_required":True,
-            "rationale_label":"Why is this the right concept?","answer_format":"<value> - <rationale>"}
+    from vmodel_contracts.decisions import founder_decision as decision_contract
+    return decision_contract(CONCEPT_DECISION,"Choose the operating concept","Which concept should the architecture execute?",options,
+            rationale_required=True,rationale_label="Why is this the right concept?",answer_format="<value> - <rationale>")
 
 
 def decision_reply(reply: str, options: list[dict]) -> tuple[ConceptOption, str] | None:
