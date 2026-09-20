@@ -342,3 +342,7 @@ def test_turn_parser_rejects_incomplete_or_invalid_envelope():
     assert extract_turn_json('{"question":"Q?","covered":[],"complete":false}') is None
     assert extract_turn_json('{"question":"Q?","covered":["made_up"],"thin":[],"skipped":[],"complete":false}') is None
     assert extract_turn_json('{"question":"Q?","covered":[],"thin":[],"skipped":[],"complete":false}') is not None
+
+def test_structured_turn_example_placeholder_is_not_a_real_question():
+    from interview_engine.coverage import extract_turn_json
+    assert extract_turn_json('{"question":"one short concrete question","covered":[],"thin":[],"skipped":[],"complete":false}') is None

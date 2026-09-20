@@ -331,6 +331,10 @@ def _valid_turn_object(obj) -> bool:
         return False
     if not isinstance(obj["question"], str) or not isinstance(obj["complete"], bool):
         return False
+    # The JSON example is a schema illustration, never a valid founder-facing
+    # question. Some models copy it verbatim; reject that as a contract failure.
+    if obj["question"].strip().casefold() == "one short concrete question":
+        return False
     for key in ("covered", "thin", "skipped"):
         if not isinstance(obj[key], list) or any(x not in AREA_KEYS for x in obj[key]):
             return False
