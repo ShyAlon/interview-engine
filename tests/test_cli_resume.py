@@ -339,3 +339,13 @@ def test_intent_reject_records_redo_and_returns_to_typed_concept(monkeypatch,tmp
     source=Path(cli.__file__).read_text()
     assert '"event":"gate.redo"' in source and 'emit_founder_decision(founder_decision(result["conops_draft"]))' in source
     assert 'graph.update_state(cfg,{"conops":result["conops"]})' in source
+
+def test_intent_approval_carries_selected_concept_and_founder_reason():
+    from interview_engine.cli import binary_approval_decision
+    event=binary_approval_decision('intent-approval','Approve','Approve?',context={
+        'label':'Selected concept','value':'PWA',
+        'reason':'You stated you chose this concept because it works in every browser'})
+    assert event['context']=={'label':'Selected concept','value':'PWA','reason':'You stated you chose this concept because it works in every browser'}
+    source=Path(cli.__file__).read_text()
+    assert 'concept_decision=result["conops"]["decision"]' in source
+    assert 'concept_decision["selected_concept"]' in source and "concept_decision['rationale']" in source

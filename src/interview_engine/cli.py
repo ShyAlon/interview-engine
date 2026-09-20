@@ -191,8 +191,8 @@ def emit_founder_decision(payload: dict) -> None:
     print("REQUIRE_EVENT " + json.dumps({"type":"founder_decision",**payload},separators=(",",":")),file=sys.stderr)
 
 
-def binary_approval_decision(decision_id: str, title: str, prompt: str) -> dict:
-    return {"decision_id":decision_id,"title":title,"prompt":prompt,
+def binary_approval_decision(decision_id: str, title: str, prompt: str, *, context: dict | None = None) -> dict:
+    return {"decision_id":decision_id,"title":title,"prompt":prompt,**({"context":context} if context else {}),
             "options":[{"value":"y","label":"Approve","summary":"Accept this artifact and continue."},
                        {"value":"n","label":"Reject","summary":"Do not approve; stop before the next phase."}],
             "rationale_required":False,"answer_format":"<value>"}
@@ -520,7 +520,11 @@ def main() -> None:
     else:
         from .conops_stage import founder_decision,finalize,render_conops
         while True:
-            approval=binary_approval_decision("intent-approval","Approve the intent model","Approve this intent model?")
+            concept_decision=result["conops"]["decision"]
+            approval=binary_approval_decision(
+                "intent-approval","Approve the intent model","Approve this intent model?",
+                context={"label":"Selected concept","value":concept_decision["selected_concept"],
+                         "reason":f"You stated you chose this concept because {concept_decision['rationale']}"})
             emit_founder_decision(approval)
             ok = input("\nApprove this intent model? [y/N] ").strip().lower()
             if ok == "y":break
