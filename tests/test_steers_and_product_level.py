@@ -434,7 +434,7 @@ def test_latency_budget_is_engineering_owned_and_rephrased_for_founder(monkeypat
     }, {"configurable": {"thread_id": "latency-founder-language"}})
     asked = result["messages"][-1].content.lower()
     assert "latency" not in asked and "seconds" not in asked
-    assert "hurt the business" in asked
+    assert "important user workflow" in asked and "unacceptable" in asked
     assumption = next(d for d in result["delegated_decisions"]
                       if "interactive response-time target" in d["statement"])
     assert "2 seconds" in assumption["statement"]

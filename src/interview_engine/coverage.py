@@ -255,7 +255,7 @@ _FALLBACK_QUESTIONS = {
     "flows": "Walk me through the most important operational scenario from trigger to successful outcome, including what can go wrong.",
     "data": "What information goes in, where does it come from, and who owns it?",
     "integrations": "Which external systems must exchange data with it?",
-    "nfrs": "Which would hurt the business most: users waiting during ordinary work, the service being unavailable, or work piling up at busy times?",
+    "nfrs": "During the most important user workflow, what kind of slowness, outage, or busy-period failure would make the product unacceptable?",
     "failures": "What failure must the system handle without losing the user's work?",
     "constraints": "What fixed deadline, budget, team, platform, or compliance constraint applies?",
     "risks": "What assumption would most threaten the product if it proved false?",
