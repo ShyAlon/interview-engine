@@ -242,7 +242,7 @@ def test_marker_turn_skips_parse_and_retry(monkeypatch):
 
 
 def test_coverage_map_render():
-    from interview_engine.cli import render_coverage_markdown
+    from interview_engine.rendering import render_coverage_markdown
     cov = dict(initial_coverage(), goal="covered", users="skipped", nfrs="thin")
     md = render_coverage_markdown(cov)
     assert "**Covered:** goal & core value" in md

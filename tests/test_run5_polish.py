@@ -116,7 +116,7 @@ def test_model_cannot_close_nfrs_without_numbers(monkeypatch):
 # --- 3d: contradiction flag ---
 
 def test_generic_product_word_is_not_a_contradiction():
-    from interview_engine.cli import render_intent_markdown
+    from interview_engine.rendering import render_intent_markdown
     from vmodel_contracts import IntentModel
     intent = IntentModel.model_validate({
         "session_id": "x", "problem_statement": "a supply chain optimization application",
@@ -130,7 +130,7 @@ def test_generic_product_word_is_not_a_contradiction():
 
 
 def test_real_overlap_still_flagged():
-    from interview_engine.cli import render_intent_markdown
+    from interview_engine.rendering import render_intent_markdown
     from vmodel_contracts import IntentModel
     intent = IntentModel.model_validate({
         "session_id": "x", "problem_statement": "a supply chain optimization application",

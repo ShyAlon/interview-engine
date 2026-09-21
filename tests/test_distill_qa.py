@@ -63,7 +63,7 @@ def test_solution_language_detection():
 
 
 def test_renderer_splits_explicit_and_candidate_exclusions():
-    from interview_engine.cli import render_intent_markdown
+    from interview_engine.rendering import render_intent_markdown
     from vmodel_contracts import IntentModel
     intent = IntentModel(
         session_id="t", problem_statement="help managers predict and preempt supply issues",
@@ -82,7 +82,7 @@ def test_renderer_splits_explicit_and_candidate_exclusions():
 
 
 def test_renderer_new_sections():
-    from interview_engine.cli import render_intent_markdown
+    from interview_engine.rendering import render_intent_markdown
     from vmodel_contracts import IntentModel
     intent = IntentModel(
         session_id="t", problem_statement="p", target_users=["u"], core_value_proposition="v",

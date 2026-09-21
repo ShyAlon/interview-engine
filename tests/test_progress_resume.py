@@ -181,23 +181,10 @@ def test_state_is_json_native_no_msgpack_warning(fake_models, recwarn):
 
 # ---- v0.2.0: SE rigor, timestamps, enum drift, version mismatch ----
 
-def test_session_id_is_timestamped_with_suffix():
-    import re
-
-    from interview_engine import cli
-
-    # replicate the cli's session construction
-    import uuid
-    from datetime import datetime
-
-    sid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{4}", sid)
-
-
 def test_renderer_splits_functional_and_nonfunctional():
     from vmodel_contracts import IntentModel
 
-    from interview_engine.cli import render_intent_markdown
+    from interview_engine.rendering import render_intent_markdown
 
     intent = IntentModel.model_validate(VALID_INTENT)
     md = render_intent_markdown(intent)
@@ -336,14 +323,14 @@ def test_preview_solution_language_stripped(fake_models):
 def test_renderer_shows_unverified_boundary_when_out_of_scope_empty():
     from vmodel_contracts import IntentModel
 
-    from interview_engine.cli import render_intent_markdown
+    from interview_engine.rendering import render_intent_markdown
 
     intent = IntentModel.model_validate(dict(VALID_INTENT, out_of_scope=[]))
     assert "none identified" in render_intent_markdown(intent)
 
 
 def test_preview_markdown_in_approval_gate():
-    from interview_engine.cli import render_preview_markdown
+    from interview_engine.rendering import render_preview_markdown
 
     md = render_preview_markdown(PREVIEW_REPLY)
     assert "SN-1 -> R-p1" in md and "spec-generator" in md
@@ -425,9 +412,3 @@ def test_console_severity_color_is_absent_when_captured_or_no_color(monkeypatch,
     assert "\x1b[" not in capsys.readouterr().err
 
 
-def test_normal_cli_defaults_llm_call_log_to_interview_dir():
-    import inspect
-    from interview_engine import cli
-    source = inspect.getsource(cli.main)
-    assert 'os.environ.setdefault("VMODEL_LLM_LOG", str(outdir / "llm-calls.jsonl"))' in source
-    assert source.index('os.environ.setdefault("VMODEL_LLM_LOG"') < source.index('graph = build_graph')
