@@ -7,10 +7,12 @@ text. Control decisions use protocol enums and identifiers exclusively.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hmac
+import os
 from threading import RLock
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from vmodel_contracts.interactive import (
     EngineSnapshot, EventType, InputRequest, InputResponse, InteractiveEvent,
@@ -102,19 +104,26 @@ class ProtocolFailure(Exception):
     def __init__(self,code:ProtocolErrorCode,detail:str):self.code,self.detail=code,detail
 
 
-def create_app(registry:SessionRegistry|None=None)->FastAPI:
+def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)->FastAPI:
     sessions=registry or SessionRegistry();app=FastAPI(title="Requi.re interview engine",version="1")
+    expected_token=service_token if service_token is not None else os.environ.get("INTERVIEW_ENGINE_TOKEN","local-interview-engine-token")
+    if not expected_token:raise RuntimeError("INTERVIEW_ENGINE_TOKEN must not be empty")
 
-    @app.post("/v1/sessions",response_model=StartSessionResponse,status_code=201)
+    def authenticate(x_interview_engine_token:str|None=Header(default=None)):
+        if x_interview_engine_token is None or not hmac.compare_digest(x_interview_engine_token,expected_token):
+            raise HTTPException(401,"invalid interview engine service token")
+
+
+    @app.post("/v1/sessions",response_model=StartSessionResponse,status_code=201,dependencies=[Depends(authenticate)])
     def start(request:StartSessionRequest):
         session,event=sessions.start(request);return StartSessionResponse(snapshot=session.snapshot(),accepted_event=event)
 
-    @app.get("/v1/sessions/{session_id}",response_model=EngineSnapshot)
+    @app.get("/v1/sessions/{session_id}",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
     def snapshot(session_id:str):
         try:return sessions.get(session_id).snapshot()
         except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
 
-    @app.post("/v1/sessions/{session_id}/inputs/{input_id}",response_model=SubmitInputResponse)
+    @app.post("/v1/sessions/{session_id}/inputs/{input_id}",response_model=SubmitInputResponse,dependencies=[Depends(authenticate)])
     def submit(session_id:str,input_id:UUID,response:InputResponse):
         if input_id != response.input_id:
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail="path and body input IDs differ").model_dump(mode="json"))

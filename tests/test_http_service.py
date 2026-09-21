@@ -5,9 +5,12 @@ from vmodel_contracts.interactive import (
 )
 from interview_engine.http_service import SessionRegistry,create_app
 
+TOKEN='test-service-token'
+def authed(app):return TestClient(app,headers={'X-Interview-Engine-Token':TOKEN})
+
 
 def test_start_session_returns_typed_http_contract():
-    client=TestClient(create_app());r=client.post('/v1/sessions',json={
+    client=authed(create_app(service_token=TOKEN));r=client.post('/v1/sessions',json={
         'protocol_version':1,'task_id':'task-1','idea':'A virtual dungeon master','model_route':'deepseek'})
     assert r.status_code==201
     body=r.json();assert body['accepted_event']['event_type']==EventType.RUN_STARTED
@@ -16,7 +19,7 @@ def test_start_session_returns_typed_http_contract():
 
 
 def test_approval_is_single_idempotent_input_boundary():
-    registry=SessionRegistry();client=TestClient(create_app(registry));started=client.post('/v1/sessions',json={
+    registry=SessionRegistry();client=authed(create_app(registry,service_token=TOKEN));started=client.post('/v1/sessions',json={
         'protocol_version':1,'task_id':'task-1','idea':'idea','model_route':'local'}).json();sid=started['snapshot']['session_id']
     pending=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Approve intent?',options=[
         InputOption(value=1,label='Approve'),InputOption(value=0,label='Reject')])
@@ -30,7 +33,7 @@ def test_approval_is_single_idempotent_input_boundary():
 
 
 def test_stale_input_uses_error_enum_and_http_conflict():
-    registry=SessionRegistry();client=TestClient(create_app(registry));sid=client.post('/v1/sessions',json={
+    registry=SessionRegistry();client=authed(create_app(registry,service_token=TOKEN));sid=client.post('/v1/sessions',json={
         'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json()['snapshot']['session_id']
     current=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='Who uses it?')
     registry.publish(sid,EventType.INPUT_REQUESTED,phase_id=10,status=ProcessStatus.WAITING_INPUT,
@@ -47,9 +50,16 @@ class FakeProgram:
         self.finished=True;return None
 
 def test_http_session_drives_program_to_typed_input_and_completion():
-    program=FakeProgram();registry=SessionRegistry(lambda session_id,request:program);client=TestClient(create_app(registry))
+    program=FakeProgram();registry=SessionRegistry(lambda session_id,request:program);client=authed(create_app(registry,service_token=TOKEN))
     started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json()
     assert started['snapshot']['process_status']==ProcessStatus.WAITING_INPUT
     pending=started['snapshot']['open_input'];reply={'protocol_version':1,'input_id':pending['input_id'],'value':'players','actor_id':'founder'}
     done=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=reply).json()
     assert done['snapshot']['process_status']==ProcessStatus.COMPLETED
+
+
+def test_service_rejects_missing_and_incorrect_tokens():
+ app=create_app(service_token=TOKEN);payload={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}
+ assert TestClient(app).post('/v1/sessions',json=payload).status_code==401
+ assert TestClient(app,headers={'X-Interview-Engine-Token':'wrong'}).post('/v1/sessions',json=payload).status_code==401
+ assert authed(app).post('/v1/sessions',json=payload).status_code==201
