@@ -63,3 +63,33 @@ def test_service_rejects_missing_and_incorrect_tokens():
  assert TestClient(app).post('/v1/sessions',json=payload).status_code==401
  assert TestClient(app,headers={'X-Interview-Engine-Token':'wrong'}).post('/v1/sessions',json=payload).status_code==401
  assert authed(app).post('/v1/sessions',json=payload).status_code==201
+
+
+class FailOnceProgram(FakeProgram):
+    def advance(self,response=None):
+        if response is None:return self.pending
+        self.calls+=1
+        if self.calls==1:raise RuntimeError('model unavailable')
+        self.finished=True;return None
+
+def test_failed_program_advance_keeps_typed_input_retryable():
+    program=FailOnceProgram();registry=SessionRegistry(lambda session_id,request:program)
+    session,_=registry.start(__import__('vmodel_contracts.interactive',fromlist=['StartSessionRequest']).StartSessionRequest(task_id='t',idea='i',model_route='m'))
+    pending=session.open_input;response=__import__('vmodel_contracts.interactive',fromlist=['InputResponse']).InputResponse(input_id=pending.input_id,value='players',actor_id='founder')
+    import pytest
+    with pytest.raises(RuntimeError,match='model unavailable'):registry.respond(session.session_id,response)
+    restored=registry.get(session.session_id)
+    assert restored.status==ProcessStatus.WAITING_INPUT and restored.next_step==NextStep.WAIT_INPUT
+    assert restored.open_input==pending and pending.input_id not in restored.responses
+    _,snapshot=registry.respond(session.session_id,response)
+    assert snapshot.process_status==ProcessStatus.COMPLETED
+
+
+def test_failed_advance_returns_typed_retryable_service_error():
+    program=FailOnceProgram();client=authed(create_app(SessionRegistry(lambda session_id,request:program),service_token=TOKEN))
+    started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json();pending=started['snapshot']['open_input']
+    response={'protocol_version':1,'input_id':pending['input_id'],'value':'players','actor_id':'founder'}
+    failed=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
+    assert failed.status_code==503 and failed.json()['detail']['code']==ProtocolErrorCode.INTERNAL_ERROR and failed.json()['detail']['retryable'] is True
+    retried=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
+    assert retried.status_code==200 and retried.json()['snapshot']['process_status']==ProcessStatus.COMPLETED

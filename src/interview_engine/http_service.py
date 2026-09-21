@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hmac
+import logging
 import os
 from threading import RLock
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+
+log=logging.getLogger("interview_engine.http")
 
 from vmodel_contracts.interactive import (
     EngineSnapshot, EventType, InputRequest, InputResponse, InteractiveEvent,
@@ -81,11 +84,16 @@ class SessionRegistry:
                 raise ProtocolFailure(ProtocolErrorCode.DUPLICATE_RESPONSE,"input already has a different response")
             if session.open_input is None:raise ProtocolFailure(ProtocolErrorCode.UNKNOWN_INPUT,"session has no open input")
             if session.open_input.input_id != response.input_id:raise ProtocolFailure(ProtocolErrorCode.STALE_INPUT,"input is no longer open")
-            session.responses[response.input_id]=response;session.open_input=None;session.sequence+=1
-            session.status=ProcessStatus.RUNNING;session.next_step=NextStep.RUN
+            prior=(session.sequence,session.status,session.next_step,session.open_input)
+            session.sequence+=1;session.status=ProcessStatus.RUNNING;session.next_step=NextStep.RUN
             accepted=self._event(session,EventType.INPUT_ACCEPTED)
+            try:
+                pending=session.program.advance(response) if session.program is not None else None
+            except Exception:
+                session.sequence,session.status,session.next_step,session.open_input=prior
+                raise
+            session.responses[response.input_id]=response;session.open_input=None
             if session.program is not None:
-                pending=session.program.advance(response)
                 session.sequence+=1;session.open_input=pending
                 if session.program.finished:
                     session.status=ProcessStatus.COMPLETED;session.next_step=NextStep.COMPLETE
@@ -116,7 +124,11 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
 
     @app.post("/v1/sessions",response_model=StartSessionResponse,status_code=201,dependencies=[Depends(authenticate)])
     def start(request:StartSessionRequest):
-        session,event=sessions.start(request);return StartSessionResponse(snapshot=session.snapshot(),accepted_event=event)
+        try:session,event=sessions.start(request)
+        except Exception as exc:
+            log.exception("interview session start failed task=%s",request.task_id)
+            raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed during start: {type(exc).__name__}",retryable=True).model_dump(mode="json"))
+        return StartSessionResponse(snapshot=session.snapshot(),accepted_event=event)
 
     @app.get("/v1/sessions/{session_id}",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
     def snapshot(session_id:str):
@@ -132,6 +144,9 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
         except ProtocolFailure as failure:
             status=409 if failure.code in (ProtocolErrorCode.STALE_INPUT,ProtocolErrorCode.DUPLICATE_RESPONSE) else 422
             raise HTTPException(status,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+        except Exception as exc:
+            log.exception("interview input advance failed session=%s input=%s",session_id,input_id)
+            raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed while advancing input: {type(exc).__name__}",retryable=True).model_dump(mode="json"))
         return SubmitInputResponse(accepted_event=event,snapshot=state)
 
     app.state.sessions=sessions

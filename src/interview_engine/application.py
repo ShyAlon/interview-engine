@@ -40,9 +40,9 @@ class InterviewApplication:
                 if value == 1:self._finish();return None
                 if value == 0:raise ValueError('intent rejection requires a new interview generation')
                 raise ValueError('approval response must use a declared option value')
-            self.state={'messages':[HumanMessage(content=str(value))]};self.open_input=None
+            self.state={'messages':[HumanMessage(content=str(value))]}
         while not self.finished:
-            self.result=self.graph.invoke(self.state,self.cfg);self.state=None
+            self.result=self.graph.invoke(self.state,self.cfg);self.state=None;self.open_input=None
             verdict=self.result.get('verdict')
             if verdict and not verdict['accepted']:
                 self.finished=True;raise ValueError(verdict['decline_message'])
