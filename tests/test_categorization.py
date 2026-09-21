@@ -141,3 +141,26 @@ def test_typesafe_observed_rate_estimates_cost_and_labels_it(monkeypatch):
     result=TypeSafeProvider(Client(),usd_per_mtok=.0322580645).classify(request())
     assert result.cost_usd==pytest.approx(.0003)
     assert result.pricing_status=='estimated_observed_dashboard'
+
+
+def test_llm_adapter_normalizes_typed_answer_envelopes_before_membership():
+    from interview_engine.categorization_providers import llm_answers
+    from interview_engine.telemetry import UsageLog
+    class Model:
+        def invoke(self,prompt):
+            return SimpleNamespace(content='{"relevance":{"choice":"addressed","confidence":0.91},"covers_goal":{"noul":0.8},"_confidence":{"covers_goal":0.7}}',usage_metadata={})
+    req=ClassificationRequest('coverage','answer',{
+        'relevance':ChoiceQuestion('relevant',{'addressed':'yes','dodged':'no'}),
+        'covers_goal':NoulQuestion('goal')})
+    answers=llm_answers(req,Model(),UsageLog('s'))
+    assert answers['relevance'].value=='addressed' and answers['relevance'].confidence==.91
+    assert answers['covers_goal'].value==.8 and answers['covers_goal'].confidence==.7
+
+def test_llm_adapter_rejects_ambiguous_wrapped_answer_cleanly():
+    from interview_engine.categorization_providers import llm_answers
+    from interview_engine.telemetry import UsageLog
+    class Model:
+        def invoke(self,prompt):
+            return SimpleNamespace(content='{"label":{"choice":"x","value":"x"},"_confidence":{}}',usage_metadata={})
+    with pytest.raises(ValueError,match='invalid wrapped label answer keys'):
+        llm_answers(ClassificationRequest('scope','x',{'label':ChoiceQuestion('x',{'x':'x'})}),Model(),UsageLog('s'))
