@@ -16,6 +16,7 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from .errors import UserFacingError
 
 log=logging.getLogger("interview_engine.http")
 
@@ -159,6 +160,9 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
     @app.post("/v1/sessions",response_model=StartSessionResponse,status_code=201,dependencies=[Depends(authenticate)])
     def start(request:StartSessionRequest):
         try:session,event=sessions.start(request)
+        except UserFacingError as exc:
+            log.warning("interview session start needs action task=%s error=%s",request.task_id,exc.render().replace("\n"," | "))
+            raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
         except Exception as exc:
             log.exception("interview session start failed task=%s",request.task_id)
             raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed during start: {type(exc).__name__}",retryable=True).model_dump(mode="json"))
@@ -178,6 +182,9 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
         except ProtocolFailure as failure:
             status=409 if failure.code in (ProtocolErrorCode.STALE_INPUT,ProtocolErrorCode.DUPLICATE_RESPONSE) else 422
             raise HTTPException(status,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+        except UserFacingError as exc:
+            log.warning("interview input needs action session=%s input=%s error=%s",session_id,input_id,exc.render().replace("\n"," | "))
+            raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
         except Exception as exc:
             log.exception("interview input advance failed session=%s input=%s",session_id,input_id)
             raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed while advancing input: {type(exc).__name__}",retryable=True).model_dump(mode="json"))

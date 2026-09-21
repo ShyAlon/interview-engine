@@ -113,3 +113,21 @@ def test_conops_tradeoff_options_cross_typed_http_contract():
         'advantages':['Fast rollout','One codebase'],'disadvantages':['Platform limits']}
     typed=InputOption.model_validate(option)
     assert typed.advantages==option['advantages'] and typed.disadvantages==option['disadvantages']
+
+
+class UserActionProgram(FakeProgram):
+    def advance(self,response=None):
+        if response is None:return self.pending
+        from interview_engine.errors import UserFacingError
+        raise UserFacingError('stage conops needs a stronger model.','local model returned invalid output.','switch CONOPS to a stronger model and retry.')
+
+def test_user_facing_error_keeps_actionable_structure():
+    program=UserActionProgram();client=authed(create_app(SessionRegistry(lambda session_id,request:program),service_token=TOKEN))
+    started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json();pending=started['snapshot']['open_input']
+    response={'protocol_version':1,'input_id':pending['input_id'],'value':'players','actor_id':'founder'}
+    failed=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
+    detail=failed.json()['detail']
+    assert failed.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE and detail['retryable'] is False
+    assert 'Error: stage conops needs a stronger model.' in detail['detail']
+    assert 'Likely cause: local model returned invalid output.' in detail['detail']
+    assert 'Next: switch CONOPS to a stronger model and retry.' in detail['detail']
