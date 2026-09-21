@@ -7,6 +7,8 @@ text. Control decisions use protocol enums and identifiers exclusively.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+from pathlib import Path
 import hmac
 import logging
 import os
@@ -35,6 +37,7 @@ class EngineSession:
     open_input: InputRequest | None = None
     responses: dict[UUID, InputResponse] = field(default_factory=dict)
     program: object | None = None
+    request: StartSessionRequest | None = None
 
     def snapshot(self) -> EngineSnapshot:
         return EngineSnapshot(session_id=self.session_id,task_id=self.task_id,sequence=self.sequence,
@@ -43,15 +46,16 @@ class EngineSession:
 
 class SessionRegistry:
     """Thread-safe application port behind the HTTP adapter."""
-    def __init__(self,program_factory=None):
+    def __init__(self,program_factory=None,state_dir:Path|str|None=None):
         self._sessions: dict[str,EngineSession]={}
         self._program_factory=program_factory
+        self._state_dir=Path(state_dir) if state_dir is not None else None
         self._lock=RLock()
 
     def start(self, request: StartSessionRequest) -> tuple[EngineSession,InteractiveEvent]:
         with self._lock:
             session=EngineSession(session_id=str(uuid4()),task_id=request.task_id,sequence=1,
-                status=ProcessStatus.RUNNING,next_step=NextStep.RUN)
+                status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
             self._sessions[session.session_id]=session
             started=self._event(session,EventType.RUN_STARTED)
             if self._program_factory is not None:
@@ -59,11 +63,15 @@ class SessionRegistry:
                 pending=session.program.advance()
                 if pending is not None:
                     session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+            self._save(session)
             return session,started
 
     def get(self, session_id: str) -> EngineSession:
         with self._lock:
             session=self._sessions.get(session_id)
+            if session is None:
+                session=self._load(session_id)
+                if session is not None:self._sessions[session_id]=session
             if session is None: raise KeyError(session_id)
             return session
 
@@ -72,7 +80,7 @@ class SessionRegistry:
                 input_request: InputRequest | None=None) -> InteractiveEvent:
         with self._lock:
             session=self.get(session_id);session.sequence+=1;session.phase_id=phase_id
-            session.status=status;session.next_step=next_step;session.open_input=input_request
+            session.status=status;session.next_step=next_step;session.open_input=input_request;self._save(session)
             return self._event(session,event_type,input_request=input_request)
 
     def respond(self, session_id: str, response: InputResponse) -> tuple[InteractiveEvent,EngineSnapshot]:
@@ -99,7 +107,33 @@ class SessionRegistry:
                     session.status=ProcessStatus.COMPLETED;session.next_step=NextStep.COMPLETE
                 else:
                     session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+            self._save(session)
             return accepted,session.snapshot()
+
+    def _state_path(self,session_id:str)->Path|None:
+        return self._state_dir/session_id/'interview'/'http-session.json' if self._state_dir is not None else None
+
+    def _save(self,session:EngineSession)->None:
+        path=self._state_path(session.session_id)
+        if path is None:return
+        path.parent.mkdir(parents=True,exist_ok=True)
+        payload={"session_id":session.session_id,"task_id":session.task_id,"phase_id":session.phase_id,"sequence":session.sequence,
+            "status":int(session.status),"next_step":int(session.next_step),"open_input":session.open_input.model_dump(mode="json") if session.open_input else None,
+            "responses":[response.model_dump(mode="json") for response in session.responses.values()],"request":session.request.model_dump(mode="json") if session.request else None}
+        temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(payload));temporary.replace(path)
+
+    def _load(self,session_id:str)->EngineSession|None:
+        path=self._state_path(session_id)
+        if path is None or not path.exists():return None
+        payload=json.loads(path.read_text());request=StartSessionRequest.model_validate(payload["request"])
+        session=EngineSession(session_id=payload["session_id"],task_id=payload["task_id"],phase_id=payload["phase_id"],sequence=payload["sequence"],
+            status=ProcessStatus(payload["status"]),next_step=NextStep(payload["next_step"]),
+            open_input=InputRequest.model_validate(payload["open_input"]) if payload["open_input"] else None,request=request)
+        session.responses={response.input_id:response for response in (InputResponse.model_validate(item) for item in payload["responses"])}
+        if self._program_factory is not None:
+            session.program=self._program_factory(session.session_id,request)
+            session.program.open_input=session.open_input
+        return session
 
     @staticmethod
     def _event(session: EngineSession,event_type: EventType,*,input_request: InputRequest|None=None)->InteractiveEvent:
@@ -157,4 +191,5 @@ def default_program_factory(session_id,request):
     from .application import InterviewApplication
     return InterviewApplication(session_id,request.task_id,request.idea)
 
-app=create_app(SessionRegistry(default_program_factory))
+from vmodel_contracts.runtime import artifacts_root
+app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))

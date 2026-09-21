@@ -93,3 +93,15 @@ def test_failed_advance_returns_typed_retryable_service_error():
     assert failed.status_code==503 and failed.json()['detail']['code']==ProtocolErrorCode.INTERNAL_ERROR and failed.json()['detail']['retryable'] is True
     retried=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
     assert retried.status_code==200 and retried.json()['snapshot']['process_status']==ProcessStatus.COMPLETED
+
+
+def test_registry_restores_open_input_after_engine_restart(tmp_path):
+    first_program=FakeProgram();first=SessionRegistry(lambda session_id,request:first_program,state_dir=tmp_path)
+    request=__import__('vmodel_contracts.interactive',fromlist=['StartSessionRequest']).StartSessionRequest(task_id='t',idea='i',model_route='m')
+    session,_=first.start(request);pending=session.open_input
+    second_program=FakeProgram();restarted=SessionRegistry(lambda session_id,request:second_program,state_dir=tmp_path)
+    restored=restarted.get(session.session_id)
+    assert restored.open_input==pending and restored.status==ProcessStatus.WAITING_INPUT
+    response=__import__('vmodel_contracts.interactive',fromlist=['InputResponse']).InputResponse(input_id=pending.input_id,value='players',actor_id='founder')
+    _,snapshot=restarted.respond(session.session_id,response)
+    assert snapshot.process_status==ProcessStatus.COMPLETED
