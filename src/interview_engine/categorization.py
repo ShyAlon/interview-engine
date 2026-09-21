@@ -157,12 +157,17 @@ class TypeSafeProvider:
     def available() -> bool:
         import importlib.util
         return importlib.util.find_spec("typesafe_sdk") is not None
-    def __init__(self, client=None, *, model: str = "jev-latest", usage_log=None):
+    def __init__(self, client=None, *, api_key: str | None = None,
+                 model: str = "jev-latest", usage_log=None):
         if client is None:
             if not self.available():
                 raise RuntimeError("typesafe-sdk is not installed in this Python runtime")
+            if not api_key:
+                raise RuntimeError("TYPESAFE_API_KEY is not configured")
             from typesafe_sdk import TypeSafeClient
-            client = TypeSafeClient()
+            # Never depend on whether the SDK happens to load dotenv. Runtime
+            # configuration has one resolver and the adapter passes it through.
+            client = TypeSafeClient(api_key=api_key)
         self.client, self.model, self.usage_log = client, model, usage_log
 
     def classify(self, request: ClassificationRequest) -> ProviderResult:
@@ -231,9 +236,10 @@ def build_categorizer(adapters: Mapping[str, Mapping[str, ClassificationProvider
             if name == "jev":
                 if not _env("TYPESAFE_API_KEY"):
                     continue  # disabled/unavailable: deterministic chain fallback
+                # Registry assembly owns provider construction. Never create
+                # a network client here: conformance tests and business call
+                # sites stay hermetic regardless of ambient dotenv state.
                 provider = available.get("jev")
-                if provider is None and TypeSafeProvider.available():
-                    provider = TypeSafeProvider()
                 if provider is None:
                     continue
             else:

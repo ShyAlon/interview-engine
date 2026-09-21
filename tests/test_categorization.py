@@ -111,3 +111,23 @@ def test_typesafe_adapter_records_zero_tokens_when_sdk_omits_usage(monkeypatch):
     monkeypatch.setitem(__import__('sys').modules,'typesafe_sdk',SimpleNamespace(Choice=lambda **k:k,Noul=lambda **k:k,Score=lambda **k:k))
     result=TypeSafeProvider(Client()).classify(request())
     assert result.input_tokens==0 and result.output_tokens==0
+
+
+def test_registry_never_constructs_network_client_from_ambient_key(monkeypatch):
+    import interview_engine.categorization as module
+    monkeypatch.setattr(module,"_env",lambda key: "ambient" if key=="TYPESAFE_API_KEY" else None)
+    monkeypatch.setattr(TypeSafeProvider,"available",staticmethod(lambda:True))
+    rules=Provider("rules","x")
+    cat=build_categorizer({"scope":{"rules":rules}},lambda _:None)
+    assert cat.classify(request()).provider=="rules"
+
+
+def test_typesafe_client_receives_resolved_key_explicitly(monkeypatch):
+    seen={}
+    class Client:
+        def __init__(self,**kwargs): seen.update(kwargs)
+    fake=SimpleNamespace(TypeSafeClient=Client)
+    monkeypatch.setitem(__import__('sys').modules,'typesafe_sdk',fake)
+    monkeypatch.setattr(TypeSafeProvider,"available",staticmethod(lambda:True))
+    TypeSafeProvider(api_key="resolved-test-key")
+    assert seen=={"api_key":"resolved-test-key"}

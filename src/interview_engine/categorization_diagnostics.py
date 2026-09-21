@@ -4,6 +4,7 @@ import argparse,json
 from dataclasses import asdict
 from .categorization import (ChoiceQuestion,ClassificationRequest,FunctionProvider,
     ProviderChain,TypeSafeProvider)
+from .model_config import _env
 
 
 def emit(event, **fields): print(json.dumps({"event":event,**fields},sort_keys=True),flush=True)
@@ -23,7 +24,11 @@ def contracts():
     if result.provider!="rules" or tuple(audits[-1].fallback_path)!=("typesafe","rules"):raise RuntimeError("fallback contract deviated")
 
 def live():
-    request=scope_request();provider=TypeSafeProvider();emit("request",slot=request.slot,state=request.state,questions={k:asdict(v) for k,v in request.questions.items()},provider_chain=[provider.name],model=provider.model)
+    api_key=_env("TYPESAFE_API_KEY")
+    if not api_key:
+        emit("skip",reason="TYPESAFE_API_KEY is absent")
+        return
+    request=scope_request();provider=TypeSafeProvider(api_key=api_key);emit("request",slot=request.slot,state=request.state,questions={k:asdict(v) for k,v in request.questions.items()},provider_chain=[provider.name],model=provider.model)
     try: result=provider.classify(request)
     except Exception as exc:
         emit("failure",slot=request.slot,provider_chain=[provider.name],request={"state":request.state,"questions":list(request.questions)},response={"type":type(exc).__name__,"message":str(exc)})

@@ -80,7 +80,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from .categorization_providers import intent_rules, llm_answers, unavailable_rules
         def _submission(request):
             return IntakeSubmission.model_validate(request.context["submission"])
-        jev = TypeSafeProvider(usage_log=usage_log) if model_config._env("TYPESAFE_API_KEY") and TypeSafeProvider.available() else None
+        jev = TypeSafeProvider(api_key=model_config._env("TYPESAFE_API_KEY"), usage_log=usage_log) if model_config._env("TYPESAFE_API_KEY") and TypeSafeProvider.available() else None
         probing_cfg = model_config.for_stage("probing")
         adapters = {
             "scope": {
