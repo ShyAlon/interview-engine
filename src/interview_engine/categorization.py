@@ -175,7 +175,7 @@ class TypeSafeProvider:
 def configured_provider_names(slot: str) -> tuple[str, ...]:
     """Single on/off registry: per-slot override, then global, then safe default."""
     raw = (_env(f"INTERVIEW_ENGINE_CATEGORIZER_{slot.upper()}")
-           or _env("INTERVIEW_ENGINE_CATEGORIZERS") or "llm,rules")
+           or _env("INTERVIEW_ENGINE_CATEGORIZERS") or "jev,llm,rules")
     names = tuple(x.strip().lower() for x in raw.split(",") if x.strip())
     allowed = {"jev", "llm", "rules"}
     unknown = [x for x in names if x not in allowed]

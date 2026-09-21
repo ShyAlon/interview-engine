@@ -127,3 +127,64 @@ def verdict_with_llm(sub: IntakeSubmission, chat_model, usage_log=None, raw_outp
             SCOPE_DECLINE_PREFIX + " " + f"{data.reason} - so we'll stop here rather than hand you a spec that doesn't fit."
         ),
     )
+
+# Provider-neutral adapters for the categorization registry. They preserve the
+# ScopeVerdict contract while moving provider selection out of graph code.
+def categorization_request(sub: IntakeSubmission):
+    from .categorization import ChoiceQuestion, ClassificationRequest
+    return ClassificationRequest(
+        slot="scope",
+        state=("Product idea:\n" + sub.free_text + "\nKnown answers:\n"
+               + "\n".join(f"{k}: {v}" for k, v in sub.known_answers.items())),
+        questions={
+            "accepted": ChoiceQuestion(
+                "Is this an interactive software application delivered on web or mobile?",
+                {"accepted": "Interactive web/mobile software, including games",
+                 "rejected": "Non-software, hardware/firmware, or software without an interactive web/mobile surface"}),
+            "archetype": ChoiceQuestion(
+                "Select the product archetype that best describes the idea",
+                {value.value: value.value.replace("_", " ") for value in AppArchetype}),
+        },
+        context={"submission": sub.model_dump(mode="json")},
+    )
+
+
+def rules_provider(sub: IntakeSubmission):
+    from .categorization import ClassificationAnswer
+    verdict = verdict_deterministic(sub)
+    if verdict is None:
+        raise ValueError("deterministic scope signals are mixed or silent")
+    return {
+        "accepted": ClassificationAnswer("accepted" if verdict.accepted else "rejected", verdict.confidence),
+        "archetype": ClassificationAnswer(verdict.archetype.value, verdict.confidence),
+    }
+
+
+def llm_provider(sub: IntakeSubmission, chat_model, usage_log=None, raw_output_log=None):
+    from .categorization import ClassificationAnswer
+    verdict = verdict_with_llm(sub, chat_model, usage_log, raw_output_log)
+    return {
+        "accepted": ClassificationAnswer("accepted" if verdict.accepted else "rejected", verdict.confidence),
+        "archetype": ClassificationAnswer(verdict.archetype.value, verdict.confidence),
+    }
+
+
+def verdict_with_categorizer(sub: IntakeSubmission, categorizer) -> ScopeVerdict:
+    result = categorizer.classify(categorization_request(sub))
+    accepted_answer = result.answers["accepted"]
+    archetype_answer = result.answers["archetype"]
+    accepted = accepted_answer.value == "accepted"
+    archetype = AppArchetype(str(archetype_answer.value))
+    confidence_values = [x for x in (accepted_answer.confidence, archetype_answer.confidence) if x is not None]
+    confidence = min(confidence_values) if confidence_values else 0.0
+    return ScopeVerdict(
+        submission_id=sub.submission_id,
+        accepted=accepted,
+        archetype=archetype,
+        confidence=confidence,
+        deterministic_signals=classify(sub)[0] + classify(sub)[1],
+        llm_tiebreak_used=result.provider == "llm",
+        decline_message=None if accepted else (
+            SCOPE_DECLINE_PREFIX + " The product was classified outside the current interactive web/mobile scope, "
+            "so we'll stop here rather than hand you a spec that doesn't fit."),
+    )

@@ -66,22 +66,34 @@ def _clean_single_question(text: str) -> str | None:
     return candidate
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
     distill_model = model_config.build_chat_model("distillation")
     conops_model = model_config.build_chat_model("conops") if conops_enabled else None
     tiebreak_model = model_config.build_chat_model("scope_tiebreak")
+    if categorizer is None:
+        from pathlib import Path
+        from .categorization import FunctionProvider, TypeSafeProvider, build_categorizer, jsonl_audit_sink
+        def _submission(request):
+            return IntakeSubmission.model_validate(request.context["submission"])
+        scope_adapters = {
+            "jev": TypeSafeProvider() if model_config._env("TYPESAFE_API_KEY") else None,
+            "llm": FunctionProvider("llm", model_config.for_stage("scope_tiebreak").model,
+                                    lambda request: scope_gate.llm_provider(_submission(request), tiebreak_model, usage_log, raw_log)),
+            "rules": FunctionProvider("rules", "scope-signals-v1",
+                                      lambda request: scope_gate.rules_provider(_submission(request))),
+        }
+        audit_path = Path(raw_output_dir).parent / "decisions.jsonl" if raw_output_dir else Path("decisions.jsonl")
+        categorizer = build_categorizer({"scope": scope_adapters}, jsonl_audit_sink(audit_path))
 
     def node_scope_gate(state: InterviewState) -> dict:
         if "verdict" in state:  # resuming a thread: never re-pay (or re-roll) the gate
             return {}
         with track(progress, "scope_gate", "Classifying scope"):
             sub = IntakeSubmission.model_validate(state["submission"])
-            verdict = scope_gate.verdict_deterministic(sub)
-            if verdict is None:
-                verdict = scope_gate.verdict_with_llm(sub, tiebreak_model, usage_log, raw_log)
+            verdict = scope_gate.verdict_with_categorizer(sub, categorizer)
         return {"verdict": verdict.model_dump(mode="json")}
 
     def route_scope(state: InterviewState) -> str:

@@ -20,6 +20,7 @@ dependencies = [
   "langchain-core>=0.3",
   "langchain-openai>=0.2",
   "pydantic>=2.6,<3",
+  "typesafe-sdk==0.7.0",
 ]
 
 [project.optional-dependencies]

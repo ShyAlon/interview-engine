@@ -1,6 +1,6 @@
 """Deterministic gate behavior: no LLM in these tests - tiebreaker is mocked."""
-from vmodel_contracts import IntakeSubmission
-from interview_engine.scope_gate import verdict_deterministic
+from vmodel_contracts import IntakeSubmission,SCOPE_DECLINE_PREFIX
+from interview_engine.scope_gate import verdict_deterministic,verdict_with_categorizer
 from vmodel_contracts import AppArchetype
 
 
@@ -116,3 +116,23 @@ def test_tiebreak_unwraps_json_and_validates_shape():
     v = verdict_with_llm(sub("A new physical product"), Wrapped())
     assert v.accepted is False
     assert v.archetype == AppArchetype.NOT_WEB_APP
+
+def test_provider_neutral_scope_verdict_maps_classification_contract():
+    from interview_engine.categorization import ClassificationAnswer,ProviderResult
+    class Categorizer:
+        def classify(self,request):
+            assert request.slot=='scope' and set(request.questions)=={'accepted','archetype'}
+            return ProviderResult({'accepted':ClassificationAnswer('accepted',.93),'archetype':ClassificationAnswer('marketplace',.88)},'typesafe','jev-test')
+    sub=IntakeSubmission(submission_id='jev-1',founder_id='f',free_text='A marketplace')
+    verdict=verdict_with_categorizer(sub,Categorizer())
+    assert verdict.accepted is True and verdict.archetype==AppArchetype.MARKETPLACE and verdict.confidence==.88
+    assert verdict.llm_tiebreak_used is False
+
+
+def test_provider_neutral_scope_decline_is_safe_and_templated():
+    from interview_engine.categorization import ClassificationAnswer,ProviderResult
+    class Categorizer:
+        def classify(self,request):return ProviderResult({'accepted':ClassificationAnswer('rejected',.91),'archetype':ClassificationAnswer('not_web_app',.91)},'typesafe','jev-test')
+    sub=IntakeSubmission(submission_id='jev-2',founder_id='f',free_text='A bakery')
+    verdict=verdict_with_categorizer(sub,Categorizer())
+    assert verdict.accepted is False and verdict.decline_message.startswith(SCOPE_DECLINE_PREFIX)
