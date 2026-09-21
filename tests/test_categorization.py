@@ -131,3 +131,13 @@ def test_typesafe_client_receives_resolved_key_explicitly(monkeypatch):
     monkeypatch.setattr(TypeSafeProvider,"available",staticmethod(lambda:True))
     TypeSafeProvider(api_key="resolved-test-key")
     assert seen=={"api_key":"resolved-test-key"}
+
+
+def test_typesafe_observed_rate_estimates_cost_and_labels_it(monkeypatch):
+    class Client:
+        def system_one(self,**kwargs):
+            return SimpleNamespace(model='jev',usage={'input_tokens':9000,'output_tokens':300},answers={'label':SimpleNamespace(choice='x')})
+    monkeypatch.setitem(__import__('sys').modules,'typesafe_sdk',SimpleNamespace(Choice=lambda **k:k,Noul=lambda **k:k,Score=lambda **k:k))
+    result=TypeSafeProvider(Client(),usd_per_mtok=.0322580645).classify(request())
+    assert result.cost_usd==pytest.approx(.0003)
+    assert result.pricing_status=='estimated_observed_dashboard'

@@ -80,7 +80,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from .categorization_providers import intent_rules, llm_answers, unavailable_rules
         def _submission(request):
             return IntakeSubmission.model_validate(request.context["submission"])
-        jev = TypeSafeProvider(api_key=model_config._env("TYPESAFE_API_KEY"), usage_log=usage_log) if model_config._env("TYPESAFE_API_KEY") and TypeSafeProvider.available() else None
+        typesafe_rate_raw = model_config._env("TYPESAFE_USD_PER_1M_TOKENS")
+        # Default is Shy's observed dashboard effective rate (2026-09-21: $0.0003 / 9.3K tokens), not a published list price.
+        typesafe_rate = 0.0322580645 if typesafe_rate_raw is None else (None if typesafe_rate_raw.strip().lower() in {"", "off", "unpriced", "none"} else float(typesafe_rate_raw))
+        jev = TypeSafeProvider(api_key=model_config._env("TYPESAFE_API_KEY"), usage_log=usage_log, usd_per_mtok=typesafe_rate) if model_config._env("TYPESAFE_API_KEY") and TypeSafeProvider.available() else None
         probing_cfg = model_config.for_stage("probing")
         adapters = {
             "scope": {

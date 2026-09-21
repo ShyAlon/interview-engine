@@ -2,6 +2,7 @@
 KeyError 'no price for phi4' - langchain reports provider 'chatollama',
 which an exact-match ollama check missed. Local calls log $0, always."""
 from interview_engine.telemetry import UsageLog, price_for
+import pytest
 
 
 def test_chatollama_phi4_call_logs_zero_cost():
@@ -24,3 +25,8 @@ def test_unpriced_remote_usage_is_metered_without_becoming_free():
     assert rec.cost_usd is None and log.durations==[.25]
     stage=log.summary()["stages"]["categorization_scope"]
     assert stage["calls"]==1 and stage["unpriced_calls"]==1 and stage["cost_usd"]==0.0
+
+
+def test_estimated_rate_records_measured_cost_without_price_table():
+    log=UsageLog('s');rec=log.record_estimated('categorization_scope','typesafe','jev',{'input_tokens':9000,'output_tokens':300},.0322580645,.1)
+    assert rec.cost_usd == pytest.approx(.0003)

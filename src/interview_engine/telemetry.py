@@ -60,6 +60,20 @@ class UsageLog:
             self.sink(rec)
         return rec
 
+    def record_estimated(self, stage: str, provider: str, model: str, usage: dict,
+                         usd_per_mtok: float, duration_s: float | None = None) -> StageTokenUsage:
+        """Record usage priced from an explicitly identified estimated rate."""
+        rec = StageTokenUsage(
+            session_id=self.session_id, stage=stage, provider=provider, model=model,
+            prompt_tokens=int(usage.get("input_tokens", 0) or 0),
+            completion_tokens=int(usage.get("output_tokens", 0) or 0), cached_tokens=0,
+            price_per_mtok_prompt_usd=usd_per_mtok,
+            price_per_mtok_completion_usd=usd_per_mtok,
+        )
+        self.records.append(rec); self.durations.append(duration_s)
+        if self.sink: self.sink(rec)
+        return rec
+
     def record_unpriced(self, stage: str, provider: str, model: str, usage: dict,
                         duration_s: float | None = None) -> StageTokenUsage:
         """Record measured remote usage when no authoritative price exists.

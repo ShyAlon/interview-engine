@@ -21,7 +21,8 @@ def _side(result=None, *, elapsed=None, usage=None, error=None):
             "verdict":{k:v.value for k,v in result.answers.items()},
             "confidence":{k:v.confidence for k,v in result.answers.items()},
             "input_tokens":tokens_in,"output_tokens":tokens_out,
-            "latency_s":getattr(result,"latency_s",None) or elapsed,"cost_usd":cost}
+            "latency_s":getattr(result,"latency_s",None) or elapsed,"cost_usd":cost,
+            "pricing_status":getattr(result,"pricing_status","priced" if cost is not None else "unpriced")}
 
 
 def _agreement(a,b):
@@ -86,7 +87,8 @@ def render_report(paths):
                       f"- Calls: {len(valid)}",f"- Input tokens: {sum(x['input_tokens'] for x in valid)}",
                       f"- Output tokens: {sum(x['output_tokens'] for x in valid)}",
                       f"- Total latency: {sum((x['latency_s'] or 0) for x in valid):.3f}s",
-                      f"- Priced cost: ${sum((x['cost_usd'] or 0) for x in valid):.6f}",
+                      f"- Estimated/priced cost: ${sum((x['cost_usd'] or 0) for x in valid):.6f}",
+                      f"- Estimated calls (observed dashboard rate): {sum(x.get('pricing_status')=='estimated_observed_dashboard' for x in valid)}",
                       f"- Unpriced calls: {sum(x['cost_usd'] is None for x in valid)}",""]
         disagreements=[r for r in rs if not r["agreement"]]
         lines += ["### Disagreements for human review",""]

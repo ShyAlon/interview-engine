@@ -60,6 +60,7 @@ class ProviderResult:
     output_tokens: int = 0
     latency_s: float | None = None
     cost_usd: float | None = None
+    pricing_status: str = "unpriced"
 
 
 class ClassificationProvider(Protocol):
@@ -125,7 +126,7 @@ class ProviderChain:
                     output_tokens=result.output_tokens,
                     latency_s=result.latency_s,
                     cost_usd=result.cost_usd,
-                    pricing_status="priced" if result.cost_usd is not None else "unpriced",
+                    pricing_status=result.pricing_status,
                 ))
                 return result
             except Exception as exc:
@@ -158,7 +159,7 @@ class TypeSafeProvider:
         import importlib.util
         return importlib.util.find_spec("typesafe_sdk") is not None
     def __init__(self, client=None, *, api_key: str | None = None,
-                 model: str = "jev-latest", usage_log=None):
+                 model: str = "jev-latest", usage_log=None, usd_per_mtok: float | None = None):
         if client is None:
             if not self.available():
                 raise RuntimeError("typesafe-sdk is not installed in this Python runtime")
@@ -169,6 +170,7 @@ class TypeSafeProvider:
             # configuration has one resolver and the adapter passes it through.
             client = TypeSafeClient(api_key=api_key)
         self.client, self.model, self.usage_log = client, model, usage_log
+        self.usd_per_mtok = usd_per_mtok
 
     def classify(self, request: ClassificationRequest) -> ProviderResult:
         from typesafe_sdk import Choice, Noul, Score
@@ -208,12 +210,19 @@ class TypeSafeProvider:
         # and mark cost unpriced until an operator price table is configured.
         returned_model = getattr(response, "model", self.model)
         input_tokens, output_tokens = usage_value("input_tokens"), usage_value("output_tokens")
+        measured={"input_tokens": input_tokens, "output_tokens": output_tokens}
+        estimated_cost = ((input_tokens + output_tokens) * self.usd_per_mtok / 1_000_000
+                          if self.usd_per_mtok is not None else None)
         if self.usage_log is not None:
-            self.usage_log.record_unpriced("categorization_" + request.slot, self.name, returned_model,
-                                           {"input_tokens": input_tokens, "output_tokens": output_tokens},
-                                           duration_s=latency_s)
+            if self.usd_per_mtok is None:
+                self.usage_log.record_unpriced("categorization_" + request.slot, self.name, returned_model,
+                                               measured, duration_s=latency_s)
+            else:
+                self.usage_log.record_estimated("categorization_" + request.slot, self.name, returned_model,
+                                                measured, self.usd_per_mtok, duration_s=latency_s)
         return ProviderResult(answers, self.name, returned_model, input_tokens=input_tokens,
-                              output_tokens=output_tokens, latency_s=latency_s, cost_usd=None)
+                              output_tokens=output_tokens, latency_s=latency_s, cost_usd=estimated_cost,
+                              pricing_status="estimated_observed_dashboard" if estimated_cost is not None else "unpriced")
 
 
 def configured_provider_names(slot: str) -> tuple[str, ...]:
