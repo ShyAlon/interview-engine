@@ -27,6 +27,7 @@ def test_shadow_error_is_observed_but_baseline_returns(tmp_path):
     path=tmp_path/'shadow.jsonl';baseline=result('rules','accepted')
     assert ShadowCategorizer(Cat(baseline),Cat(error=TimeoutError('down')),path).classify(req()) is baseline
     row=json.loads(path.read_text());assert row['jev_error_count']==1 and row['jev']['status']=='error'
+    assert row['baseline']['cost_usd']==0.0
 
 def test_report_rolls_up_slots_and_lists_disagreements(tmp_path):
     path=tmp_path/'shadow.jsonl';baseline=result('llm','accepted',(10,4),.2,.001);jev=result('typesafe','rejected',(3,1),.05,None)

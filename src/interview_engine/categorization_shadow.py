@@ -14,6 +14,7 @@ def _side(result=None, *, elapsed=None, usage=None, error=None):
                 "input_tokens":0,"output_tokens":0,"latency_s":elapsed,"cost_usd":None}
     tokens_in=getattr(result,"input_tokens",0);tokens_out=getattr(result,"output_tokens",0)
     cost=getattr(result,"cost_usd",None)
+    if result.provider == "rules": cost=0.0
     if usage is not None:
         tokens_in=usage.prompt_tokens;tokens_out=usage.completion_tokens;cost=usage.cost_usd
     return {"status":"ok","provider":result.provider,"model":result.model,
