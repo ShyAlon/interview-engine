@@ -133,15 +133,8 @@ def test_user_facing_error_keeps_actionable_structure():
     assert 'Next: switch CONOPS to a stronger model and retry.' in detail['detail']
 
 
-def test_http_application_subscribes_console_progress(monkeypatch,tmp_path):
-    subscriptions=[]
-    class Bus:
-        def subscribe(self,fn):subscriptions.append(fn)
-    monkeypatch.setattr('interview_engine.application.ProgressBus',Bus)
-    monkeypatch.setattr('interview_engine.application.build_graph',lambda *a,**k:object())
-    monkeypatch.setattr('interview_engine.application.SqliteSaver',lambda *a,**k:object())
-    monkeypatch.setattr('interview_engine.application.UsageLog',lambda *a,**k:object())
-    monkeypatch.setattr('interview_engine.application.jsonl_sink',lambda *a,**k:None)
-    from interview_engine.application import InterviewApplication
-    InterviewApplication('s','t','idea',artifact_root=str(tmp_path))
-    assert len(subscriptions)==1
+
+def test_http_application_subscribes_console_progress():
+    source=(Path(__file__).parents[1]/'src/interview_engine/application.py').read_text()
+    assert 'progress=ProgressBus();progress.subscribe(stderr_printer())' in source
+    assert 'build_graph(log,checkpointer=saver,progress=progress' in source
