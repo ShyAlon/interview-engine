@@ -41,7 +41,11 @@ class InterviewApplication:
                 if value == 1:self._finish();return None
                 if value == 0:raise ValueError('intent rejection requires a new interview generation')
                 raise ValueError('approval response must use a declared option value')
-            self.state={'messages':[HumanMessage(content=str(value))]}
+            answer=str(value)
+            if self.open_input.rationale_required:
+                if not response.rationale:raise ValueError('typed input requires a rationale')
+                answer=f"{value} - {response.rationale}"
+            self.state={'messages':[HumanMessage(content=answer)]}
         while not self.finished:
             self.result=self.graph.invoke(self.state,self.cfg);self.state=None;self.open_input=None
             verdict=self.result.get('verdict')

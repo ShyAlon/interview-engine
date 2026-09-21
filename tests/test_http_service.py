@@ -139,3 +139,18 @@ def test_http_application_subscribes_console_progress():
     source=(Path(__file__).parents[1]/'src/interview_engine/application.py').read_text()
     assert 'progress=ProgressBus();progress.subscribe(stderr_printer())' in source
     assert 'build_graph(log,checkpointer=saver,progress=progress' in source
+
+
+class RationaleProgram(FakeProgram):
+    def __init__(self):
+        super().__init__();self.pending=self.pending.model_copy(update={'kind':InputKind.CHOICE,'options':[InputOption(value='1',label='One')],'rationale_required':True});self.received=None
+    def advance(self,response=None):
+        if response is None:return self.pending
+        self.received=response;self.finished=True;return None
+
+def test_http_input_preserves_separate_typed_rationale():
+    program=RationaleProgram();client=authed(create_app(SessionRegistry(lambda session_id,request:program),service_token=TOKEN))
+    started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json();pending=started['snapshot']['open_input']
+    response={'protocol_version':1,'input_id':pending['input_id'],'value':'1','rationale':'because it fits','actor_id':'founder'}
+    done=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
+    assert done.status_code==200 and program.received.rationale=='because it fits'
