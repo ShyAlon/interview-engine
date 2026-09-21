@@ -30,8 +30,9 @@ def _agreement(a,b):
 
 class ShadowCategorizer:
     """Return baseline decisions; run Jev concurrently and only observe it."""
-    def __init__(self, baseline, jev, jsonl_path, usage_log=None):
+    def __init__(self, baseline, jev, jsonl_path, usage_log=None, report_path=None):
         self.baseline,self.jev,self.path,self.usage_log=baseline,jev,Path(jsonl_path),usage_log
+        self.report_path=Path(report_path) if report_path else self.path.with_suffix(".md")
         self.path.parent.mkdir(parents=True,exist_ok=True)
     def active(self,slot): return self.baseline.active(slot)
     def classify(self,request):
@@ -55,6 +56,10 @@ class ShadowCategorizer:
                 "jev_fallback_count":0,"jev_error_count":int(shadow_err is not None)}
         with self.path.open("a") as f:
             f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
+        # Keep a stable, human-readable artifact current after every decision.
+        # Atomic replacement means readers never observe a half-written report.
+        tmp=self.report_path.with_suffix(self.report_path.suffix+".tmp")
+        tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
         if base_err: raise base_err
         return base
 

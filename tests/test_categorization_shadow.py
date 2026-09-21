@@ -22,6 +22,7 @@ def test_shadow_never_changes_baseline_and_appends_detailed_record(tmp_path):
     assert row['baseline']['verdict']=={'answer':'accepted'} and row['jev']['verdict']=={'answer':'rejected'}
     assert row['baseline']['input_tokens']==10 and row['jev']['output_tokens']==1
     assert row['input_ref'].startswith('sha256:') and 'secret founder input' not in path.read_text()
+    assert (tmp_path/'shadow.md').is_file() and 'Decisions: 1' in (tmp_path/'shadow.md').read_text()
 
 def test_shadow_error_is_observed_but_baseline_returns(tmp_path):
     path=tmp_path/'shadow.jsonl';baseline=result('rules','accepted')
