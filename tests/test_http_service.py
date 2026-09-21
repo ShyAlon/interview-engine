@@ -131,3 +131,17 @@ def test_user_facing_error_keeps_actionable_structure():
     assert 'Error: stage conops needs a stronger model.' in detail['detail']
     assert 'Likely cause: local model returned invalid output.' in detail['detail']
     assert 'Next: switch CONOPS to a stronger model and retry.' in detail['detail']
+
+
+def test_http_application_subscribes_console_progress(monkeypatch,tmp_path):
+    subscriptions=[]
+    class Bus:
+        def subscribe(self,fn):subscriptions.append(fn)
+    monkeypatch.setattr('interview_engine.application.ProgressBus',Bus)
+    monkeypatch.setattr('interview_engine.application.build_graph',lambda *a,**k:object())
+    monkeypatch.setattr('interview_engine.application.SqliteSaver',lambda *a,**k:object())
+    monkeypatch.setattr('interview_engine.application.UsageLog',lambda *a,**k:object())
+    monkeypatch.setattr('interview_engine.application.jsonl_sink',lambda *a,**k:None)
+    from interview_engine.application import InterviewApplication
+    InterviewApplication('s','t','idea',artifact_root=str(tmp_path))
+    assert len(subscriptions)==1

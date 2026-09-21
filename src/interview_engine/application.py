@@ -15,7 +15,7 @@ from vmodel_contracts.interactive import InputKind,InputOption,InputRequest,Inpu
 from vmodel_contracts.runtime import artifacts_root
 from .conops_stage import founder_decision,render_conops
 from .graph import build_graph
-from .progress import ProgressBus
+from .progress import ProgressBus,stderr_printer
 from .telemetry import UsageLog,jsonl_sink
 
 class InterviewApplication:
@@ -26,7 +26,8 @@ class InterviewApplication:
         db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
         saver=SqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
-        self.graph=build_graph(log,checkpointer=saver,progress=ProgressBus(),conops_enabled=True,raw_output_dir=self.outdir/'debug')
+        progress=ProgressBus();progress.subscribe(stderr_printer())
+        self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug')
         self.cfg={'configurable':{'thread_id':session_id}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
         self.state={'messages':[HumanMessage(content=idea)],'submission':submission.model_dump(mode='json')}
