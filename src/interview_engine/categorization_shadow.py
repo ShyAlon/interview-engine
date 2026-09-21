@@ -54,12 +54,16 @@ class ShadowCategorizer:
                 "input_ref":"sha256:"+hashlib.sha256(request.state.encode()).hexdigest(),
                 "baseline":baseline_side,"jev":jev_side,"agreement":_agreement(baseline_side,jev_side),
                 "jev_fallback_count":0,"jev_error_count":int(shadow_err is not None)}
-        with self.path.open("a") as f:
-            f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
-        # Keep a stable, human-readable artifact current after every decision.
-        # Atomic replacement means readers never observe a half-written report.
-        tmp=self.report_path.with_suffix(self.report_path.suffix+".tmp")
-        tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
+        try:
+            with self.path.open("a") as f:
+                f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
+            # Atomic replacement means readers never observe a half-written report.
+            tmp=self.report_path.with_suffix(self.report_path.suffix+".tmp")
+            tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
+        except Exception:
+            # Observability is never control flow. A disk/full/corrupt-report
+            # failure must not replace or block the authoritative decision.
+            pass
         if base_err: raise base_err
         return base
 

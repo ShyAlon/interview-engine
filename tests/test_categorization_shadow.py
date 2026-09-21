@@ -36,3 +36,10 @@ def test_report_rolls_up_slots_and_lists_disagreements(tmp_path):
     md=render_report([path])
     assert 'Agreement: 0/1 (0.0%)' in md and 'Input tokens: 10' in md
     assert 'Disagreements for human review' in md and 'Unpriced calls: 1' in md
+
+
+def test_observability_io_failure_never_changes_authoritative_result(tmp_path,monkeypatch):
+    baseline=result('rules','accepted')
+    shadow=ShadowCategorizer(Cat(baseline),Cat(result('typesafe','accepted')),tmp_path/'shadow.jsonl')
+    monkeypatch.setattr('interview_engine.categorization_shadow.os.fsync',lambda _fd: (_ for _ in ()).throw(OSError('disk full')))
+    assert shadow.classify(req()) is baseline
