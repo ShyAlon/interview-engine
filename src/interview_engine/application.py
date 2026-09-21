@@ -37,8 +37,9 @@ class InterviewApplication:
             if self.open_input is None or response.input_id!=self.open_input.input_id:raise ValueError('stale input')
             value=response.value
             if self.open_input.kind==InputKind.APPROVAL:
-                if bool(value):self._finish();return None
-                raise ValueError('intent rejection requires a new interview generation')
+                if value == 1:self._finish();return None
+                if value == 0:raise ValueError('intent rejection requires a new interview generation')
+                raise ValueError('approval response must use a declared option value')
             self.state={'messages':[HumanMessage(content=str(value))]};self.open_input=None
         while not self.finished:
             self.result=self.graph.invoke(self.state,self.cfg);self.state=None
