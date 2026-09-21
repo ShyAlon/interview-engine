@@ -135,6 +135,7 @@ def test_user_facing_error_keeps_actionable_structure():
 
 
 def test_http_application_subscribes_console_progress():
+    from pathlib import Path
     source=(Path(__file__).parents[1]/'src/interview_engine/application.py').read_text()
     assert 'progress=ProgressBus();progress.subscribe(stderr_printer())' in source
     assert 'build_graph(log,checkpointer=saver,progress=progress' in source
