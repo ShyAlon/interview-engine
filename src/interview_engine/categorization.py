@@ -120,7 +120,9 @@ class ProviderChain:
 
 
 class Categorizer:
-    def __init__(self, chains: Mapping[str, ProviderChain]): self._chains = dict(chains)
+    def __init__(self, chains: Mapping[str, ProviderChain], active_slots: Sequence[str] | None = None):
+        self._chains = dict(chains); self._active_slots = frozenset(active_slots or chains)
+    def active(self, slot: str) -> bool: return slot in self._active_slots
     def classify(self, request: ClassificationRequest) -> ProviderResult:
         try: chain = self._chains[request.slot]
         except KeyError as exc: raise KeyError(f"unknown categorization slot {request.slot!r}") from exc
@@ -185,7 +187,7 @@ def configured_provider_names(slot: str) -> tuple[str, ...]:
 
 
 def build_categorizer(adapters: Mapping[str, Mapping[str, ClassificationProvider]], audit: AuditSink) -> Categorizer:
-    chains = {}
+    chains = {}; active = []
     for slot, available in adapters.items():
         providers = []
         for name in configured_provider_names(slot):
@@ -197,4 +199,52 @@ def build_categorizer(adapters: Mapping[str, Mapping[str, ClassificationProvider
                 provider = available.get(name)
             if provider is not None: providers.append(provider)
         chains[slot] = ProviderChain(slot, providers, audit)
-    return Categorizer(chains)
+        explicit = _env(f"INTERVIEW_ENGINE_CATEGORIZER_{slot.upper()}") or _env("INTERVIEW_ENGINE_CATEGORIZERS")
+        if slot == "scope" or _env("TYPESAFE_API_KEY") or explicit:
+            active.append(slot)
+    return Categorizer(chains, active)
+
+
+COVERAGE_AREAS = ("goal", "users", "flows", "data", "integrations", "nfrs", "failures", "constraints", "risks", "done", "glossary")
+INTENT_LABELS = {
+    "answer": "ordinary product answer", "delegate": "founder delegates the current detail",
+    "dismiss": "founder closes the current topic/area", "skip": "founder explicitly skips the current area",
+    "enough": "founder explicitly ends the whole interview",
+}
+
+def coverage_request(question: str, answer: str, target: str | None = None) -> ClassificationRequest:
+    questions: dict[str, Question] = {
+        "relevance": ChoiceQuestion("Did the answer address the question?", {
+            "addressed": "directly and substantively answers it", "partial": "answers only part or remains vague",
+            "dodged": "does not answer, changes subject, or refuses without delegating"}),
+    }
+    for area in COVERAGE_AREAS:
+        questions[f"covers_{area}"] = NoulQuestion(f"The answer supplies concrete product facts for coverage area: {area}")
+    return ClassificationRequest("coverage", f"Question: {question}\nAnswer: {answer}", questions, {"target": target or ""})
+
+def intent_request(question: str, answer: str) -> ClassificationRequest:
+    return ClassificationRequest("intent", f"Question: {question}\nFounder answer: {answer}", {
+        "intent": ChoiceQuestion("Classify the founder's control intent", INTENT_LABELS),
+    })
+
+TERMINAL_INTENTS = frozenset({"dismiss", "skip", "enough"})
+
+def apply_coverage_answers(coverage: Mapping[str, str], answers: Mapping[str, ClassificationAnswer]) -> dict[str, str]:
+    """Code-owned accumulation. Classifiers judge one answer; they never own state."""
+    from .coverage import COVERED, DELEGATED, SKIPPED, THIN
+    out = dict(coverage)
+    relevance = str(answers["relevance"].value)
+    for area in COVERAGE_AREAS:
+        signal = answers.get(f"covers_{area}")
+        if signal is None or float(signal.value) < .5 or out.get(area) in (COVERED, SKIPPED, DELEGATED):
+            continue
+        out[area] = COVERED if relevance == "addressed" else THIN
+    return out
+
+
+def classified_intent(answers: Mapping[str, ClassificationAnswer], terminal_threshold: float = .9) -> str:
+    answer = answers["intent"]
+    intent = str(answer.value)
+    if intent in TERMINAL_INTENTS and (answer.confidence is None or answer.confidence < terminal_threshold):
+        return "answer"
+    return intent

@@ -24,7 +24,8 @@ run_check(){
 }
 progress categorization.begin "python=$PYTHON key_present=$([ -n "${TYPESAFE_API_KEY:-}" ] && echo yes || echo no)"
 run_check conformance "$PYTHON" -m pytest -vv --tb=long -s \
-  "$ROOT/tests/test_categorization.py" "$ROOT/tests/test_scope_gate.py"
+  "$ROOT/tests/test_categorization.py" "$ROOT/tests/test_scope_gate.py" \
+  "$ROOT/tests/test_coverage.py"
 run_check slot-contracts "$PYTHON" -m interview_engine.categorization_diagnostics --mode contracts
 if [ -n "${TYPESAFE_API_KEY:-}" ] || "$PYTHON" - <<'PY' >/dev/null 2>&1
 from interview_engine.model_config import _env

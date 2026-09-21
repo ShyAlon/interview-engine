@@ -70,23 +70,39 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
+    categorization_model = model_config.build_chat_model("probing")
     distill_model = model_config.build_chat_model("distillation")
     conops_model = model_config.build_chat_model("conops") if conops_enabled else None
     tiebreak_model = model_config.build_chat_model("scope_tiebreak")
     if categorizer is None:
         from pathlib import Path
         from .categorization import FunctionProvider, TypeSafeProvider, build_categorizer, jsonl_audit_sink
+        from .categorization_providers import intent_rules, llm_answers, unavailable_rules
         def _submission(request):
             return IntakeSubmission.model_validate(request.context["submission"])
-        scope_adapters = {
-            "jev": TypeSafeProvider() if model_config._env("TYPESAFE_API_KEY") else None,
-            "llm": FunctionProvider("llm", model_config.for_stage("scope_tiebreak").model,
-                                    lambda request: scope_gate.llm_provider(_submission(request), tiebreak_model, usage_log, raw_log)),
-            "rules": FunctionProvider("rules", "scope-signals-v1",
-                                      lambda request: scope_gate.rules_provider(_submission(request))),
+        jev = TypeSafeProvider() if model_config._env("TYPESAFE_API_KEY") else None
+        probing_cfg = model_config.for_stage("probing")
+        adapters = {
+            "scope": {
+                "jev": jev,
+                "llm": FunctionProvider("llm", model_config.for_stage("scope_tiebreak").model,
+                                        lambda request: scope_gate.llm_provider(_submission(request), tiebreak_model, usage_log, raw_log)),
+                "rules": FunctionProvider("rules", "scope-signals-v1",
+                                          lambda request: scope_gate.rules_provider(_submission(request))),
+            },
+            "coverage": {
+                "jev": jev,
+                "llm": FunctionProvider("llm", probing_cfg.model, lambda request: llm_answers(request, categorization_model, usage_log)),
+                "rules": FunctionProvider("rules", "none", unavailable_rules),
+            },
+            "intent": {
+                "jev": jev,
+                "llm": FunctionProvider("llm", probing_cfg.model, lambda request: llm_answers(request, categorization_model, usage_log)),
+                "rules": FunctionProvider("rules", "founder-control-v1", intent_rules),
+            },
         }
         audit_path = Path(raw_output_dir).parent / "decisions.jsonl" if raw_output_dir else Path("decisions.jsonl")
-        categorizer = build_categorizer({"scope": scope_adapters}, jsonl_audit_sink(audit_path))
+        categorizer = build_categorizer(adapters, jsonl_audit_sink(audit_path))
 
     def node_scope_gate(state: InterviewState) -> dict:
         if "verdict" in state:  # resuming a thread: never re-pay (or re-roll) the gate
@@ -120,13 +136,27 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         coverage = dict(state.get("coverage") or initial_coverage())
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
+        classified_control = None
+        if (last is not None and getattr(last, "type", "") == "human" and len(state.get("messages") or []) > 1
+                and (categorizer.active("coverage") or categorizer.active("intent"))):
+            from .categorization import apply_coverage_answers, classified_intent, coverage_request, intent_request
+            prior_question = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
+                                   if getattr(m, "type", "") == "ai"), "")
+            founder_answer = getattr(last, "content", "")
+            if categorizer.active("coverage"):
+                coverage_result = categorizer.classify(coverage_request(prior_question, founder_answer, state.get("coverage_target")))
+                coverage = apply_coverage_answers(coverage, coverage_result.answers)
+            if categorizer.active("intent"):
+                intent_result = categorizer.classify(intent_request(prior_question, founder_answer))
+                classified_control = classified_intent(intent_result.answers)
 
         # Founder steers are terminal (2026-09-12 transcript: 'No. You do it.'
         # got rephrased and re-asked twice). 'delegate' parks the sub-topic and
         # records the delegation for the intent model; 'dismiss' closes the
         # whole target area. Neither may be rephrased and re-asked.
-        steer = (founder_steer(getattr(last, "content", ""))
-                 if last is not None and getattr(last, "type", "") == "human" else None)
+        steer = (classified_control if categorizer.active("intent") else
+                 (founder_steer(getattr(last, "content", "")) if last is not None and getattr(last, "type", "") == "human" else None))
+        steer = steer if steer in ("delegate", "dismiss") else None
         delegated = [dict(d) for d in (state.get("delegated_decisions") or [])]
         if steer:
             prior_question = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
@@ -150,7 +180,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 coverage[area_label] = DELEGATED
 
         # founder control (ADR-0016): deterministic, never costs a model call
-        control = founder_control(getattr(last, "content", "")) if last is not None else None
+        control = (classified_control if categorizer.active("intent") else
+                   (founder_control(getattr(last, "content", "")) if last is not None else None))
+        control = control if control in ("skip", "enough") else None
         if control == "enough":
             return {"messages": [AIMessage(content="Understood - wrapping up.\n\n[INTERVIEW COMPLETE]")],
                     "coverage": coverage, "turn_count": turn}
@@ -254,7 +286,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     )
         question, complete = prose_question or resp.content, False
         if parsed is not None:
-            coverage = apply_reply(coverage, parsed)
+            if not categorizer.active("coverage"):
+                coverage = apply_reply(coverage, parsed)
             if control == "skip" and target:
                 coverage[target] = SKIPPED
             # Quantified-NFR guard (run-5): the model may not close "quantified

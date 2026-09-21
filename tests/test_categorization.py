@@ -47,3 +47,36 @@ def test_slot_mismatch_and_unknown_provider_are_rejected(monkeypatch):
     monkeypatch.setenv('INTERVIEW_ENGINE_CATEGORIZERS','jev,magic')
     with pytest.raises(ValueError,match='unknown categorization'):
         configured_provider_names('scope')
+
+def test_coverage_request_is_relevance_plus_one_binary_question_per_area():
+    request=coverage_request('Who uses it?','Store managers','users')
+    assert request.slot=='coverage' and len(request.questions)==1+len(COVERAGE_AREAS)
+    assert set(request.questions['relevance'].criteria)=={'addressed','partial','dodged'}
+    assert all(f'covers_{area}' in request.questions for area in COVERAGE_AREAS)
+
+
+def test_intent_request_uses_code_owned_terminal_and_nonterminal_labels():
+    request=intent_request('What latency matters?','You decide, move on')
+    assert request.slot=='intent' and set(request.questions['intent'].criteria)==set(INTENT_LABELS)
+
+def test_code_accumulates_per_answer_coverage_without_classifier_owned_state():
+    from interview_engine.coverage import initial_coverage,COVERED,THIN
+    answers={'relevance':ClassificationAnswer('addressed',.9),'covers_users':ClassificationAnswer(.9),
+             **{f'covers_{a}':ClassificationAnswer(0.0) for a in COVERAGE_AREAS if a!='users'}}
+    out=apply_coverage_answers(initial_coverage(),answers)
+    assert out['users']==COVERED and all(v!='covered' for k,v in out.items() if k!='users')
+    answers['relevance']=ClassificationAnswer('partial',.8);answers['covers_goal']=ClassificationAnswer(.8)
+    assert apply_coverage_answers(initial_coverage(),answers)['goal']==THIN
+
+
+def test_terminal_intent_requires_high_confidence_but_nonterminal_does_not():
+    assert classified_intent({'intent':ClassificationAnswer('enough',.89)})=='answer'
+    assert classified_intent({'intent':ClassificationAnswer('enough',.9)})=='enough'
+    assert classified_intent({'intent':ClassificationAnswer('delegate',.6)})=='delegate'
+
+def test_graph_does_not_apply_generating_llm_self_report_to_coverage():
+    from pathlib import Path
+    source=(Path(__file__).parents[1]/'src/interview_engine/graph.py').read_text()
+    assert 'if not categorizer.active("coverage")' in source
+    assert 'coverage = apply_coverage_answers(coverage, coverage_result.answers)' in source
+    assert 'classified_control = classified_intent(intent_result.answers)' in source
