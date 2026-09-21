@@ -38,3 +38,18 @@ def test_stale_input_uses_error_enum_and_http_conflict():
     stale=uuid4();r=client.post(f'/v1/sessions/{sid}/inputs/{stale}',json={
         'protocol_version':1,'input_id':str(stale),'value':'players','actor_id':'founder'})
     assert r.status_code==409 and r.json()['detail']['code']==ProtocolErrorCode.STALE_INPUT
+
+class FakeProgram:
+    def __init__(self):self.finished=False;self.calls=0;self.pending=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='Who uses it?')
+    def advance(self,response=None):
+        self.calls+=1
+        if response is None:return self.pending
+        self.finished=True;return None
+
+def test_http_session_drives_program_to_typed_input_and_completion():
+    program=FakeProgram();registry=SessionRegistry(lambda session_id,request:program);client=TestClient(create_app(registry))
+    started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json()
+    assert started['snapshot']['process_status']==ProcessStatus.WAITING_INPUT
+    pending=started['snapshot']['open_input'];reply={'protocol_version':1,'input_id':pending['input_id'],'value':'players','actor_id':'founder'}
+    done=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=reply).json()
+    assert done['snapshot']['process_status']==ProcessStatus.COMPLETED
