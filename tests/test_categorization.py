@@ -102,3 +102,12 @@ def test_audit_meters_typesafe_tokens_latency_call_and_unpriced_cost():
     record=audits[0]
     assert record.input_tokens==12 and record.output_tokens==3 and record.latency_s==.125
     assert record.cost_usd is None and record.pricing_status=='unpriced'
+
+
+def test_typesafe_adapter_records_zero_tokens_when_sdk_omits_usage(monkeypatch):
+    class Client:
+        def system_one(self,**kwargs):
+            return SimpleNamespace(model='jev',answers={'label':SimpleNamespace(choice='x')})
+    monkeypatch.setitem(__import__('sys').modules,'typesafe_sdk',SimpleNamespace(Choice=lambda **k:k,Noul=lambda **k:k,Score=lambda **k:k))
+    result=TypeSafeProvider(Client()).classify(request())
+    assert result.input_tokens==0 and result.output_tokens==0
