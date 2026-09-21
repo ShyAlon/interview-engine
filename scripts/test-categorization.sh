@@ -22,16 +22,21 @@ run_check(){
     rm -f "$tmp"
   fi
 }
-progress categorization.begin "python=$PYTHON key_present=$([ -n "${TYPESAFE_API_KEY:-}" ] && echo yes || echo no)"
+key_present="$($PYTHON -c 'from interview_engine.model_config import _env; print("yes" if _env("TYPESAFE_API_KEY") else "no")' 2>/dev/null || echo no)"
+key_present="${key_present:-no}"
+progress categorization.begin "python=$PYTHON key_present=$key_present"
+if [ "$key_present" = yes ] && ! "$PYTHON" -c 'import typesafe_sdk' >/dev/null 2>&1; then
+  progress sdk.bootstrap "key is configured but typesafe-sdk is absent; creating/updating $ROOT/.venv"
+  python3 -m venv "$ROOT/.venv" || { progress sdk.FAIL "could not create $ROOT/.venv" >&2; exit 1; }
+  "$ROOT/.venv/bin/python" -m pip install -q -e "$ROOT[dev]" || { progress sdk.FAIL "project dependency installation failed" >&2; exit 1; }
+  PYTHON="$ROOT/.venv/bin/python"
+  progress sdk.pass "focused runtime ready with pinned typesafe-sdk"
+fi
 run_check conformance "$PYTHON" -m pytest -vv --tb=long -s \
   "$ROOT/tests/test_categorization.py" "$ROOT/tests/test_scope_gate.py" \
   "$ROOT/tests/test_coverage.py"
 run_check slot-contracts "$PYTHON" -m interview_engine.categorization_diagnostics --mode contracts
-if [ -n "${TYPESAFE_API_KEY:-}" ] || "$PYTHON" - <<'PY' >/dev/null 2>&1
-from interview_engine.model_config import _env
-raise SystemExit(0 if _env('TYPESAFE_API_KEY') else 1)
-PY
-then
+if [ "$key_present" = yes ]; then
   run_check live-jev "$PYTHON" -m interview_engine.categorization_diagnostics --mode live
 else
   progress live-jev.skip "TYPESAFE_API_KEY is absent; fallback/conformance checks completed, live API check skipped"

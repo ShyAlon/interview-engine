@@ -56,6 +56,10 @@ class ProviderResult:
     answers: Mapping[str, ClassificationAnswer]
     provider: str
     model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_s: float | None = None
+    cost_usd: float | None = None
 
 
 class ClassificationProvider(Protocol):
@@ -73,6 +77,11 @@ class DecisionAudit:
     model: str
     fallback_path: tuple[str, ...]
     timestamp: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_s: float | None = None
+    cost_usd: float | None = None
+    pricing_status: str = "unpriced"
 
 
 AuditSink = Callable[[DecisionAudit], None]
@@ -112,6 +121,11 @@ class ProviderChain:
                     model=result.model,
                     fallback_path=tuple(attempted),
                     timestamp=datetime.now(timezone.utc).isoformat(),
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    latency_s=result.latency_s,
+                    cost_usd=result.cost_usd,
+                    pricing_status="priced" if result.cost_usd is not None else "unpriced",
                 ))
                 return result
             except Exception as exc:
@@ -139,11 +153,17 @@ class FunctionProvider:
 
 class TypeSafeProvider:
     name = "typesafe"
-    def __init__(self, client=None, *, model: str = "jev-latest"):
+    @staticmethod
+    def available() -> bool:
+        import importlib.util
+        return importlib.util.find_spec("typesafe_sdk") is not None
+    def __init__(self, client=None, *, model: str = "jev-latest", usage_log=None):
         if client is None:
+            if not self.available():
+                raise RuntimeError("typesafe-sdk is not installed in this Python runtime")
             from typesafe_sdk import TypeSafeClient
             client = TypeSafeClient()
-        self.client, self.model = client, model
+        self.client, self.model, self.usage_log = client, model, usage_log
 
     def classify(self, request: ClassificationRequest) -> ProviderResult:
         from typesafe_sdk import Choice, Noul, Score
@@ -159,7 +179,10 @@ class TypeSafeProvider:
                 questions[key] = Score(instructions=question.instructions, criteria=list(question.criteria))
             else:
                 questions[key] = Noul(instructions=question.instructions)
+        import time
+        started = time.monotonic()
         response = self.client.system_one(state=request.state, questions=questions, model=self.model)
+        latency_s = time.monotonic() - started
         answers = {}
         for key, answer in response.answers.items():
             if hasattr(answer, "choice"):
@@ -171,7 +194,21 @@ class TypeSafeProvider:
             answers[key] = ClassificationAnswer(value=value,
                 confidence=getattr(answer, "confidence", None),
                 probabilities=dict(getattr(answer, "probabilities", {}) or {}))
-        return ProviderResult(answers, self.name, getattr(response, "model", self.model))
+        usage = getattr(response, "usage", None)
+        def usage_value(name):
+            if usage is None: return 0
+            return int((usage.get(name, 0) if isinstance(usage, dict) else getattr(usage, name, 0)) or 0)
+        # TypeSafe's public response reports token counts but does not publish a
+        # price in the SDK contract. Never invent $0: audit tokens/call/latency
+        # and mark cost unpriced until an operator price table is configured.
+        returned_model = getattr(response, "model", self.model)
+        input_tokens, output_tokens = usage_value("input_tokens"), usage_value("output_tokens")
+        if self.usage_log is not None:
+            self.usage_log.record_unpriced("categorization_" + request.slot, self.name, returned_model,
+                                           {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                                           duration_s=latency_s)
+        return ProviderResult(answers, self.name, returned_model, input_tokens=input_tokens,
+                              output_tokens=output_tokens, latency_s=latency_s, cost_usd=None)
 
 
 def configured_provider_names(slot: str) -> tuple[str, ...]:
@@ -194,7 +231,11 @@ def build_categorizer(adapters: Mapping[str, Mapping[str, ClassificationProvider
             if name == "jev":
                 if not _env("TYPESAFE_API_KEY"):
                     continue  # disabled/unavailable: deterministic chain fallback
-                provider = available.get("jev") or TypeSafeProvider()
+                provider = available.get("jev")
+                if provider is None and TypeSafeProvider.available():
+                    provider = TypeSafeProvider()
+                if provider is None:
+                    continue
             else:
                 provider = available.get(name)
             if provider is not None: providers.append(provider)

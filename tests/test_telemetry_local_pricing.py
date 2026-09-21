@@ -16,3 +16,11 @@ def test_chatollama_phi4_call_logs_zero_cost():
 def test_price_table_comes_from_contracts():
     from vmodel_contracts import price_for as shared
     assert price_for is shared  # one table, one function (shared-module doctrine)
+
+
+def test_unpriced_remote_usage_is_metered_without_becoming_free():
+    log=UsageLog("s")
+    rec=log.record_unpriced("categorization_scope","typesafe","jev",{"input_tokens":12,"output_tokens":3},.25)
+    assert rec.cost_usd is None and log.durations==[.25]
+    stage=log.summary()["stages"]["categorization_scope"]
+    assert stage["calls"]==1 and stage["unpriced_calls"]==1 and stage["cost_usd"]==0.0

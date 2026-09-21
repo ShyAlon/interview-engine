@@ -60,8 +60,25 @@ class UsageLog:
             self.sink(rec)
         return rec
 
+    def record_unpriced(self, stage: str, provider: str, model: str, usage: dict,
+                        duration_s: float | None = None) -> StageTokenUsage:
+        """Record measured remote usage when no authoritative price exists.
+
+        Null price is deliberate and distinguishable from a genuinely free call.
+        """
+        rec = StageTokenUsage(
+            session_id=self.session_id, stage=stage, provider=provider, model=model,
+            prompt_tokens=int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
+            completion_tokens=int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
+            cached_tokens=int(usage.get("cached_tokens", 0) or 0),
+            price_per_mtok_prompt_usd=None, price_per_mtok_completion_usd=None,
+        )
+        self.records.append(rec); self.durations.append(duration_s)
+        if self.sink: self.sink(rec)
+        return rec
+
     def total_usd(self) -> float:
-        return sum(r.cost_usd for r in self.records)
+        return sum((r.cost_usd or 0.0) for r in self.records)
 
     def summary(self) -> dict:
         """Per-stage rollup: calls, tokens, LLM seconds, cost. The end-of-run
@@ -74,7 +91,10 @@ class UsageLog:
             s["prompt_tokens"] += rec.prompt_tokens
             s["completion_tokens"] += rec.completion_tokens
             s["seconds"] += dur or 0.0
-            s["cost_usd"] += rec.cost_usd
+            if rec.cost_usd is None:
+                s["unpriced_calls"] = s.get("unpriced_calls", 0) + 1
+            else:
+                s["cost_usd"] += rec.cost_usd
             s["models"].add(f"{rec.provider}:{rec.model}")
         for s in stages.values():
             s["models"] = sorted(s["models"])

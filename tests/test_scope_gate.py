@@ -81,6 +81,7 @@ def test_tiebreak_usage_logging_uses_config_not_response_metadata(tmp_path):
     # was literally "unknown", and pricing a $0 local call as remote crashed
     # the run. Provider/model must come from the configured route.
     from interview_engine import model_config
+    from interview_engine.telemetry import price_for
     from interview_engine.scope_gate import verdict_with_llm
     from interview_engine.telemetry import UsageLog
 
@@ -99,7 +100,8 @@ def test_tiebreak_usage_logging_uses_config_not_response_metadata(tmp_path):
     (rec,) = log.records
     cfg = model_config.for_stage("scope_tiebreak")
     assert (rec.provider, rec.model) == (cfg.provider, cfg.model)
-    assert rec.cost_usd == 0.0     # the configured local route prices $0
+    pin,pout = price_for(cfg.model,cfg.provider)
+    assert rec.cost_usd == 10/1_000_000*pin + 5/1_000_000*pout
 
 
 def test_tiebreak_unwraps_json_and_validates_shape():

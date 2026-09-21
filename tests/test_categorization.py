@@ -35,11 +35,14 @@ def test_typesafe_adapter_maps_public_sdk_contract(monkeypatch):
     class Client:
         def system_one(self,**kwargs):
             assert kwargs['model']=='jev-latest' and 'label' in kwargs['questions']
-            return SimpleNamespace(model='jev-1.13.0',answers={'label':SimpleNamespace(choice='x',confidence=.8,probabilities={'x':.8,'y':.2})})
+            return SimpleNamespace(model='jev-1.13.0',usage={'input_tokens':12,'output_tokens':3},answers={'label':SimpleNamespace(choice='x',confidence=.8,probabilities={'x':.8,'y':.2})})
     fake=SimpleNamespace(Choice=lambda **k:('choice',k),Noul=lambda **k:('noul',k),Score=lambda **k:('score',k))
     monkeypatch.setitem(__import__('sys').modules,'typesafe_sdk',fake)
-    result=TypeSafeProvider(Client()).classify(request())
+    usage=SimpleNamespace(calls=[],record_unpriced=lambda *a,**k: usage.calls.append((a,k)))
+    result=TypeSafeProvider(Client(),usage_log=usage).classify(request())
     assert result.model=='jev-1.13.0' and result.answers['label'].value=='x'
+    assert result.input_tokens==12 and result.output_tokens==3 and result.latency_s is not None and result.cost_usd is None
+    assert usage.calls[0][0][0:4]==("categorization_scope","typesafe","jev-1.13.0",{"input_tokens":12,"output_tokens":3})
 
 def test_slot_mismatch_and_unknown_provider_are_rejected(monkeypatch):
     with pytest.raises(ValueError,match='does not match'):
@@ -80,3 +83,22 @@ def test_graph_does_not_apply_generating_llm_self_report_to_coverage():
     assert 'if not categorizer.active("coverage")' in source
     assert 'coverage = apply_coverage_answers(coverage, coverage_result.answers)' in source
     assert 'classified_control = classified_intent(intent_result.answers)' in source
+
+
+def test_configured_key_with_missing_sdk_degrades_to_fallback(monkeypatch):
+    import interview_engine.categorization as module
+    monkeypatch.setattr(module,"_env",lambda key: "present" if key=="TYPESAFE_API_KEY" else ("jev,rules" if key=="INTERVIEW_ENGINE_CATEGORIZERS" else None))
+    monkeypatch.setattr(TypeSafeProvider,"available",staticmethod(lambda:False))
+    rules=Provider("rules","x");cat=build_categorizer({"scope":{"rules":rules}},lambda _:None)
+    assert cat.classify(request()).provider=="rules"
+
+
+def test_audit_meters_typesafe_tokens_latency_call_and_unpriced_cost():
+    audits=[];result=ProviderResult({'label':ClassificationAnswer('x',.9)},'typesafe','jev-1',12,3,.125,None)
+    class Metered:
+        name='typesafe'
+        def classify(self,_):return result
+    ProviderChain('scope',[Metered()],audits.append).classify(request())
+    record=audits[0]
+    assert record.input_tokens==12 and record.output_tokens==3 and record.latency_s==.125
+    assert record.cost_usd is None and record.pricing_status=='unpriced'
