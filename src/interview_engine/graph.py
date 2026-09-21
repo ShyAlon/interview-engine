@@ -102,7 +102,20 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             },
         }
         audit_path = Path(raw_output_dir).parent / "decisions.jsonl" if raw_output_dir else Path("decisions.jsonl")
-        categorizer = build_categorizer(adapters, jsonl_audit_sink(audit_path))
+        shadow_raw = (model_config._env("INTERVIEW_ENGINE_JEV_SHADOW") or "").strip().lower()
+        shadow_enabled = bool(jev) and shadow_raw not in {"0", "false", "off", "no"}
+        if shadow_enabled:
+            # Baseline is the pre-Jev path. Jev runs beside it and cannot affect state.
+            baseline_adapters = {slot: {k:v for k,v in providers.items() if k != "jev"}
+                                 for slot,providers in adapters.items()}
+            categorizer = build_categorizer(baseline_adapters, jsonl_audit_sink(audit_path))
+            from .categorization import ProviderChain
+            from .categorization_shadow import ShadowCategorizer
+            shadow_provider = type("JevOnly", (), {"classify": lambda self, request: jev.classify(request)})()
+            shadow_path = Path(raw_output_dir).parent / "categorization-shadow.jsonl" if raw_output_dir else Path("categorization-shadow.jsonl")
+            categorizer = ShadowCategorizer(categorizer, shadow_provider, shadow_path, usage_log)
+        else:
+            categorizer = build_categorizer(adapters, jsonl_audit_sink(audit_path))
 
     def node_scope_gate(state: InterviewState) -> dict:
         if "verdict" in state:  # resuming a thread: never re-pay (or re-roll) the gate

@@ -108,3 +108,21 @@ IntentModel or CONOPS is `complete`; a contract-transformed disk artifact is
 atomically. A stale checkpoint must never overwrite a `migrated` artifact.
 Resume is legal only with a named next artifact and outgoing arc. See the
 contracts README for the guarded transition table and diagram exporters.
+
+## Jev shadow comparison
+
+When `TYPESAFE_API_KEY` resolves, Jev shadow mode is on by default. The existing
+LLM/rules chain remains authoritative; Jev runs in parallel and cannot change
+interview state. Disable it with `INTERVIEW_ENGINE_JEV_SHADOW=off`.
+
+Each interview appends real-time comparison records to
+`categorization-shadow.jsonl` in its interview artifact directory. Records use
+a SHA-256 input reference rather than copying founder text. Regenerate a report:
+
+```bash
+./interview-engine/scripts/report-categorization-shadow.py \
+  /path/to/interview/categorization-shadow.jsonl \
+  --output /path/to/interview/categorization-shadow.md
+```
+
+Several runs can be combined by listing several JSONL paths before `--output`.
