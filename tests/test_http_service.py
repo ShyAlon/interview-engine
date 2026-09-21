@@ -105,3 +105,11 @@ def test_registry_restores_open_input_after_engine_restart(tmp_path):
     response=__import__('vmodel_contracts.interactive',fromlist=['InputResponse']).InputResponse(input_id=pending.input_id,value='players',actor_id='founder')
     _,snapshot=restarted.respond(session.session_id,response)
     assert snapshot.process_status==ProcessStatus.COMPLETED
+
+
+def test_conops_tradeoff_options_cross_typed_http_contract():
+    from vmodel_contracts.interactive import InputOption
+    option={'value':'1','label':'Progressive web app','summary':'Installable web experience',
+        'advantages':['Fast rollout','One codebase'],'disadvantages':['Platform limits']}
+    typed=InputOption.model_validate(option)
+    assert typed.advantages==option['advantages'] and typed.disadvantages==option['disadvantages']
