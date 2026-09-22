@@ -1,0 +1,76 @@
+"""Append-only analytical evidence adapter.
+
+JSONL is the immutable recovery/source record. Each append also emits an
+immutable Parquet part for typed analytical scans. Runtime code can append DLQ
+proposals, but only reviewed PromotionReview contracts can enter promotions.
+"""
+from __future__ import annotations
+import json, os
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock
+from uuid import uuid4
+
+from vmodel_contracts.facets import (
+    COVERAGE_SCHEMA, DeadLetterEntry, EvidenceRecord, PromotionReview,
+    PromotionStatus, SessionSchemaBinding,
+)
+
+
+@dataclass(frozen=True)
+class EvidencePaths:
+    root: Path
+    run_id: str
+    @property
+    def run(self): return self.root / f"run_id={self.run_id}"
+
+
+class EvidenceLake:
+    def __init__(self, root: str | Path, run_id: str):
+        self.paths=EvidencePaths(Path(root),run_id);self.paths.run.mkdir(parents=True,exist_ok=True)
+        self._lock=Lock()
+
+    def bind_session(self,session_id:str,binding:SessionSchemaBinding|None=None)->SessionSchemaBinding:
+        binding=binding or SessionSchemaBinding(session_id=session_id,schema_id=COVERAGE_SCHEMA.schema_id,
+                                                schema_version=COVERAGE_SCHEMA.schema_version)
+        path=self.paths.run/f"session_id={session_id}"/"schema-binding.json";path.parent.mkdir(parents=True,exist_ok=True)
+        body=binding.model_dump_json(indent=2)
+        with self._lock:
+            if path.exists():
+                existing=SessionSchemaBinding.model_validate_json(path.read_text())
+                if existing != binding:raise ValueError("session schema binding is immutable")
+            else:
+                fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                with os.fdopen(fd,'w') as f:f.write(body);f.flush();os.fsync(f.fileno())
+        return binding
+
+    def append_evidence(self,record:EvidenceRecord)->Path:
+        return self._append("evidence",record.model_dump(mode="json"))
+
+    def append_dead_letter(self,entry:DeadLetterEntry)->Path:
+        return self._append("dlq",entry.model_dump(mode="json"))
+
+    def append_promotion(self,review:PromotionReview)->Path:
+        if review.status not in (PromotionStatus.ACCEPTED,PromotionStatus.REJECTED,PromotionStatus.RELEASED):
+            raise ValueError("promotion log accepts reviewed decisions only")
+        return self._append("promotions",review.model_dump(mode="json"))
+
+    def _append(self,stream:str,row:dict)->Path:
+        directory=self.paths.run/stream;directory.mkdir(parents=True,exist_ok=True)
+        line=json.dumps(row,separators=(",",":"),sort_keys=True,default=str)
+        with self._lock:
+            raw=directory/"events.jsonl"
+            with raw.open('a') as f:f.write(line+'\n');f.flush();os.fsync(f.fileno())
+            part=directory/f"part-{uuid4()}.parquet"
+            try:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+                table=pa.Table.from_pylist([{k:(json.dumps(v,sort_keys=True) if isinstance(v,(dict,list)) else v) for k,v in row.items()}])
+                tmp=part.with_suffix('.tmp');pq.write_table(table,tmp,compression='zstd');tmp.replace(part)
+            except Exception:
+                # Raw append is authoritative and durable. A parquet projection
+                # failure is explicit, recoverable, and never deletes evidence.
+                marker=directory/"parquet-errors.jsonl"
+                with marker.open('a') as f:f.write(json.dumps({'part':part.name,'source':line})+'\n')
+                raise
+        return part
