@@ -289,3 +289,28 @@ def test_plain_string_envelope_with_competing_leaf_still_fails():
     import pytest
     with pytest.raises(ValueError,match="one unambiguous text leaf"):
         normalize_model_item({"operational_flow":[{"operational_flow":"Do it","text":"Different"}]},OperationalScenario)
+
+def test_operating_environment_clean_decomposition_renders_deterministically():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import StakeholderContext
+    raw={"operating_environment": {
+        "description": "Two adults in the same household use the shared task board at home on a weekly cadence. It is a personal, in-home shared chore board used by exactly those two people — not a workplace, multi-user, or guest-facing tool.",
+        "location": "at home",
+        "users_present": "exactly two adults in the same household (e.g. partners)",
+        "usage_cadence": "weekly",
+        "source_turns": [0, 2],
+    }}
+    normalized=normalize_model_item(raw,StakeholderContext)
+    assert normalized["operating_environment"]==( 
+        "description: Two adults in the same household use the shared task board at home on a weekly cadence. It is a personal, in-home shared chore board used by exactly those two people — not a workplace, multi-user, or guest-facing tool.\\n"
+        "location: at home\\n"
+        "users_present: exactly two adults in the same household (e.g. partners)\\n"
+        "usage_cadence: weekly")
+    assert "source_turns" not in normalized["operating_environment"]
+
+
+def test_generic_clean_decomposition_preserves_semantic_numeric_leaf():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import StakeholderContext
+    normalized=normalize_model_item({"operating_environment":{"place":"home","weekly_sessions":1,"source_turns":[2]}},StakeholderContext)
+    assert normalized["operating_environment"]=="place: home\\nweekly_sessions: 1"

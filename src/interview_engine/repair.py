@@ -166,31 +166,67 @@ def clean_model_patch(value, model_cls, error: Exception) -> dict:
 
 
 def _plain_string_leaf(value, field_name: str):
-    """Normalize one grounded envelope only where the schema requires str."""
+    """Reduce a model-authored subtree when the contract requires one string.
+
+    A provider may decompose one text field into coherent named facts. Preserve
+    those facts as deterministic ``key: value`` lines. Structural metadata is
+    omitted. Competing aliases and mixed actor/action prose remain ambiguous.
+    """
     if isinstance(value,str):return value
-    if isinstance(value,dict):
-        # Field-level prompts often echo their requested key around the text
-        # leaf, including inside a list item: {"operational_flow": "..."}.
-        # Unwrap only one named envelope with one recursively unambiguous leaf.
-        envelope_keys=(field_name,"statement","value","text")
-        present=[k for k in envelope_keys if k in value]
-        if len(value)==1 and len(present)==1:
-            inner=value[present[0]]
-            if isinstance(inner,list) and len(inner)==1:
-                inner=inner[0]
-            return _plain_string_leaf(inner,field_name)
-        candidates=[k for k in dict.fromkeys((field_name,"statement","value","text"))
-                    if isinstance(value.get(k),str)]
-        if len(candidates)==1:return value[candidates[0]]
-        # DeepSeek may expand an ordered flow step into actor + action. This is
-        # richer than list[str], but its prose has one deterministic rendering;
-        # numeric order and provenance remain owned by list position/item.
-        actor=value.get("actor");action=value.get("action")
-        if isinstance(actor,str) and actor.strip() and isinstance(action,str) and action.strip():
-            text_keys={k for k,v in value.items() if isinstance(v,str) and v.strip()}
-            if text_keys == {"actor","action"}:
-                return f"{actor.strip()}: {action.strip()}"
-    raise ValueError(f"field {field_name} requires one unambiguous text leaf, got {type(value).__name__}")
+    if isinstance(value,list) and len(value)==1:
+        return _plain_string_leaf(value[0],field_name)
+    if not isinstance(value,dict):
+        raise ValueError(f"field {field_name} requires text, got {type(value).__name__}")
+
+    aliases=tuple(dict.fromkeys((field_name,"statement","value","text")))
+    alias_text=[(key,value[key].strip()) for key in aliases
+                if isinstance(value.get(key),str) and value[key].strip()]
+    if len(alias_text)>1 and len({text for _,text in alias_text})>1:
+        paths=", ".join(key for key,_ in alias_text)
+        raise ValueError(f"field {field_name} has conflicting text leaves at: {paths}")
+    if len(value)==1:
+        return _plain_string_leaf(next(iter(value.values())),field_name)
+
+    # Ordered flow actor/action has a specific rendering. Extra prose would
+    # make ordering and meaning uncertain, so do not fold it in silently.
+    actor=value.get("actor");action=value.get("action")
+    if isinstance(actor,str) and actor.strip() and isinstance(action,str) and action.strip():
+        prose=[key for key,item in value.items() if isinstance(item,str) and item.strip()]
+        if set(prose)=={"actor","action"}:
+            return f"{actor.strip()}: {action.strip()}"
+        raise ValueError(f"field {field_name} has ambiguous actor/action text leaves at: {', '.join(prose)}")
+
+    metadata={"source_turns","step","order","index","confidence"}
+    lines=[];unsupported=[]
+    def collect(node,path):
+        if isinstance(node,str) and node.strip():
+            lines.append((path,node.strip()));return
+        if node is None:return
+        if isinstance(node,dict):
+            for key,item in node.items():
+                child=f"{path}.{key}" if path else str(key)
+                if key in metadata and (not isinstance(item,str)):
+                    continue
+                collect(item,child)
+            return
+        if isinstance(node,list):
+            if path.rsplit(".",1)[-1] in metadata and all(isinstance(x,(int,float,bool)) for x in node):return
+            if all(isinstance(x,str) and x.strip() for x in node):
+                lines.append((path,"; ".join(x.strip() for x in node)));return
+            unsupported.append(path);return
+        if path.rsplit(".",1)[-1] in metadata and isinstance(node,(int,float,bool)):return
+        # Semantic numeric/bool leaves are preserved rather than mistaken for
+        # metadata merely because of their type.
+        if isinstance(node,(int,float,bool)):
+            lines.append((path,str(node).lower() if isinstance(node,bool) else str(node)));return
+        unsupported.append(path)
+    collect(value,"")
+    if unsupported or not lines:
+        detail=", ".join(unsupported) if unsupported else "none"
+        raise ValueError(f"field {field_name} has no coherent text rendering; unsupported paths: {detail}")
+    # A lone leaf is an envelope regardless of its provider-invented key.
+    if len(lines)==1:return lines[0][1]
+    return "\n".join(f"{path}: {text}" for path,text in lines)
 
 
 def normalize_model_item(value, model_cls) -> dict:
