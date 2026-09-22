@@ -5,11 +5,13 @@ immutable Parquet part for typed analytical scans. Runtime code can append DLQ
 proposals, but only reviewed PromotionReview contracts can enter promotions.
 """
 from __future__ import annotations
-import json, os
+import json, logging, os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
+
+log=logging.getLogger("interview_engine.evidence")
 
 from vmodel_contracts.facets import (
     COVERAGE_SCHEMA, DeadLetterEntry, EvidenceRecord, PromotionReview,
@@ -67,12 +69,22 @@ class EvidenceLake:
                 import pyarrow.parquet as pq
                 table=pa.Table.from_pylist([{k:(json.dumps(v,sort_keys=True) if isinstance(v,(dict,list)) else v) for k,v in row.items()}])
                 tmp=part.with_suffix('.tmp');pq.write_table(table,tmp,compression='zstd');tmp.replace(part)
-            except Exception:
-                # Raw append is authoritative and durable. A parquet projection
-                # failure is explicit, recoverable, and never deletes evidence.
+            except Exception as exc:
+                # Raw JSONL is authoritative. Parquet is a rebuildable
+                # analytical projection and cannot block interview control flow.
                 marker=directory/"parquet-errors.jsonl"
-                with marker.open('a') as f:f.write(json.dumps({'part':part.name,'source':line})+'\n')
-                raise
+                try:
+                    with marker.open('a') as f:
+                        f.write(json.dumps({'part':part.name,'error_type':type(exc).__name__,
+                                            'error':str(exc)})+'\n')
+                        f.flush();os.fsync(f.fileno())
+                except OSError as marker_exc:
+                    log.error("parquet projection and degradation log failed stream=%s part=%s projection_error=%s marker_error=%s",
+                              stream,part.name,exc,marker_exc,exc_info=True)
+                else:
+                    log.warning("parquet projection degraded to authoritative JSONL stream=%s part=%s error=%s: %s",
+                                stream,part.name,type(exc).__name__,exc)
+                return raw
         return part
 
 

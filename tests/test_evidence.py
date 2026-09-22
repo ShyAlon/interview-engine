@@ -61,3 +61,26 @@ def test_classified_answer_is_not_dead_lettered(tmp_path):
     record,dead=record_founder_classification(lake,session_id='s1',sequence=2,
         raw_text='Dispatchers lose calls.',target='goal',result=result)
     assert record.disposition is EvidenceDisposition.CLASSIFIED and dead is None
+
+def test_missing_pyarrow_degrades_to_jsonl_without_blocking(tmp_path,monkeypatch,caplog):
+    import builtins
+    real_import=builtins.__import__
+    def without_arrow(name,*args,**kwargs):
+        if name=='pyarrow':raise ModuleNotFoundError("No module named 'pyarrow'")
+        return real_import(name,*args,**kwargs)
+    monkeypatch.setattr(builtins,'__import__',without_arrow)
+    lake=EvidenceLake(tmp_path,'r1')
+    returned=lake.append_evidence(evidence())
+    assert returned.name=='events.jsonl' and returned.is_file()
+    assert json.loads(returned.read_text())['raw_text']=='Dispatchers lose calls.'
+    marker=returned.parent/'parquet-errors.jsonl';assert marker.is_file()
+    assert json.loads(marker.read_text())['error_type']=='ModuleNotFoundError'
+    assert 'parquet projection degraded' in caplog.text
+
+
+def test_parquet_writer_failure_degrades_to_jsonl_without_blocking(tmp_path,monkeypatch):
+    import pyarrow.parquet as parquet
+    monkeypatch.setattr(parquet,'write_table',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
+    lake=EvidenceLake(tmp_path,'r1');returned=lake.append_evidence(evidence())
+    assert returned.name=='events.jsonl' and returned.is_file()
+    assert json.loads((returned.parent/'parquet-errors.jsonl').read_text())['error_type']=='OSError'
