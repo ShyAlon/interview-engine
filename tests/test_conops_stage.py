@@ -223,3 +223,17 @@ def test_founder_decision_is_structured_code_owned_contract():
     assert [(x["value"],x["label"]) for x in event["options"]]==[("1","Native app"),("2","PWA")]
     assert event["options"][1]["advantages"]==["One deploy"]
     assert event["answer_format"]=="<value> - <rationale>"
+
+def test_operational_scenario_grounded_statement_envelopes_normalize_before_validation():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import OperationalScenario
+    live={"scenario_id":"OS-1","name":"Weekly planning","trigger":{"statement":"The week begins","source_turns":[0,2]},
+          "actors":[{"statement":"Two adults","source_turns":[0]}],
+          "operational_flow":[{"statement":"Review chores","source_turns":[2]},{"statement":"Assign owners","source_turns":[2]}],
+          "success_outcome":{"statement":"Every chore has an owner","source_turns":[2]},
+          "exceptions":[{"statement":"One adult is away","source_turns":[4]}],"source_turns":[0,2,4]}
+    scenario=OperationalScenario.model_validate(normalize_model_item(live,OperationalScenario))
+    assert scenario.trigger=="The week begins"
+    assert scenario.actors==["Two adults"]
+    assert scenario.operational_flow==["Review chores","Assign owners"]
+    assert scenario.success_outcome=="Every chore has an owner"

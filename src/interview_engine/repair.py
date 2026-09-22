@@ -165,6 +165,15 @@ def clean_model_patch(value, model_cls, error: Exception) -> dict:
     return cleaned
 
 
+def _plain_string_leaf(value, field_name: str):
+    """Normalize one grounded envelope only where the schema requires str."""
+    if isinstance(value,str):return value
+    if isinstance(value,dict):
+        candidates=[k for k in ("statement","value","text") if isinstance(value.get(k),str)]
+        if len(candidates)==1:return value[candidates[0]]
+    raise ValueError(f"field {field_name} requires plain string values, got {type(value).__name__}")
+
+
 def normalize_model_item(value, model_cls) -> dict:
     """Unwrap one model item, whitelist its fields, and fix trivial shapes."""
     from typing import get_origin
@@ -201,6 +210,14 @@ def normalize_model_item(value, model_cls) -> dict:
                 out[key]=list(val.values())
             elif val is None:
                 out[key]=[]
+            # DeepSeek systematically reuses grounded-statement envelopes for
+            # plain string list fields. Provenance belongs to the owning item;
+            # normalize the leaf value before contract validation.
+            args=getattr(field.annotation,"__args__",())
+            if args and args[0] is str and isinstance(out[key],list):
+                out[key]=[_plain_string_leaf(item,key) for item in out[key]]
+        elif field.annotation is str:
+            out[key]=_plain_string_leaf(val,key)
         elif origin is dict and val is None:
             out[key]={}
     return out
