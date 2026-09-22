@@ -38,3 +38,26 @@ def test_dlq_keeps_unsolicited_sla_and_cannot_promote_itself(tmp_path):
     with pytest.raises(ValueError,match='reviewed'):
         lake.append_promotion(PromotionReview(proposal_id=uuid4(),source_dlq_ids=[did],status=PromotionStatus.PROPOSED,
             target_schema_id=COVERAGE_SCHEMA_ID,target_schema_version='1.1.0'))
+
+def test_unbucketed_answer_is_preserved_and_sent_to_dlq(tmp_path):
+    from interview_engine.categorization import ClassificationAnswer,ProviderResult
+    from interview_engine.evidence import record_founder_classification
+    lake=EvidenceLake(tmp_path,'r1');lake.bind_session('s1')
+    result=ProviderResult({'relevance':ClassificationAnswer('dodged',.9),
+        'covers_goal':ClassificationAnswer(.1,None)},'typesafe','jev-latest')
+    record,dead=record_founder_classification(lake,session_id='s1',sequence=2,
+        raw_text='By the way, do you support an SLA?',target='goal',result=result)
+    assert record.disposition is EvidenceDisposition.DEAD_LETTER and dead is not None
+    assert dead.raw_text=='By the way, do you support an SLA?'
+    assert (lake.paths.run/'dlq'/'events.jsonl').is_file()
+
+
+def test_classified_answer_is_not_dead_lettered(tmp_path):
+    from interview_engine.categorization import ClassificationAnswer,ProviderResult
+    from interview_engine.evidence import record_founder_classification
+    lake=EvidenceLake(tmp_path,'r1')
+    result=ProviderResult({'relevance':ClassificationAnswer('addressed',.9),
+        'covers_goal':ClassificationAnswer(.8,None)},'typesafe','jev-latest')
+    record,dead=record_founder_classification(lake,session_id='s1',sequence=2,
+        raw_text='Dispatchers lose calls.',target='goal',result=result)
+    assert record.disposition is EvidenceDisposition.CLASSIFIED and dead is None

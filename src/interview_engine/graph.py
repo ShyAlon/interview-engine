@@ -66,7 +66,7 @@ def _clean_single_question(text: str) -> str | None:
     return candidate
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None, evidence_lake=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
@@ -161,6 +161,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             founder_answer = getattr(last, "content", "")
             if categorizer.active("coverage"):
                 coverage_result = categorizer.classify(coverage_request(prior_question, founder_answer, state.get("coverage_target")))
+                if evidence_lake is not None:
+                    from .evidence import record_founder_classification
+                    record_founder_classification(evidence_lake,session_id=session_id or usage_log.session_id,
+                        sequence=turn,raw_text=founder_answer,target=state.get("coverage_target"),result=coverage_result)
                 coverage = apply_coverage_answers(coverage, coverage_result.answers)
             if categorizer.active("intent"):
                 intent_result = categorizer.classify(intent_request(prior_question, founder_answer))

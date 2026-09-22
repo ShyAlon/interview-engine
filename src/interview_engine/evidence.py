@@ -74,3 +74,35 @@ class EvidenceLake:
                 with marker.open('a') as f:f.write(json.dumps({'part':part.name,'source':line})+'\n')
                 raise
         return part
+
+
+def record_founder_classification(lake: EvidenceLake, *, session_id: str, sequence: int,
+                                  raw_text: str, target: str | None, result) -> tuple[EvidenceRecord, DeadLetterEntry | None]:
+    """Persist one complete founder answer and route an unbucketed answer to DLQ.
+
+    This observes classifier output only. It never updates graph coverage or a
+    facet schema; graph code remains the sole owner of accumulation/state.
+    """
+    from datetime import datetime, timezone
+    from vmodel_contracts.facets import DeadLetterReason, EvidenceDisposition
+    answers=result.answers
+    matched=[key.removeprefix('covers_') for key,value in answers.items()
+             if key.startswith('covers_') and float(value.value)>=.5]
+    now=datetime.now(timezone.utc).isoformat();eid=uuid4()
+    disposition=EvidenceDisposition.CLASSIFIED if matched else EvidenceDisposition.DEAD_LETTER
+    confidence=max((value.confidence for key,value in answers.items()
+                    if key.startswith('covers_') and value.confidence is not None),default=None)
+    record=EvidenceRecord(evidence_id=eid,run_id=lake.paths.run_id,session_id=session_id,sequence=sequence,
+        schema_id=COVERAGE_SCHEMA.schema_id,schema_version=COVERAGE_SCHEMA.schema_version,
+        facet_key=matched[0] if len(matched)==1 else target,option_id=30 if matched else None,
+        disposition=disposition,raw_text=raw_text,
+        extracted_value={'matched_facets':matched,'verdict':{k:v.value for k,v in answers.items()}},
+        provider=result.provider,confidence=confidence,occurred_at=now)
+    lake.append_evidence(record)
+    dead=None
+    if not matched:
+        dead=DeadLetterEntry(dlq_id=uuid4(),evidence_id=eid,run_id=lake.paths.run_id,session_id=session_id,
+            schema_id=COVERAGE_SCHEMA.schema_id,schema_version=COVERAGE_SCHEMA.schema_version,
+            reason=DeadLetterReason.NO_MATCH,raw_text=raw_text,proposed_facet_key=None,created_at=now)
+        lake.append_dead_letter(dead)
+    return record,dead

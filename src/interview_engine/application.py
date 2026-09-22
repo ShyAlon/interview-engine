@@ -32,7 +32,7 @@ class InterviewApplication:
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
         progress=ProgressBus();progress.subscribe(stderr_printer())
         self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug',
-            session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version)
+            session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
         self.cfg={'configurable':{'thread_id':session_id}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
         self.state={'messages':[HumanMessage(content=idea)],'submission':submission.model_dump(mode='json')}
