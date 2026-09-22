@@ -21,7 +21,7 @@ def test_shadow_never_changes_baseline_and_appends_detailed_record(tmp_path):
     assert row['slot']=='scope' and not row['agreement']
     assert row['baseline']['verdict']=={'answer':'accepted'} and row['jev']['verdict']=={'answer':'rejected'}
     assert row['baseline']['input_tokens']==10 and row['jev']['output_tokens']==1
-    assert row['input_ref'].startswith('sha256:') and 'secret founder input' not in path.read_text()
+    assert row['input_ref'].startswith('sha256:') and row['input']['state']=='secret founder input'
     assert (tmp_path/'shadow.md').is_file() and 'Decisions: 1' in (tmp_path/'shadow.md').read_text()
 
 def test_shadow_error_is_observed_but_baseline_returns(tmp_path):
@@ -49,3 +49,26 @@ def test_shadow_record_pins_session_schema_version(tmp_path):
     ShadowCategorizer(Cat(baseline),Cat(jev),path,session_id='s1',schema_id='interview.coverage',schema_version='1.0.0').classify(req())
     row=json.loads(path.read_text())
     assert row['session_id']=='s1' and row['schema_id']=='interview.coverage' and row['schema_version']=='1.0.0'
+
+
+def test_v2_record_captures_full_input_and_versioned_rubric(tmp_path):
+    from interview_engine.categorization import ChoiceQuestion
+    request=ClassificationRequest('intent','Question: q\nFounder answer: a',{'intent':ChoiceQuestion('classify',{'answer':'ordinary'})},{'target':'goal'})
+    path=tmp_path/'shadow.jsonl';baseline=result('llm','answer');jev=result('typesafe','answer')
+    ShadowCategorizer(Cat(baseline),Cat(jev),path).classify(request)
+    row=json.loads(path.read_text());package=row['input']
+    assert row['record_schema_version']==2 and package['state']==request.state
+    assert package['context']=={'target':'goal'} and package['rubric_version']
+    assert package['questions']['intent']['criteria']=={'answer':'ordinary'}
+    assert row['baseline']['model']=='llm-model' and row['jev']['model']=='typesafe-model'
+
+
+def test_adjudication_sample_includes_all_disagreements_and_stratifies_agreements():
+    from interview_engine.categorization_shadow import adjudication_sample
+    def row(ref,agreement,label,confidence):
+        return {'input_ref':ref,'slot':'intent','agreement':agreement,
+                'baseline':{'verdict':{'intent':label}},'jev':{'verdict':{'intent':label},'confidence':{'intent':confidence}}}
+    records=[row('d',False,'answer',.2),row('h1',True,'answer',.9),row('h2',True,'answer',.95),
+             row('h3',True,'answer',.99),row('l1',True,'skip',.2)]
+    refs={r['input_ref'] for r in adjudication_sample(records,2)}
+    assert refs=={'d','h1','h2','l1'}

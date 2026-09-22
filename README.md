@@ -126,3 +126,32 @@ a SHA-256 input reference rather than copying founder text. Regenerate a report:
 ```
 
 Several runs can be combined by listing several JSONL paths before `--output`.
+
+
+### Adjudication-ready Jev shadow data
+
+New records retain the SHA-256 `input_ref` and also write the complete decision-time
+input package: request state (founder utterance plus relevant question), structured
+context, versioned rubric/questions, both verdicts/confidences, and provider/model
+versions. The append-only JSONL remains authoritative.
+
+Create a blind-ready labeling bundle containing every disagreement and a deterministic,
+stratified agreement sample (slot + baseline label + Jev confidence band):
+
+```bash
+./scripts/export-categorization-labels.py \
+  out/*/interview/categorization-shadow.jsonl \
+  --output /tmp/jev-adjudication.csv
+# Keep /tmp/jev-adjudication.csv.key.json away from reviewers until labels are sealed.
+```
+
+For an older session, export its transcript as a JSON list of `{role, content}` turns,
+then recover any matching inputs by their existing hash without rewriting the source:
+
+```bash
+./scripts/enrich-categorization-shadow.py OLD.jsonl \
+  --transcript transcript.json --output OLD.enriched.jsonl
+```
+
+Unrecoverable hashes remain explicit legacy rows. They are never guessed or silently
+dropped.
