@@ -237,3 +237,25 @@ def test_operational_scenario_grounded_statement_envelopes_normalize_before_vali
     assert scenario.actors==["Two adults"]
     assert scenario.operational_flow==["Review chores","Assign owners"]
     assert scenario.success_outcome=="Every chore has an owner"
+
+def test_ordered_actor_action_flow_steps_normalize_deterministically():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import OperationalScenario
+    live={"scenario_id":"OS-1","name":"Assign chore","trigger":"A chore needs doing",
+          "actors":["Two adults"],"operational_flow":[
+            {"step":1,"actor":"One adult","action":"Opens the shared board.","source_turns":[0,2]},
+            {"step":2,"actor":"That adult","action":"Assigns exactly one owner.","source_turns":[0,2]}],
+          "success_outcome":"The chore has an owner","exceptions":[],"source_turns":[0,2]}
+    normalized=normalize_model_item(live,OperationalScenario)
+    assert normalized["operational_flow"]==[
+        "One adult: Opens the shared board.","That adult: Assigns exactly one owner."]
+    OperationalScenario.model_validate(normalized)
+
+
+def test_plain_string_target_rejects_actor_action_with_extra_text_leaf():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import OperationalScenario
+    import pytest
+    live={"operational_flow":[{"actor":"A","action":"Does it","comment":"maybe"}]}
+    with pytest.raises(ValueError,match="one unambiguous text leaf"):
+        normalize_model_item(live,OperationalScenario)

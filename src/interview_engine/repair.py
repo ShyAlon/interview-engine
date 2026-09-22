@@ -171,7 +171,15 @@ def _plain_string_leaf(value, field_name: str):
     if isinstance(value,dict):
         candidates=[k for k in ("statement","value","text") if isinstance(value.get(k),str)]
         if len(candidates)==1:return value[candidates[0]]
-    raise ValueError(f"field {field_name} requires plain string values, got {type(value).__name__}")
+        # DeepSeek may expand an ordered flow step into actor + action. This is
+        # richer than list[str], but its prose has one deterministic rendering;
+        # numeric order and provenance remain owned by list position/item.
+        actor=value.get("actor");action=value.get("action")
+        if isinstance(actor,str) and actor.strip() and isinstance(action,str) and action.strip():
+            text_keys={k for k,v in value.items() if isinstance(v,str) and v.strip()}
+            if text_keys == {"actor","action"}:
+                return f"{actor.strip()}: {action.strip()}"
+    raise ValueError(f"field {field_name} requires one unambiguous text leaf, got {type(value).__name__}")
 
 
 def normalize_model_item(value, model_cls) -> dict:
