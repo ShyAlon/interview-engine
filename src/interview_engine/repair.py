@@ -179,7 +179,8 @@ def _plain_string_leaf(value, field_name: str):
             if isinstance(inner,list) and len(inner)==1:
                 inner=inner[0]
             return _plain_string_leaf(inner,field_name)
-        candidates=[k for k in ("statement","value","text") if isinstance(value.get(k),str)]
+        candidates=[k for k in dict.fromkeys((field_name,"statement","value","text"))
+                    if isinstance(value.get(k),str)]
         if len(candidates)==1:return value[candidates[0]]
         # DeepSeek may expand an ordered flow step into actor + action. This is
         # richer than list[str], but its prose has one deterministic rendering;
