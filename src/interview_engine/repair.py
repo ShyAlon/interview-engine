@@ -169,6 +169,16 @@ def _plain_string_leaf(value, field_name: str):
     """Normalize one grounded envelope only where the schema requires str."""
     if isinstance(value,str):return value
     if isinstance(value,dict):
+        # Field-level prompts often echo their requested key around the text
+        # leaf, including inside a list item: {"operational_flow": "..."}.
+        # Unwrap only one named envelope with one recursively unambiguous leaf.
+        envelope_keys=(field_name,"statement","value","text")
+        present=[k for k in envelope_keys if k in value]
+        if len(value)==1 and len(present)==1:
+            inner=value[present[0]]
+            if isinstance(inner,list) and len(inner)==1:
+                inner=inner[0]
+            return _plain_string_leaf(inner,field_name)
         candidates=[k for k in ("statement","value","text") if isinstance(value.get(k),str)]
         if len(candidates)==1:return value[candidates[0]]
         # DeepSeek may expand an ordered flow step into actor + action. This is

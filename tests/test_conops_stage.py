@@ -259,3 +259,33 @@ def test_plain_string_target_rejects_actor_action_with_extra_text_leaf():
     live={"operational_flow":[{"actor":"A","action":"Does it","comment":"maybe"}]}
     with pytest.raises(ValueError,match="one unambiguous text leaf"):
         normalize_model_item(live,OperationalScenario)
+
+def test_plain_string_list_unwraps_echoed_field_name_envelopes():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import OperationalScenario
+    live={"operational_flow":[
+        {"operational_flow":"Dispatcher reviews the delayed orders."},
+        {"text":"Dispatcher contacts the affected customer."},
+        {"value":["Dispatcher records the resolution."]},
+    ]}
+    normalized=normalize_model_item(live,OperationalScenario)
+    assert normalized["operational_flow"]==[
+        "Dispatcher reviews the delayed orders.",
+        "Dispatcher contacts the affected customer.",
+        "Dispatcher records the resolution.",
+    ]
+
+
+def test_plain_string_field_unwraps_its_own_named_envelope():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import OperationalScenario
+    normalized=normalize_model_item({"trigger":{"trigger":"A shipment becomes at risk."}},OperationalScenario)
+    assert normalized["trigger"]=="A shipment becomes at risk."
+
+
+def test_plain_string_envelope_with_competing_leaf_still_fails():
+    from interview_engine.repair import normalize_model_item
+    from vmodel_contracts import OperationalScenario
+    import pytest
+    with pytest.raises(ValueError,match="one unambiguous text leaf"):
+        normalize_model_item({"operational_flow":[{"operational_flow":"Do it","text":"Different"}]},OperationalScenario)
