@@ -183,7 +183,7 @@ def _plain_string_leaf(value, field_name: str):
                 if isinstance(value.get(key),str) and value[key].strip()]
     if len(alias_text)>1 and len({text for _,text in alias_text})>1:
         paths=", ".join(key for key,_ in alias_text)
-        raise ValueError(f"field {field_name} has conflicting text leaves at: {paths}")
+        raise ValueError(f"field {field_name} requires one unambiguous text leaf; conflicting paths: {paths}")
     if len(value)==1:
         return _plain_string_leaf(next(iter(value.values())),field_name)
 
@@ -194,7 +194,7 @@ def _plain_string_leaf(value, field_name: str):
         prose=[key for key,item in value.items() if isinstance(item,str) and item.strip()]
         if set(prose)=={"actor","action"}:
             return f"{actor.strip()}: {action.strip()}"
-        raise ValueError(f"field {field_name} has ambiguous actor/action text leaves at: {', '.join(prose)}")
+        raise ValueError(f"field {field_name} requires one unambiguous text leaf; actor/action conflicts at: {', '.join(prose)}")
 
     metadata={"source_turns","step","order","index","confidence"}
     lines=[];unsupported=[]
