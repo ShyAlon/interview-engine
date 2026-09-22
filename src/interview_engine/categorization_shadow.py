@@ -31,9 +31,10 @@ def _agreement(a,b):
 
 class ShadowCategorizer:
     """Return baseline decisions; run Jev concurrently and only observe it."""
-    def __init__(self, baseline, jev, jsonl_path, usage_log=None, report_path=None):
+    def __init__(self, baseline, jev, jsonl_path, usage_log=None, report_path=None, *, session_id=None, schema_id=None, schema_version=None):
         self.baseline,self.jev,self.path,self.usage_log=baseline,jev,Path(jsonl_path),usage_log
         self.report_path=Path(report_path) if report_path else self.path.with_suffix(".md")
+        self.session_id,self.schema_id,self.schema_version=session_id,schema_id,schema_version
         self.path.parent.mkdir(parents=True,exist_ok=True)
     def active(self,slot): return self.baseline.active(slot)
     def classify(self,request):
@@ -51,7 +52,8 @@ class ShadowCategorizer:
             usage=next((r for r in new if r.stage=="categorization_"+request.slot and r.provider!="typesafe"),None)
         baseline_side=_side(base,elapsed=base_s,usage=usage,error=base_err)
         jev_side=_side(shadow,elapsed=shadow_s,error=shadow_err)
-        record={"schema_version":1,"timestamp":datetime.now(timezone.utc).isoformat(),"slot":request.slot,
+        record={"record_schema_version":1,"schema_id":self.schema_id,"schema_version":self.schema_version,"session_id":self.session_id,
+                "timestamp":datetime.now(timezone.utc).isoformat(),"slot":request.slot,
                 "input_ref":"sha256:"+hashlib.sha256(request.state.encode()).hexdigest(),
                 "baseline":baseline_side,"jev":jev_side,"agreement":_agreement(baseline_side,jev_side),
                 "jev_fallback_count":0,"jev_error_count":int(shadow_err is not None)}

@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from vmodel_contracts import AppArchetype,ConOpsDocument,IntakeSubmission,IntentModel
+from vmodel_contracts.facets import COVERAGE_SCHEMA
 from vmodel_contracts.interactive import InputKind,InputOption,InputRequest,InputResponse,NextStep,ProcessStatus
 from vmodel_contracts.runtime import artifacts_root
 from .conops_stage import founder_decision,render_conops
@@ -23,11 +24,15 @@ class InterviewApplication:
     def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None):
         self.session_id,self.task_id=session_id,task_id
         self.outdir=artifacts_root(artifact_root)/session_id/'interview';self.outdir.mkdir(parents=True,exist_ok=True)
+        from .evidence import EvidenceLake
+        self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
+        self.schema_binding=self.evidence.bind_session(session_id)
         db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
         saver=SqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
         progress=ProgressBus();progress.subscribe(stderr_printer())
-        self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug')
+        self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug',
+            session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version)
         self.cfg={'configurable':{'thread_id':session_id}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
         self.state={'messages':[HumanMessage(content=idea)],'submission':submission.model_dump(mode='json')}

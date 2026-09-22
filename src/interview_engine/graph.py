@@ -66,7 +66,7 @@ def _clean_single_question(text: str) -> str | None:
     return candidate
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
@@ -116,7 +116,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             from .categorization_shadow import ShadowCategorizer
             shadow_provider = type("JevOnly", (), {"classify": lambda self, request: jev.classify(request)})()
             shadow_path = Path(raw_output_dir).parent / "categorization-shadow.jsonl" if raw_output_dir else Path("categorization-shadow.jsonl")
-            categorizer = ShadowCategorizer(categorizer, shadow_provider, shadow_path, usage_log)
+            categorizer = ShadowCategorizer(categorizer, shadow_provider, shadow_path, usage_log, session_id=session_id, schema_id=schema_id, schema_version=schema_version)
         else:
             categorizer = build_categorizer(adapters, jsonl_audit_sink(audit_path))
 

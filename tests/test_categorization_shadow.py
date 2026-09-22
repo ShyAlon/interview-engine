@@ -43,3 +43,9 @@ def test_observability_io_failure_never_changes_authoritative_result(tmp_path,mo
     shadow=ShadowCategorizer(Cat(baseline),Cat(result('typesafe','accepted')),tmp_path/'shadow.jsonl')
     monkeypatch.setattr('interview_engine.categorization_shadow.os.fsync',lambda _fd: (_ for _ in ()).throw(OSError('disk full')))
     assert shadow.classify(req()) is baseline
+
+def test_shadow_record_pins_session_schema_version(tmp_path):
+    path=tmp_path/'shadow.jsonl';baseline=result('llm','accepted');jev=result('typesafe','accepted')
+    ShadowCategorizer(Cat(baseline),Cat(jev),path,session_id='s1',schema_id='interview.coverage',schema_version='1.0.0').classify(req())
+    row=json.loads(path.read_text())
+    assert row['session_id']=='s1' and row['schema_id']=='interview.coverage' and row['schema_version']=='1.0.0'
