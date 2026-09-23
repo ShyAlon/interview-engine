@@ -44,7 +44,7 @@ def input_package(request):
     questions=_jsonable(request.questions)
     rubric_json=json.dumps(questions,sort_keys=True,separators=(",",":"),default=str)
     return {"state":request.state,"context":_jsonable(request.context),"questions":questions,
-            "rubric_version":RUBRIC_VERSION,
+            "rubric_version":getattr(request,"rubric_version","") or RUBRIC_VERSION,
             "rubric_ref":"sha256:"+hashlib.sha256(rubric_json.encode()).hexdigest()}
 
 

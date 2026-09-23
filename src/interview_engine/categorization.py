@@ -42,6 +42,7 @@ class ClassificationRequest:
     state: str
     questions: Mapping[str, Question]
     context: Mapping[str, Any] = field(default_factory=dict)
+    rubric_version: str = ""  # empty means the pre-variant v1 rubric
 
 
 @dataclass(frozen=True)
@@ -268,20 +269,20 @@ INTENT_LABELS = {
     "enough": "founder explicitly ends the whole interview",
 }
 
-def coverage_request(question: str, answer: str, target: str | None = None) -> ClassificationRequest:
-    questions: dict[str, Question] = {
-        "relevance": ChoiceQuestion("Did the answer address the question?", {
-            "addressed": "directly and substantively answers it", "partial": "answers only part or remains vague",
-            "dodged": "does not answer, changes subject, or refuses without delegating"}),
-    }
+def coverage_request(question: str, answer: str, target: str | None = None, relevance_variant=None) -> ClassificationRequest:
+    from .categorization_rubrics import configured_variant, get_variant
+    variant = get_variant(relevance_variant) if isinstance(relevance_variant, str) else (relevance_variant or configured_variant("relevance"))
+    questions: dict[str, Question] = dict(variant.questions)
     for area in COVERAGE_AREAS:
         questions[f"covers_{area}"] = NoulQuestion(f"The answer supplies concrete product facts for coverage area: {area}")
-    return ClassificationRequest("coverage", f"Question: {question}\nAnswer: {answer}", questions, {"target": target or ""})
+    return ClassificationRequest("coverage", f"Question: {question}\nAnswer: {answer}", questions, {"target": target or ""},
+                                 rubric_version=variant.rubric_version)
 
-def intent_request(question: str, answer: str) -> ClassificationRequest:
-    return ClassificationRequest("intent", f"Question: {question}\nFounder answer: {answer}", {
-        "intent": ChoiceQuestion("Classify the founder's control intent", INTENT_LABELS),
-    })
+def intent_request(question: str, answer: str, variant=None) -> ClassificationRequest:
+    from .categorization_rubrics import configured_variant, get_variant
+    v = get_variant(variant) if isinstance(variant, str) else (variant or configured_variant("intent"))
+    return ClassificationRequest("intent", f"Question: {question}\nFounder answer: {answer}", dict(v.questions),
+                                 rubric_version=v.rubric_version)
 
 TERMINAL_INTENTS = frozenset({"dismiss", "skip", "enough"})
 
