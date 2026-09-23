@@ -48,10 +48,29 @@ def input_package(request):
             "rubric_ref":"sha256:"+hashlib.sha256(rubric_json.encode()).hexdigest()}
 
 
+def valid_for_request(result, request) -> bool:
+    """Status/schema check: every choice question answered with a listed label."""
+    if result is None or not getattr(result,"answers",None):return False
+    for key,q in (request.questions or {}).items():
+        criteria=getattr(q,"criteria",None)
+        if not isinstance(criteria,dict):continue
+        a=result.answers.get(key)
+        if a is None or str(a.value) not in criteria:return False
+    return True
+
+
 class ShadowCategorizer:
-    """Return baseline decisions; run Jev concurrently and only observe it."""
-    def __init__(self, baseline, jev, jsonl_path, usage_log=None, report_path=None, *, session_id=None, schema_id=None, schema_version=None):
+    """Run baseline and Jev concurrently on every decision and record both.
+
+    By default the baseline is authoritative and Jev only observes. Slots
+    listed in ``authoritative`` (2026-09-23: scope) return Jev's decision
+    when it is ok and schema-valid; the baseline is the fallback on Jev
+    status/schema errors only. ``last_jev[slot]`` exposes Jev's latest
+    verdict so code-owned guards can compare the two sides."""
+    def __init__(self, baseline, jev, jsonl_path, usage_log=None, report_path=None, *, session_id=None, schema_id=None, schema_version=None,
+                 authoritative=()):
         self.baseline,self.jev,self.path,self.usage_log=baseline,jev,Path(jsonl_path),usage_log
+        self.authoritative=frozenset(authoritative);self.last_jev={}
         self.report_path=Path(report_path) if report_path else self.path.with_suffix(".md")
         self.session_id,self.schema_id,self.schema_version=session_id,schema_id,schema_version
         self.path.parent.mkdir(parents=True,exist_ok=True)
@@ -77,6 +96,14 @@ class ShadowCategorizer:
                 "input_ref":"sha256:"+hashlib.sha256(request.state.encode()).hexdigest(),"input":package,
                 "baseline":baseline_side,"jev":jev_side,"agreement":_agreement(baseline_side,jev_side),
                 "jev_fallback_count":0,"jev_error_count":int(shadow_err is not None)}
+        use_jev=False
+        if request.slot in self.authoritative:
+            use_jev=shadow_err is None and valid_for_request(shadow,request)
+            record["authority"]="jev" if use_jev else "baseline"
+            record["jev_fallback_count"]=int(not use_jev)
+        else:
+            record["authority"]="baseline"
+        self.last_jev[request.slot]=shadow if shadow_err is None else None
         try:
             with self.path.open("a") as f:
                 f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
@@ -84,6 +111,7 @@ class ShadowCategorizer:
             tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
         except Exception:
             pass
+        if use_jev: return shadow
         if base_err: raise base_err
         return base
 

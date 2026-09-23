@@ -1,4 +1,4 @@
-"""Rubric variants: v1 stays byte-identical, v2 variants are versioned, and the
+"""Rubric variants: intent-v1-133 stays byte-identical to the labeled rubric, v2 variants are versioned, and the
 boundary cases from the rare-class design are encoded in the rubric text or,
 for decomposed variants, in code-owned precedence. Hermetic: no Jev calls."""
 import csv, json, subprocess, sys
@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from interview_engine.categorization import (ChoiceQuestion, ClassificationAnswer, INTENT_LABELS, NoulQuestion,
                                              coverage_request, intent_request)
-from interview_engine.categorization_rubrics import (INTENT_VARIANTS, RELEVANCE_VARIANTS, V1_RUBRIC_VERSION,
+from interview_engine.categorization_rubrics import (INTENT_VARIANTS, RELEVANCE_VARIANTS, V1_RUBRIC_VERSION, V1_DEFER_RUBRIC_VERSION,
                                                      configured_variant, finalize_decomposed_intent,
                                                      finalize_decomposed_relevance, get_variant)
 from interview_engine.categorization_shadow import input_package
@@ -24,11 +24,26 @@ def _no_env_variant(monkeypatch):
     monkeypatch.setattr(mc, "_dotenv", lambda: {})
 
 
-def test_default_requests_are_the_labeled_v1_rubric_unchanged():
+V1_INTENT_133 = {"answer": "ordinary product answer", "delegate": "founder delegates the current detail",
+                 "dismiss": "founder closes the current topic/area", "skip": "founder explicitly skips the current area",
+                 "enough": "founder explicitly ends the whole interview"}
+
+
+def test_default_requests_are_v1_plus_defer_and_relevance_v1_unchanged():
     i = intent_request("Q", "A"); c = coverage_request("Q", "A")
     assert i.questions["intent"] == ChoiceQuestion("Classify the founder's control intent", INTENT_LABELS)
+    assert {k: v for k, v in INTENT_LABELS.items() if k != "defer"} == V1_INTENT_133  # v1 text untouched, defer added
+    assert "defer" in INTENT_LABELS
     assert c.questions["relevance"] == ChoiceQuestion("Did the answer address the question?", V1_REL)
-    assert input_package(i)["rubric_version"] == input_package(c)["rubric_version"] == V1_RUBRIC_VERSION
+    assert input_package(i)["rubric_version"] == V1_DEFER_RUBRIC_VERSION
+    assert input_package(c)["rubric_version"] == V1_RUBRIC_VERSION
+
+
+def test_intent_v1_133_is_the_labeled_rubric_byte_identical():
+    i = intent_request("Q", "A", "intent-v1-133")
+    assert i.questions["intent"] == ChoiceQuestion("Classify the founder's control intent", V1_INTENT_133)
+    assert list(i.questions["intent"].criteria) == list(V1_INTENT_133)
+    assert input_package(i)["rubric_version"] == V1_RUBRIC_VERSION
 
 
 def test_every_v2_variant_has_its_own_rubric_version_and_ref():
@@ -37,14 +52,14 @@ def test_every_v2_variant_has_its_own_rubric_version_and_ref():
         req = intent_request("Q", "A", v.id) if v.slot_key == "intent" else coverage_request("Q", "A", None, v.id)
         pkg = input_package(req)
         assert pkg["rubric_version"] == v.rubric_version
-        assert (pkg["rubric_version"] == V1_RUBRIC_VERSION) == v.id.endswith("-v1")
+        assert (pkg["rubric_version"] == V1_RUBRIC_VERSION) == (v.id in ("relevance-v1", "intent-v1-133"))
         refs.add(pkg["rubric_ref"])
     assert len(refs) == len(INTENT_VARIANTS) + len(RELEVANCE_VARIANTS)
 
 
 def test_choice_variants_keep_the_canonical_label_sets():
     for v in INTENT_VARIANTS.values():
-        if v.finalize is None: assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
+        if v.finalize is None and v.id != "intent-v1-133": assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
     for v in RELEVANCE_VARIANTS.values():
         if v.finalize is None: assert set(v.questions["relevance"].criteria) == set(V1_REL)
 
@@ -210,3 +225,10 @@ def test_scorer_accepts_multilabel_intent(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "{'skip+dismiss': 1}" in r.stdout
     assert "| baseline (original) | 1 | 0.00" in r.stdout   # delegate not in {skip, dismiss}, not compatible
+
+
+def test_decomposed_intent_maps_postponement_to_defer():
+    out = finalize_decomposed_intent(_sig(**{**BASE, "intent_postpones": .9, "intent_gives_content": .2}))
+    assert out["intent"].value == "defer"
+    out = finalize_decomposed_intent(_sig(**{**BASE, "intent_postpones": .6, "intent_gives_content": .9}))
+    assert out["intent"].value == "answer"

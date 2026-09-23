@@ -52,7 +52,11 @@ def turn_output_schema() -> dict:
     }
 
 UNCOVERED, THIN, COVERED, SKIPPED, DELEGATED = "uncovered", "thin", "covered", "skipped", "delegated"
-_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x", DELEGATED: "d"}
+# Founder postponed the area's open question ('I'll check and get back to
+# you'). Still open: never counted as covered or delegated, but the interview
+# moves on instead of re-asking now. A later concrete answer can still cover it.
+DEFERRED = "deferred"
+_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x", DELEGATED: "d", DEFERRED: "?"}
 
 
 def initial_coverage() -> dict[str, str]:
@@ -72,13 +76,17 @@ def status_block(coverage: dict[str, str]) -> str:
     """Compact per-turn coverage status for the interviewer system prompt."""
     marks = " ".join(f"{k}={_MARK[coverage.get(k, UNCOVERED)]}" for k in AREA_KEYS)
     nxt = next_area(coverage)
-    legend = "+ covered, d covered by explicit delegation, ~ thin, - uncovered, x skipped"
+    legend = "+ covered, d covered by explicit delegation, ~ thin, - uncovered, x skipped, ? deferred by founder (open, answer pending)"
     block = f"COVERAGE [{marks}]  ({legend})"
     if nxt:
         label, concretes = next(((l, c) for k, l, c in AREAS if k == nxt))
         block += f"\nNEXT TARGET: {label} - closed only by: {concretes}."
     else:
         block += "\nAll areas covered or skipped - close the interview (complete=true)."
+    deferred = [k for k in AREA_KEYS if coverage.get(k) == DEFERRED]
+    if deferred:
+        block += ("\nDEFERRED BY FOUNDER (still open; they will answer later - do not re-ask now, do not treat as decided): "
+                  + ", ".join(_LABELS[k] for k in deferred))
     return block
 
 
@@ -86,6 +94,9 @@ def progress_line(coverage: dict[str, str]) -> str:
     done = [k for k in AREA_KEYS if coverage.get(k) in (COVERED, SKIPPED, DELEGATED)]
     nxt = next_area(coverage)
     line = f"coverage {len(done)}/{len(AREA_KEYS)} ({', '.join(done) or 'none yet'})"
+    deferred = [k for k in AREA_KEYS if coverage.get(k) == DEFERRED]
+    if deferred:
+        line += f" - deferred by founder: {', '.join(deferred)}"
     return line + (f" - next: {_LABELS[nxt]}" if nxt else " - saturated")
 
 
@@ -167,6 +178,25 @@ def is_deferral(text: str) -> bool:
     return bool(_DEFERRAL_RE.match(text or ""))
 
 
+# Explicit postponement (2026-09-23 taxonomy): the founder will answer later.
+# Not a delegation (nobody was handed the choice) and not settled.
+_DEFER_RE = re.compile(
+    r"\b(?:i'?ll|i will|we'?ll|we will|let me|i can) (?:\w+ )?(?:get|come) back to you\b|"
+    r"\b(?:i|we) (?:need|have|'?d need|would need) to (?:ask|check with|talk to|consult|confirm (?:it |this |that )?with)\b|"
+    r"\blet me (?:ask|check with|talk to|confirm (?:it |this |that )?with|find out)\b|"
+    r"\b(?:i'?ll|i will|we'?ll) (?:ask(?! you\b)|check with|talk to|confirm (?:it |this |that )?with|find out)\b",
+    re.IGNORECASE)
+
+
+def is_postponement(text: str) -> bool:
+    """Short replies anywhere; long replies only when the postponement leads,
+    so a substantive answer with one 'I'll check X' aside stays an answer."""
+    t = (text or "").strip()
+    if len(t.split()) > 25:
+        t = re.split(r"(?<=[.!?])\s+", t, maxsplit=1)[0]
+    return bool(_DEFER_RE.search(t))
+
+
 def founder_steer(text: str) -> str | None:
     """An explicit founder steer (2026-09-12 transcript: 'No. You do it.',
     'Can you move on from the UI?'): 'delegate' hands the current detail to
@@ -174,6 +204,8 @@ def founder_steer(text: str) -> str | None:
     terminal - no rephrase-and-ask-again. Whole-message matching only for
     deferrals; dismissal needs one clear phrase."""
     t = (text or "").strip()
+    if is_postponement(t):
+        return "defer"
     if is_deferral(t):
         return "delegate"
     # a steer may LEAD a longer answer ('You suggest. I'm good with any cloud.')

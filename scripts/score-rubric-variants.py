@@ -13,6 +13,7 @@ Multi-label intent (locked 2026-09-23): human_verdict intent may be a single
 string or a JSON array. A prediction is correct if it is in the label set, and
 answer/delegate are compatible (delegate is an autonomy grant, not a
 non-answer): predicting either one is correct when the set holds either one.
+defer is compatible with neither.
 For the per-label P/R columns, a correct prediction counts as that label; a
 miss counts against the first label in his set.
 """
@@ -21,7 +22,11 @@ import argparse, csv, json, sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-INTENT_LABELS = ("answer", "delegate", "dismiss", "skip", "enough")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# Intent labels and compatibility come from the single source of truth.
+from interview_engine.intent_taxonomy import COMPATIBLE_GROUPS, INTENT_ORDER, compatible  # noqa: E402
+
+INTENT_LABELS = INTENT_ORDER
 
 
 def _parse(v):
@@ -31,7 +36,7 @@ def _parse(v):
     except json.JSONDecodeError: return v
 
 
-COMPATIBLE = {"intent": frozenset({"answer", "delegate"})}
+COMPATIBLE = {"intent": COMPATIBLE_GROUPS}  # answer+delegate; defer compatible with neither
 
 
 def _labels(value):
@@ -49,9 +54,8 @@ def truth_set(row, field):
 
 
 def is_correct(pred, labels, field):
-    if pred in labels: return True
-    group = COMPATIBLE.get(field, frozenset())
-    return pred in group and any(l in group for l in labels)
+    if field == "intent": return compatible(pred, labels)
+    return pred in labels
 
 
 def effective_truth(pred, labels, field):

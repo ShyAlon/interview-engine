@@ -169,11 +169,25 @@ def llm_provider(sub: IntakeSubmission, chat_model, usage_log=None, raw_output_l
     }
 
 
+WEB_ARCHETYPES = frozenset(a.value for a in AppArchetype if a is not AppArchetype.NOT_WEB_APP)
+
+
+def reconcile_scope(accepted: str, archetype: str) -> tuple[str, bool]:
+    """Field-consistency rule (2026-09-23 merge, agreed by Shy): 'rejected'
+    with a web archetype is self-contradictory - the decider named what kind
+    of web product it is. Treat it as accepted with that archetype. Returns
+    (accepted_value, was_corrected)."""
+    if accepted == "rejected" and archetype in WEB_ARCHETYPES:
+        return "accepted", True
+    return accepted, False
+
+
 def verdict_with_categorizer(sub: IntakeSubmission, categorizer) -> ScopeVerdict:
     result = categorizer.classify(categorization_request(sub))
     accepted_answer = result.answers["accepted"]
     archetype_answer = result.answers["archetype"]
-    accepted = accepted_answer.value == "accepted"
+    accepted_value, _corrected = reconcile_scope(str(accepted_answer.value), str(archetype_answer.value))
+    accepted = accepted_value == "accepted"
     archetype = AppArchetype(str(archetype_answer.value))
     confidence_values = [x for x in (accepted_answer.confidence, archetype_answer.confidence) if x is not None]
     confidence = min(confidence_values) if confidence_values else 0.0

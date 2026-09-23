@@ -24,7 +24,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
-from .coverage import (COVERED, THIN, SKIPPED, _LABELS, apply_reply, extract_turn_json, founder_control,
+from .coverage import (COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
                          founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
@@ -48,6 +48,8 @@ class InterviewState(TypedDict, total=False):
     delegated_decisions: list[dict]  # founder-delegated choices, captured as research briefs
     question_history: list[dict]  # code-owned emitted questions: {area, question}
     repeat_strikes: int       # cumulative repeated-non-answer detections (repeat_guard)
+    deferred_questions: list[dict]  # founder-postponed questions: open, not decided, not delegated
+    intent_guard_area: str    # area where the intent re-ask guard last fired ('' when it did not)
     turn_count: int
 
 
@@ -117,7 +119,14 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             from .categorization_shadow import ShadowCategorizer
             shadow_provider = type("JevOnly", (), {"classify": lambda self, request: jev.classify(request)})()
             shadow_path = Path(raw_output_dir).parent / "categorization-shadow.jsonl" if raw_output_dir else Path("categorization-shadow.jsonl")
-            categorizer = ShadowCategorizer(categorizer, shadow_provider, shadow_path, usage_log, session_id=session_id, schema_id=schema_id, schema_version=schema_version)
+            # 2026-09-23 merge (agreed by Shy): Jev owns scope, including
+            # rejections; baseline is the fallback on Jev status/schema errors.
+            # INTERVIEW_ENGINE_JEV_AUTHORITY=none restores observe-only shadow.
+            authority_raw = (model_config._env("INTERVIEW_ENGINE_JEV_AUTHORITY") or "scope").strip().lower()
+            authoritative = () if authority_raw in {"", "none", "0", "off", "false"} else tuple(
+                x.strip() for x in authority_raw.split(",") if x.strip())
+            categorizer = ShadowCategorizer(categorizer, shadow_provider, shadow_path, usage_log, session_id=session_id, schema_id=schema_id, schema_version=schema_version,
+                                            authoritative=authoritative)
         else:
             categorizer = build_categorizer(adapters, jsonl_audit_sink(audit_path))
 
@@ -154,6 +163,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
         classified_control = None
+        guard_fired = None
+        guard_area = ""
 
         # Repeated non-answer guard (2026-09-23 smoke): the same substantive
         # answer pasted at consecutive questions is a dodge, not an answer.
@@ -197,13 +208,42 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if categorizer.active("intent"):
                 intent_result = categorizer.classify(intent_request(prior_question, founder_answer))
                 classified_control = classified_intent(intent_result.answers)
+                # Re-ask guard (2026-09-23 merge): the baseline owns intent, but
+                # when it closes the area (dismiss or skip) while Jev reads the
+                # same reply as an answer, re-ask once instead of closing. A
+                # second disagreement on the same area honors the baseline.
+                jev_seen = getattr(categorizer, "last_jev", {}).get("intent")
+                jev_intent = str(jev_seen.answers["intent"].value) if (
+                    jev_seen is not None and "intent" in getattr(jev_seen, "answers", {})) else None
+                guard_area = state.get("coverage_target") or next_area(coverage) or ""
+                from .categorization import guarded_intent
+                classified_control, guard_fired = guarded_intent(
+                    classified_control, jev_intent, bool(guard_area) and state.get("intent_guard_area") == guard_area)
+                if guard_fired:
+                    if progress is not None:
+                        progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _time.time(), 0.0,
+                            f"intent guard: baseline '{guard_fired}' vs Jev 'answer' - re-asking once instead of closing"))
 
         # Founder steers are terminal (2026-09-12 transcript: 'No. You do it.'
         # got rephrased and re-asked twice). 'delegate' parks the sub-topic and
         # records the delegation for the intent model; 'dismiss' closes the
         # whole target area. Neither may be rephrased and re-asked.
+        guard_area_out = guard_area if guard_fired else ""
         steer = (classified_control if categorizer.active("intent") else
                  (founder_steer(getattr(last, "content", "")) if last is not None and getattr(last, "type", "") == "human" else None))
+        deferred_questions = [dict(d) for d in (state.get("deferred_questions") or [])]
+        if steer == "defer" and last is not None:
+            # Postponement: the question stays open. Not covered, not
+            # delegated, not terminal - the interview moves on and the area is
+            # shown as deferred (pending the founder's answer).
+            prior_q = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
+                            if getattr(m, "type", "") == "ai"), "")
+            area = state.get("coverage_target") or next_area(coverage)
+            deferred_questions.append({"area": area or "", "question": prior_q,
+                                       "founder_words": getattr(last, "content", "").strip()[:200],
+                                       "source_turns": [len(state["messages"]) - 1]})
+            if area and coverage.get(area) in ("uncovered", "thin"):
+                coverage[area] = DEFERRED
         steer = steer if steer in ("delegate", "dismiss") else None
         delegated = [dict(d) for d in (state.get("delegated_decisions") or [])]
         if steer:
@@ -271,7 +311,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             history = state["messages"]
             parked_block = ("\n\nPARKED SUB-TOPICS (founder deferred; never ask these again): "
                             + ", ".join(parked_topics)) if parked_topics else ""
-            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + parked_block + "\n\n" + STRUCTURED_TURN_FORMAT
+            guard_block = ("\n\nAMBIGUOUS LAST REPLY: it may close this area or may be an answer. Ask once, briefly, "
+                           "whether the founder wants to answer it or move on.") if guard_fired else ""
+            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + parked_block + guard_block + "\n\n" + STRUCTURED_TURN_FORMAT
             _t0 = _time.time()
             request_messages = [SystemMessage(content=system), *history,
                                 HumanMessage(content="FINAL RESPONSE CONTRACT: " + STRUCTURED_TURN_FORMAT)]
@@ -400,6 +442,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return {"messages": [AIMessage(content=question)], "coverage": coverage,
                 "coverage_target": emitted_target or "", "parked_topics": parked_topics,
                 "delegated_decisions": delegated, "question_history": history_log,
+                "deferred_questions": deferred_questions, "intent_guard_area": guard_area_out,
                 "repeat_strikes": repeat_strikes, "turn_count": turn}
 
     def route_interview(state: InterviewState) -> str:

@@ -20,11 +20,15 @@ from dataclasses import dataclass
 from typing import Callable, Mapping
 
 from .categorization import ChoiceQuestion, ClassificationAnswer, NoulQuestion, Question
+from .intent_taxonomy import INTENT_DEFS, INTENT_EXAMPLES, INTENT_ORDER, INTENT_SHORT
 
 V1_RUBRIC_VERSION = "categorization-request-v1"
+# intent-v1 plus the defer label (2026-09-23). The pre-defer text is kept
+# verbatim as intent-v1-133 so replays stay comparable with the 133 labels.
+V1_DEFER_RUBRIC_VERSION = "categorization-request-v1.1"
 INTENT_KEY = "intent"
 RELEVANCE_KEY = "relevance"
-INTENT_CANONICAL = ("answer", "delegate", "dismiss", "skip", "enough")
+INTENT_CANONICAL = INTENT_ORDER  # from intent_taxonomy, the single source of truth
 RELEVANCE_CANONICAL = ("addressed", "partial", "dodged")
 
 Finalize = Callable[[Mapping[str, ClassificationAnswer]], dict[str, ClassificationAnswer]]
@@ -38,9 +42,11 @@ class RubricVariant:
     questions: Mapping[str, Question]
     finalize: Finalize | None = None
     production_ok: bool = True  # decomposed variants need finalize wiring in the chain first
+    version: str | None = None  # explicit rubric_version; default derives from the id
 
     @property
     def rubric_version(self) -> str:
+        if self.version: return self.version
         return V1_RUBRIC_VERSION if self.id.endswith("-v1") else f"categorization-request-v2/{self.id}"
 
     def apply(self, answers: Mapping[str, ClassificationAnswer]) -> dict[str, ClassificationAnswer]:
@@ -48,50 +54,24 @@ class RubricVariant:
 
 
 # ------------------------------------------------------------------ intent
-_INTENT_V1 = {
+# Frozen: the exact 5-label rubric the 2026-09-23 labels were collected against.
+_INTENT_V1_133 = {
     "answer": "ordinary product answer", "delegate": "founder delegates the current detail",
     "dismiss": "founder closes the current topic/area", "skip": "founder explicitly skips the current area",
     "enough": "founder explicitly ends the whole interview",
 }
-
-_INTENT_DEFS = {
-    "answer": ("The founder gives product content for the question: facts, rules, preferences, examples, "
-               "or an honest 'not sure yet' with some content. This is the default when no explicit control move is present."),
-    "delegate": ("The founder explicitly hands THIS decision to the interviewer/builder to choose on their behalf, "
-                 "instead of choosing themselves."),
-    "dismiss": ("The founder explicitly asks to stop discussing the current topic and move on, while the interview continues."),
-    "skip": ("The founder explicitly declines to answer this question or area at all, without handing the choice to anyone."),
-    "enough": ("The founder explicitly asks to end the whole interview now."),
-}
-
-_INTENT_EXAMPLES = {
-    "answer": _INTENT_DEFS["answer"] + (
-        " Examples: 'Admins approve refunds over $50.' / 'Probably weekly, but I haven't decided.' "
-        "/ 'The system should assign it automatically, round-robin.' (a product rule about the software deciding, not a delegation). "
-        "Not answer: any reply whose main move is one of the control phrases below."),
-    "delegate": _INTENT_DEFS["delegate"] + (
-        " Examples: 'Your call.' / 'Pick whatever you think works.' / 'Use the usual default here.' / "
-        "'Do it the way most booking tools do it.' (hands the detail to the builder's judgment). "
-        "Not delegate: the founder states a rule where the PRODUCT decides; the founder says someone else on their side will answer later."),
-    "dismiss": _INTENT_DEFS["dismiss"] + (
-        " Examples: 'Let's move on.' / 'That's covered, next topic.' / 'I've said all I have on that.' "
-        "Not dismiss: a short answer that still gives content."),
-    "skip": _INTENT_DEFS["skip"] + (
-        " Examples: 'Skip this one.' / 'I'd rather not get into that.' / 'Not relevant for us, skip it.' "
-        "Not skip: 'you choose' (that is delegate); 'next topic' after answering (that is dismiss)."),
-    "enough": _INTENT_DEFS["enough"] + (
-        " Examples: 'That's enough, write the spec.' / 'I'm done with the interview.' "
-        "Not enough: closing only the current topic (that is dismiss)."),
-}
+_INTENT_V1 = dict(INTENT_SHORT)
+_INTENT_DEFS = dict(INTENT_DEFS)
+_INTENT_EXAMPLES = dict(INTENT_EXAMPLES)
 
 _OFFTOPIC_RULE = (
     " Rule for off-topic or pasted text: if the reply does not engage with the question (generic or canned text, "
     "text about a different topic, or a request unrelated to the question) and contains no explicit control phrase, "
-    "label it answer. Relevance is judged separately; do not turn a non-responsive reply into delegate, dismiss or skip.")
+    "label it answer. Relevance is judged separately; do not turn a non-responsive reply into delegate, defer, dismiss or skip.")
 
-_INTENT_V2A_INSTR = ("Classify the founder's control intent for this one reply. Choose delegate, dismiss, skip or enough "
+_INTENT_V2A_INSTR = ("Classify the founder's control intent for this one reply. Choose delegate, defer, dismiss, skip or enough "
                      "ONLY when the reply contains an explicit control move; otherwise choose answer.")
-_INTENT_V2B_INSTR = (_INTENT_V2A_INSTR + " delegate = the builder chooses; skip = nobody answers; dismiss = stop this topic; "
+_INTENT_V2B_INSTR = (_INTENT_V2A_INSTR + " delegate = the builder chooses; defer = the founder answers later; skip = nobody answers; dismiss = stop this topic; "
                      "enough = stop the whole interview. A rule saying the product/app decides something is answer.")
 
 
@@ -105,6 +85,8 @@ _DECOMP_INTENT = {
     "intent_declines": "The founder explicitly declines to answer this question at all (for example 'skip this', 'rather not say').",
     "intent_hands_choice": ("The founder explicitly hands this decision to the interviewer or builder to choose for them "
                             "(for example 'your call', 'pick whatever is standard'). A rule saying the product or app decides is NOT this."),
+    "intent_postpones": ("The founder explicitly postpones this question to answer it later, for example after checking "
+                         "with someone on their side. Nobody is handed the choice."),
     "intent_gives_content": "The reply states product facts, rules, preferences or examples for the question.",
 }
 DECOMPOSED_THRESHOLD = .5
@@ -124,18 +106,21 @@ def finalize_decomposed_intent(answers: Mapping[str, ClassificationAnswer]) -> d
     if s["intent_ends_interview"] >= t: label, conf = "enough", s["intent_ends_interview"]
     elif s["intent_declines"] >= t and s["intent_declines"] > content: label, conf = "skip", s["intent_declines"]
     elif s["intent_closes_topic"] >= t and s["intent_closes_topic"] > content: label, conf = "dismiss", s["intent_closes_topic"]
+    elif s["intent_postpones"] >= t and s["intent_postpones"] > content: label, conf = "defer", s["intent_postpones"]
     elif s["intent_hands_choice"] >= t: label, conf = "delegate", s["intent_hands_choice"]
     else:
         label = "answer"
-        conf = 1 - max(s["intent_ends_interview"], s["intent_declines"], s["intent_closes_topic"], s["intent_hands_choice"])
+        conf = 1 - max(s["intent_ends_interview"], s["intent_declines"], s["intent_closes_topic"], s["intent_postpones"], s["intent_hands_choice"])
     out = dict(answers)
     out[INTENT_KEY] = ClassificationAnswer(label, round(conf, 4), {k: v for k, v in s.items()})
     return out
 
 
 INTENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
-    RubricVariant("intent-v1", INTENT_KEY, "Control: the rubric the 133-case labels were collected against.",
-                  _intent_choice("Classify the founder's control intent", _INTENT_V1)),
+    RubricVariant("intent-v1", INTENT_KEY, "Production default: the labeled v1 rubric plus the defer label.",
+                  _intent_choice("Classify the founder's control intent", _INTENT_V1), version=V1_DEFER_RUBRIC_VERSION),
+    RubricVariant("intent-v1-133", INTENT_KEY, "Frozen control: the exact 5-label rubric the 133-case labels were collected against (no defer).",
+                  _intent_choice("Classify the founder's control intent", _INTENT_V1_133), version=V1_RUBRIC_VERSION),
     RubricVariant("intent-v2a-defs", INTENT_KEY, "Minimal sharpening: one-sentence boundaries, answer is the default.",
                   _intent_choice(_INTENT_V2A_INSTR, _INTENT_DEFS)),
     RubricVariant("intent-v2b-examples", INTENT_KEY, "Taxonomy + positive/negative examples per label.",

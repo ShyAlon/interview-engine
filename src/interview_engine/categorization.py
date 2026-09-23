@@ -263,11 +263,8 @@ def build_categorizer(adapters: Mapping[str, Mapping[str, ClassificationProvider
 
 
 COVERAGE_AREAS = ("goal", "users", "flows", "data", "integrations", "nfrs", "failures", "constraints", "risks", "done", "glossary")
-INTENT_LABELS = {
-    "answer": "ordinary product answer", "delegate": "founder delegates the current detail",
-    "dismiss": "founder closes the current topic/area", "skip": "founder explicitly skips the current area",
-    "enough": "founder explicitly ends the whole interview",
-}
+from .intent_taxonomy import GATED_INTENTS, INTENT_SHORT, TERMINAL_INTENTS  # single source of truth
+INTENT_LABELS = dict(INTENT_SHORT)
 
 def coverage_request(question: str, answer: str, target: str | None = None, relevance_variant=None) -> ClassificationRequest:
     from .categorization_rubrics import configured_variant, get_variant
@@ -284,7 +281,6 @@ def intent_request(question: str, answer: str, variant=None) -> ClassificationRe
     return ClassificationRequest("intent", f"Question: {question}\nFounder answer: {answer}", dict(v.questions),
                                  rubric_version=v.rubric_version)
 
-TERMINAL_INTENTS = frozenset({"dismiss", "skip", "enough"})
 
 def apply_coverage_answers(coverage: Mapping[str, str], answers: Mapping[str, ClassificationAnswer]) -> dict[str, str]:
     """Code-owned accumulation. Classifiers judge one answer; they never own state."""
@@ -302,6 +298,20 @@ def apply_coverage_answers(coverage: Mapping[str, str], answers: Mapping[str, Cl
 def classified_intent(answers: Mapping[str, ClassificationAnswer], terminal_threshold: float = .9) -> str:
     answer = answers["intent"]
     intent = str(answer.value)
-    if intent in TERMINAL_INTENTS and (answer.confidence is None or answer.confidence < terminal_threshold):
+    if intent in GATED_INTENTS and (answer.confidence is None or answer.confidence < terminal_threshold):
         return "answer"
     return intent
+
+
+# Re-ask guard (2026-09-23 merge): baseline intents that close an area get one
+# re-ask when Jev reads the same reply as an answer. dismiss since the merge;
+# skip added after the 10 uncovered baseline-skip + Jev-answer rows.
+INTENT_GUARD_BASELINE = frozenset({"dismiss", "skip"})
+
+
+def guarded_intent(baseline: str | None, jev: str | None, already_reasked: bool) -> tuple[str | None, str | None]:
+    """Return (intent_to_act_on, guard_fired_on). The guard fires once per
+    area: a second disagreement on the same area honors the baseline."""
+    if baseline in INTENT_GUARD_BASELINE and jev == "answer" and not already_reasked:
+        return "answer", baseline
+    return baseline, None
