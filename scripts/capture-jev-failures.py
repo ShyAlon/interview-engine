@@ -69,11 +69,12 @@ def failing_rows(rows, key):
     for r in rows:
         field = FIELDS.get(r["slot"]); k = key.get(r["case_id"])
         if not field or not k: continue
-        truth = score.truth(r, field)
-        if not truth: continue
+        labels = score.truth_set(r, field)
+        if not labels: continue
+        truth = labels[0] if len(labels) == 1 else labels
         side = "system_a" if k["system_a"] == "jev" else "system_b"
         verdict = score._parse(r[side + "_verdict"]) or {}; conf = score._parse(r[side + "_confidence"]) or {}
-        if str(verdict.get(field)) != truth:
+        if not score.is_correct(str(verdict.get(field)), labels, field):
             out.append((r, field, truth, verdict, conf))
     return out
 
@@ -108,7 +109,8 @@ def main(argv=None):
         client = TypeSafeClient(api_key=api_key, transport=recording_transport(log))
         case = {"case_id": r["case_id"], "input_ref": r["input_ref"], "slot": r["slot"], "field": field,
                 "input_package": {**input_package(req), "rubric_version": r.get("rubric_version") or ""},
-                "human_label": truth, "human_verdict_raw": r.get("human_verdict") or "", "winner": r.get("winner") or "",
+                "human_label": truth if isinstance(truth, str) else " + ".join(truth),
+                **({"human_labels": truth} if isinstance(truth, list) else {}), "human_verdict_raw": r.get("human_verdict") or "", "winner": r.get("winner") or "",
                 "review_notes": r.get("review_notes") or "",
                 "jev_v1_original": {"verdict": verdict, "confidence": conf}, "reissued": {"exchanges": log}}
         try:

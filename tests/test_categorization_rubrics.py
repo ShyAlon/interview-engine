@@ -190,5 +190,23 @@ def test_replay_writes_v2_records_per_variant_with_fake_jev(tmp_path, monkeypatc
     r = subprocess.run([sys.executable, str(ROOT / "scripts/score-rubric-variants.py"), str(lab), str(key), str(out)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "| baseline (original) | 1 | 1.00" in r.stdout and "| jev-v1 (original) | 1 | 0.00" in r.stdout
+    assert "| baseline (original) | 1 | 1.00" in r.stdout and "| jev-v1 (original) | 1 | 1.00" in r.stdout  # answer vs delegate: compatible
     assert "intent-v2c-offtopic" in r.stdout and "relevance-v2a-anchored" in r.stdout
+
+
+def test_scorer_accepts_multilabel_intent(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("score", ROOT / "scripts/score-rubric-variants.py")
+    sc = importlib.util.module_from_spec(spec); spec.loader.exec_module(sc)
+    lab = _write_labeled(tmp_path)
+    rows = list(csv.DictReader(lab.open()))
+    rows[0]["human_verdict"] = '{"intent": ["skip", "dismiss"]}'; rows[0]["winner"] = "neither"
+    with lab.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+    key = tmp_path / "key.json"
+    key.write_text(json.dumps([{"case_id": "c1", "system_a": "baseline", "system_b": "jev"}, {"case_id": "c2", "system_a": "baseline", "system_b": "jev"}]))
+    out = tmp_path / "empty"; out.mkdir()
+    r = subprocess.run([sys.executable, str(ROOT / "scripts/score-rubric-variants.py"), str(lab), str(key), str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "{'skip+dismiss': 1}" in r.stdout
+    assert "| baseline (original) | 1 | 0.00" in r.stdout   # delegate not in {skip, dismiss}, not compatible

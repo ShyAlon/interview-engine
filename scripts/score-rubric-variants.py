@@ -8,6 +8,13 @@ otherwise the winner side's verdict (A/B); on a tie, the value both sides
 share. 'neither' rows with no human_verdict have no usable label and are
 counted, not scored. The original baseline and Jev-v1 columns (unblinded with
 the key) are scored on exactly the same rows for a like-for-like table.
+
+Multi-label intent (locked 2026-09-23): human_verdict intent may be a single
+string or a JSON array. A prediction is correct if it is in the label set, and
+answer/delegate are compatible (delegate is an autonomy grant, not a
+non-answer): predicting either one is correct when the set holds either one.
+For the per-label P/R columns, a correct prediction counts as that label; a
+miss counts against the first label in his set.
 """
 from __future__ import annotations
 import argparse, csv, json, sys
@@ -24,8 +31,37 @@ def _parse(v):
     except json.JSONDecodeError: return v
 
 
+COMPATIBLE = {"intent": frozenset({"answer", "delegate"})}
+
+
+def _labels(value):
+    if isinstance(value, list): return [str(v) for v in value if v not in (None, "")]
+    return [str(value)] if value not in (None, "") else []
+
+
+def truth_set(row, field):
+    """His label set for this row, or None when no usable label exists."""
+    hv = _parse(row.get("human_verdict"))
+    if isinstance(hv, dict) and _labels(hv.get(field)): return _labels(hv[field])
+    if isinstance(hv, list) and field == "intent" and _labels(hv): return _labels(hv)
+    t = truth(row, field)
+    return [t] if t else None
+
+
+def is_correct(pred, labels, field):
+    if pred in labels: return True
+    group = COMPATIBLE.get(field, frozenset())
+    return pred in group and any(l in group for l in labels)
+
+
+def effective_truth(pred, labels, field):
+    return pred if is_correct(pred, labels, field) else labels[0]
+
+
 def truth(row, field):
     hv = _parse(row.get("human_verdict"))
+    if isinstance(hv, dict) and isinstance(hv.get(field), list):
+        ls = _labels(hv[field]); return ls[0] if ls else None
     if isinstance(hv, dict) and hv.get(field) not in (None, ""): return str(hv[field])
     if isinstance(hv, str) and field == "intent": return hv
     a, b = _parse(row["system_a_verdict"]) or {}, _parse(row["system_b_verdict"]) or {}
@@ -58,11 +94,11 @@ def main(argv=None):
     out = []; P = out.append
     for slot, field, labels in (("intent", "intent", INTENT_LABELS), ("coverage", "relevance", ("addressed", "partial", "dodged"))):
         srows = [r for r in rows if r["slot"] == slot]
-        gt = {r["case_id"]: truth(r, field) for r in srows}
+        gt = {r["case_id"]: truth_set(r, field) for r in srows}
         scored = {c: t for c, t in gt.items() if t}
         P(f"## {slot} / {field}\n")
         P(f"Labeled rows: {len(srows)}; with usable ground truth: {len(scored)}; excluded (neither/unresolved tie): {len(srows) - len(scored)}")
-        P(f"Ground-truth distribution: {dict(Counter(scored.values()))}\n")
+        P(f"Ground-truth distribution: {dict(Counter('+'.join(v) for v in scored.values()))}\n")
         systems = {}
         for r in srows:
             if r["case_id"] not in scored or r["case_id"] not in key: continue
@@ -83,10 +119,10 @@ def main(argv=None):
         head = "| system | n | accuracy | macro-F1 | " + " | ".join(f"{l} P/R" for l in labels) + " | conf right / wrong |"
         P(head); P("|" + "---|" * (head.count("|") - 1))
         for name, preds in systems.items():
-            pairs = [(p, scored[c]) for c, (p, _) in preds.items()]
+            pairs = [(p, effective_truth(p, scored[c], field)) for c, (p, _) in preds.items()]
             acc, macro, per = metrics(pairs, labels)
-            right = [cf for c, (p, cf) in preds.items() if p == scored[c] and isinstance(cf, (int, float))]
-            wrong = [cf for c, (p, cf) in preds.items() if p != scored[c] and isinstance(cf, (int, float))]
+            right = [cf for c, (p, cf) in preds.items() if is_correct(p, scored[c], field) and isinstance(cf, (int, float))]
+            wrong = [cf for c, (p, cf) in preds.items() if not is_correct(p, scored[c], field) and isinstance(cf, (int, float))]
             cr = f"{sum(right)/len(right):.2f}" if right else "-"; cw = f"{sum(wrong)/len(wrong):.2f}" if wrong else "-"
             cells = " | ".join(f"{per[l][0]:.2f}/{per[l][1]:.2f}" if per[l][1] is not None else f"{per[l][0]:.2f}/-" for l in labels)
             P(f"| {name} | {len(pairs)} | {acc:.2f} | {macro:.2f} | {cells} | {cr} / {cw} |")
