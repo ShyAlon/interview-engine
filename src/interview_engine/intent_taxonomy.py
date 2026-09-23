@@ -19,27 +19,32 @@ import json
 # Canonical order: the order labels appear in prompts, tables and tools.
 INTENT_ORDER: tuple[str, ...] = ("answer", "delegate", "defer", "dismiss", "skip", "enough")
 
-# One-line criteria (the v1-style rubric text).
+# One-line criteria: the canonical label text shown to classifiers and
+# labelers. v1.2 (2026-09-23, Shy's rewrite): each label is phrased as what
+# the founder WANTS, so the classes do not overlap. Note the v1.2 meanings of
+# dismiss and skip: dismiss = does not want to tackle the topic at all;
+# skip = wants to move on (v1/v1.1 had "move on" under dismiss).
 INTENT_SHORT: dict[str, str] = {
-    "answer": "ordinary product answer",
-    "delegate": "founder delegates the current detail",
-    "defer": "founder postpones the current question to answer later (not decided, not delegated)",
-    "dismiss": "founder closes the current topic/area",
-    "skip": "founder explicitly skips the current area",
-    "enough": "founder explicitly ends the whole interview",
+    "answer": "Founder gives product information, even if it doesn't directly address the question asked",
+    "delegate": "Founder wants the interviewer to decide",
+    "defer": "Founder wants to answer later",
+    "dismiss": "Founder doesn't want to tackle this topic",
+    "skip": "Founder wants to move on",
+    "enough": "Founder wants to end the whole interview",
 }
 
-# One-sentence boundaries.
+# One-sentence boundaries, consistent with INTENT_SHORT.
 INTENT_DEFS: dict[str, str] = {
-    "answer": ("The founder gives product content for the question: facts, rules, preferences, examples, "
-               "or an honest 'not sure yet' with some content. This is the default when no explicit control move is present."),
-    "delegate": ("The founder explicitly hands THIS decision to the interviewer/builder to choose on their behalf, "
-                 "instead of choosing themselves."),
-    "defer": ("The founder explicitly postpones THIS question: they will answer it later, after checking with someone "
-              "or finding out. Nobody was handed the choice and nothing was decided."),
-    "dismiss": ("The founder explicitly asks to stop discussing the current topic and move on, while the interview continues."),
-    "skip": ("The founder explicitly declines to answer this question or area at all, without handing the choice to anyone."),
-    "enough": ("The founder explicitly asks to end the whole interview now."),
+    "answer": ("The founder gives product information: facts, rules, preferences or examples, even if it does not "
+               "directly address the question asked. Off-topic or pasted product text is still answer; whether it "
+               "addresses the question is judged separately (relevance). This is the default when the founder expresses no control wish."),
+    "delegate": "The founder wants the interviewer/builder to make this decision for them.",
+    "defer": ("The founder wants to answer this later, for example after checking with someone on their side. "
+              "Nothing is decided and nobody was handed the choice."),
+    "dismiss": ("The founder does not want to tackle this topic at all: they decline it, without handing the choice to anyone "
+                "and without promising to answer later."),
+    "skip": "The founder wants to move on from the current question to the next one; the interview continues.",
+    "enough": "The founder wants to end the whole interview now.",
 }
 
 # Definitions + positive/negative examples. Examples are paraphrased and must
@@ -47,26 +52,26 @@ INTENT_DEFS: dict[str, str] = {
 INTENT_EXAMPLES: dict[str, str] = {
     "answer": INTENT_DEFS["answer"] + (
         " Examples: 'Admins approve refunds over $50.' / 'Probably weekly, but I haven't decided.' "
-        "/ 'The system should assign it automatically, round-robin.' (a product rule about the software deciding, not a delegation). "
-        "Not answer: any reply whose main move is one of the control phrases below."),
+        "/ 'The system should assign it automatically, round-robin.' (a product rule about the software deciding, not a delegation) "
+        "/ a general product description that ignores the question (still answer). "
+        "Not answer: a reply whose main move is one of the wishes below and that gives no product information."),
     "delegate": INTENT_DEFS["delegate"] + (
         " Examples: 'Your call.' / 'Pick whatever you think works.' / 'Use the usual default here.' / "
         "'Do it the way most booking tools do it.' (hands the detail to the builder's judgment). "
-        "Not delegate: the founder states a rule where the PRODUCT decides; the founder says someone else on their side will answer later (that is defer)."),
+        "Not delegate: a rule where the PRODUCT decides (that is answer); the founder or someone on their side will answer later (that is defer)."),
     "defer": INTENT_DEFS["defer"] + (
         " Examples: 'Let me check with my cofounder and come back to you on that.' / "
-        "'I need to confirm this with our accountant first.' / 'Not sure yet - I'll find out and get back to you.' "
-        "Not defer: 'you choose' (that is delegate); 'skip this' (that is skip); a tentative answer with content (that is answer)."),
+        "'I need to confirm this with our accountant first.' / 'I'll find out and get back to you.' "
+        "Not defer: 'you choose' (that is delegate); 'I'd rather not get into that' (that is dismiss); a tentative answer with content (that is answer)."),
     "dismiss": INTENT_DEFS["dismiss"] + (
-        " Examples: 'Let's move on.' / 'That's covered, next topic.' / 'I've said all I have on that.' "
-        "Not dismiss: a short answer that still gives content."),
+        " Examples: 'I'd rather not get into that.' / 'That topic isn't relevant for us.' / 'I don't want to discuss pricing here.' "
+        "Not dismiss: 'you choose' (that is delegate); 'next question' (that is skip); 'I'll come back to you on that' (that is defer)."),
     "skip": INTENT_DEFS["skip"] + (
-        " Examples: 'Skip this one.' / 'I'd rather not get into that.' / 'Not relevant for us, skip it.' "
-        "Not skip: 'you choose' (that is delegate); 'next topic' after answering (that is dismiss); "
-        "'I'll find out and come back to you' (that is defer)."),
+        " Examples: 'Let's move on.' / 'Next question.' / 'I've said all I have on that.' "
+        "Not skip: declining the topic itself (that is dismiss); ending the whole interview (that is enough)."),
     "enough": INTENT_DEFS["enough"] + (
         " Examples: 'That's enough, write the spec.' / 'I'm done with the interview.' "
-        "Not enough: closing only the current topic (that is dismiss)."),
+        "Not enough: moving on from only the current question (that is skip)."),
 }
 
 # Labels that close the current area / interview.
@@ -90,9 +95,16 @@ def compatible(pred: str, labels) -> bool:
     return any(pred in g and any(l in g for l in labels) for g in COMPATIBLE_GROUPS)
 
 
+# Rubric version of the canonical criteria above. Bump with any text change.
+TAXONOMY_VERSION = "categorization-request-v1.2"
+# Labelers may pick several intent labels for one reply (locked 2026-09-23).
+MULTI_SELECT = True
+
+
 def taxonomy_json() -> str:
     """Machine-readable export for tools that cannot import Python."""
-    return json.dumps({"order": list(INTENT_ORDER), "short": INTENT_SHORT, "definitions": INTENT_DEFS,
+    return json.dumps({"version": TAXONOMY_VERSION, "slot": "intent", "key": "intent", "multi_select": MULTI_SELECT,
+                       "order": list(INTENT_ORDER), "short": INTENT_SHORT, "definitions": INTENT_DEFS,
                        "compatible_groups": [sorted(g) for g in COMPATIBLE_GROUPS],
                        "terminal": sorted(TERMINAL_INTENTS)}, indent=2)
 

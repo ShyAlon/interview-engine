@@ -117,3 +117,13 @@ def test_deferred_area_is_open_not_covered_and_the_interview_moves_on():
     assert "deferred by founder" in progress_line(cov) and "coverage 0/" in progress_line(cov)
     assert "DEFERRED BY FOUNDER" in status_block(cov)
     assert "Deferred by you - still open" in render_coverage_markdown(cov)
+
+
+def test_v1_2_answer_covers_off_topic_product_info_and_examples_agree():
+    from interview_engine.intent_taxonomy import INTENT_DEFS, INTENT_EXAMPLES, INTENT_SHORT, TAXONOMY_VERSION
+    assert "doesn't directly address the question" in INTENT_SHORT["answer"]
+    assert "off-topic" in INTENT_DEFS["answer"].lower()
+    for label in ("delegate", "defer", "dismiss", "skip", "enough"):
+        assert "off-topic" not in INTENT_EXAMPLES[label].lower()
+    assert "move on" in INTENT_EXAMPLES["skip"].lower() and "move on" not in INTENT_EXAMPLES["dismiss"].lower()
+    assert TAXONOMY_VERSION == "categorization-request-v1.2"

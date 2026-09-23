@@ -29,14 +29,35 @@ V1_INTENT_133 = {"answer": "ordinary product answer", "delegate": "founder deleg
                  "enough": "founder explicitly ends the whole interview"}
 
 
-def test_default_requests_are_v1_plus_defer_and_relevance_v1_unchanged():
+V1_1_INTENT = {**{k: V1_INTENT_133[k] for k in ("answer", "delegate")},
+               "defer": "founder postpones the current question to answer later (not decided, not delegated)",
+               **{k: V1_INTENT_133[k] for k in ("dismiss", "skip", "enough")}}
+V1_2_INTENT = {"answer": "Founder gives product information, even if it doesn't directly address the question asked",
+               "delegate": "Founder wants the interviewer to decide", "defer": "Founder wants to answer later",
+               "dismiss": "Founder doesn't want to tackle this topic", "skip": "Founder wants to move on",
+               "enough": "Founder wants to end the whole interview"}
+
+
+def test_default_intent_is_v1_2_from_the_taxonomy_and_relevance_v1_unchanged():
+    from interview_engine.categorization_rubrics import V1_2_RUBRIC_VERSION
     i = intent_request("Q", "A"); c = coverage_request("Q", "A")
     assert i.questions["intent"] == ChoiceQuestion("Classify the founder's control intent", INTENT_LABELS)
-    assert {k: v for k, v in INTENT_LABELS.items() if k != "defer"} == V1_INTENT_133  # v1 text untouched, defer added
-    assert "defer" in INTENT_LABELS
+    assert dict(INTENT_LABELS) == V1_2_INTENT and list(INTENT_LABELS) == list(V1_2_INTENT)
     assert c.questions["relevance"] == ChoiceQuestion("Did the answer address the question?", V1_REL)
-    assert input_package(i)["rubric_version"] == V1_DEFER_RUBRIC_VERSION
+    assert input_package(i)["rubric_version"] == V1_2_RUBRIC_VERSION == "categorization-request-v1.2"
     assert input_package(c)["rubric_version"] == V1_RUBRIC_VERSION
+
+
+def test_intent_v1_1_stays_replayable_frozen():
+    i = intent_request("Q", "A", "intent-v1.1")
+    assert i.questions["intent"] == ChoiceQuestion("Classify the founder's control intent", V1_1_INTENT)
+    assert input_package(i)["rubric_version"] == V1_DEFER_RUBRIC_VERSION
+
+
+def test_env_can_select_frozen_intent_versions(monkeypatch):
+    for vid, ver in (("intent-v1.1", V1_DEFER_RUBRIC_VERSION), ("intent-v1-133", V1_RUBRIC_VERSION)):
+        monkeypatch.setenv("INTERVIEW_ENGINE_RUBRIC_INTENT", vid)
+        assert intent_request("Q", "A").rubric_version == ver
 
 
 def test_intent_v1_133_is_the_labeled_rubric_byte_identical():
@@ -59,7 +80,7 @@ def test_every_v2_variant_has_its_own_rubric_version_and_ref():
 
 def test_choice_variants_keep_the_canonical_label_sets():
     for v in INTENT_VARIANTS.values():
-        if v.finalize is None and v.id != "intent-v1-133": assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
+        if v.finalize is None and v.id not in ("intent-v1-133",): assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
     for v in RELEVANCE_VARIANTS.values():
         if v.finalize is None: assert set(v.questions["relevance"].criteria) == set(V1_REL)
 
@@ -124,8 +145,8 @@ BASE = dict(intent_ends_interview=0.0, intent_closes_topic=0.0, intent_declines=
     (dict(intent_hands_choice=.7, intent_gives_content=.6), "delegate"),        # "do whatever calendar apps do"
     (dict(intent_gives_content=.9, intent_hands_choice=.2), "answer"),          # "the app should decide - rotate fairly"
     (dict(), "answer"),                                                         # off-topic grocery request, no control move
-    (dict(intent_closes_topic=.9), "dismiss"),                                  # "Can we move on?"
-    (dict(intent_declines=.8), "skip"),
+    (dict(intent_closes_topic=.9), "skip"),                                     # "Can we move on?" (v1.2: move on = skip)
+    (dict(intent_declines=.8), "dismiss"),                                      # v1.2: won't tackle the topic = dismiss
     (dict(intent_declines=.6, intent_gives_content=.9), "answer"),              # content outweighs a soft decline
     (dict(intent_ends_interview=.9, intent_hands_choice=.9), "enough"),         # ending the interview wins
 ])
