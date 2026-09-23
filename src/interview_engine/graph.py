@@ -47,6 +47,7 @@ class InterviewState(TypedDict, total=False):
     parked_topics: list[str]  # founder-deferred sub-topics that must never be re-probed
     delegated_decisions: list[dict]  # founder-delegated choices, captured as research briefs
     question_history: list[dict]  # code-owned emitted questions: {area, question}
+    repeat_strikes: int       # cumulative repeated-non-answer detections (repeat_guard)
     turn_count: int
 
 
@@ -153,6 +154,32 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
         classified_control = None
+
+        # Repeated non-answer guard (2026-09-23 smoke): the same substantive
+        # answer pasted at consecutive questions is a dodge, not an answer.
+        # Deterministic - no model call. The first repeat freezes coverage so
+        # the area is re-asked; the next repeat trips the two-attempts
+        # closeout below, parking the area as a visible delegation. Steers
+        # and controls keep their own terminal handling: a deterministic
+        # steer/control match is excluded here, and a classifier-returned
+        # terminal intent simply closes the area on top of the freeze.
+        repeat_strikes = int(state.get("repeat_strikes", 0))
+        repeated = False
+        streak = 0
+        if (last is not None and getattr(last, "type", "") == "human" and len(state.get("messages") or []) > 1
+                and founder_control(getattr(last, "content", "")) is None
+                and founder_steer(getattr(last, "content", "")) is None):
+            from .repeat_guard import repeat_streak
+            streak = repeat_streak(state.get("messages") or [])
+            if streak:
+                repeated = True
+                repeat_strikes += 1
+                if progress is not None:
+                    progress.emit(ProgressEvent(
+                        "interview_turn", "Coverage", "completed", _time.time(), 0.0,
+                        "founder repeated the same answer - treated as a dodge, no coverage advance "
+                        f"(strike {repeat_strikes})"))
+
         if (last is not None and getattr(last, "type", "") == "human" and len(state.get("messages") or []) > 1
                 and (categorizer.active("coverage") or categorizer.active("intent"))):
             from .categorization import apply_coverage_answers, classified_intent, coverage_request, intent_request
@@ -165,7 +192,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     from .evidence import record_founder_classification
                     record_founder_classification(evidence_lake,session_id=session_id or usage_log.session_id,
                         sequence=turn,raw_text=founder_answer,target=state.get("coverage_target"),result=coverage_result)
-                coverage = apply_coverage_answers(coverage, coverage_result.answers)
+                if not repeated:
+                    coverage = apply_coverage_answers(coverage, coverage_result.answers)
             if categorizer.active("intent"):
                 intent_result = categorizer.classify(intent_request(prior_question, founder_answer))
                 classified_control = classified_intent(intent_result.answers)
@@ -223,14 +251,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if asked.get("area") != target:
                 break
             attempts += 1
-        if target and attempts >= 2 and coverage.get(target) in ("uncovered", "thin"):
+        if target and (attempts >= 2 or streak >= 2) and coverage.get(target) in ("uncovered", "thin"):
             prior = [q.get("question", "") for q in (state.get("question_history") or [])[-attempts:]]
             # The current founder turn is the evidence for deferring this
             # unresolved detail. Keep the question history in graph state; the
             # contract assumption carries only its statement and real source.
             source_turn = len(state.get("messages") or []) - 1
+            cause = ("because the founder repeated the same non-responsive answer at consecutive questions"
+                     if streak >= 2 else "after two interview attempts")
             delegated.append({
-                "statement": f"FOUNDER-DELEGATED: {_LABELS.get(target, target)} - after two interview attempts, "
+                "statement": f"FOUNDER-DELEGATED: {_LABELS.get(target, target)} - {cause}, "
                              "the remaining detail is left open for the spec/architecture stage instead of being re-asked. "
                              f"The founder's latest response was: '{getattr(last, 'content', '').strip()[:120]}'.",
                 "research_brief": f"Research the unresolved {_LABELS.get(target, target)} question from current authoritative sources and present the method or choice at the review gate.",
@@ -256,7 +286,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         # terminal plain-text marker (older checkpoints / models): no parse, no retry
         if "[INTERVIEW COMPLETE]" in resp.content:
             return {"messages": [AIMessage(content=resp.content)], "coverage": coverage,
-                    "coverage_target": target or "", "turn_count": turn}
+                    "coverage_target": target or "", "turn_count": turn,
+                    "repeat_strikes": repeat_strikes}
         parsed = extract_turn_json(resp.content)
         prose_question = _clean_single_question(resp.content) if parsed is None else None
         if parsed is None:
@@ -306,7 +337,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     )
         question, complete = prose_question or resp.content, False
         if parsed is not None:
-            if not categorizer.active("coverage"):
+            if not categorizer.active("coverage") and not repeated:
                 coverage = apply_reply(coverage, parsed)
             if control == "skip" and target:
                 coverage[target] = SKIPPED
@@ -368,7 +399,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         history_log.append({"area": emitted_target or "", "question": question})
         return {"messages": [AIMessage(content=question)], "coverage": coverage,
                 "coverage_target": emitted_target or "", "parked_topics": parked_topics,
-                "delegated_decisions": delegated, "question_history": history_log, "turn_count": turn}
+                "delegated_decisions": delegated, "question_history": history_log,
+                "repeat_strikes": repeat_strikes, "turn_count": turn}
 
     def route_interview(state: InterviewState) -> str:
         last = state["messages"][-1]
