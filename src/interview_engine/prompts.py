@@ -5,6 +5,8 @@ this stage to a smaller model to save money (Cost Addendum section 3)."""
 
 from vmodel_contracts import DELEGATION_DOCTRINE, PRODUCT_SCOPE_DEFINITION
 
+from .coverage_taxonomy import AREA_KEYS
+
 INTERVIEWER_SYSTEM = f"""You are a technical architect interviewing a non-technical founder about {PRODUCT_SCOPE_DEFINITION}.
 
 Ask ONE short, concrete, plain-language product question per turn.
@@ -119,7 +121,7 @@ DISTILL_PREVIEW_SYSTEM += "\n\n" + load_method_pack(["3"])
 # Appended LAST in the assembled system prompt (after the method pack and the
 # status block): on a long prompt, the terminal instruction is the one a local
 # 14B follows (run-4: burying this mid-prompt produced 16/17 prose turns).
-STRUCTURED_TURN_FORMAT = """Reply ONLY with JSON (no prose/fence):
+STRUCTURED_TURN_FORMAT = ("""Reply ONLY with JSON (no prose/fence):
 {"question":"one short concrete question","covered":[],"thin":[],"skipped":[],"complete":false}
-Arrays use only: goal, users, flows, data, integrations, nfrs, failures, constraints, risks, done, glossary.
-covered=concrete; thin=mentioned/vague; skipped=refused. If complete=true, question is a one-line closing summary."""
+Arrays use only: """ + ", ".join(AREA_KEYS) + """.
+covered=concrete; thin=mentioned/vague; skipped=refused. If complete=true, question is a one-line closing summary.""")

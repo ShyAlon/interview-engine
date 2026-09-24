@@ -262,7 +262,8 @@ def build_categorizer(adapters: Mapping[str, Mapping[str, ClassificationProvider
     return Categorizer(chains, active)
 
 
-COVERAGE_AREAS = ("goal", "users", "flows", "data", "integrations", "nfrs", "failures", "constraints", "risks", "done", "glossary")
+from .coverage_taxonomy import AREA_KEYS as _AREA_KEYS  # single source of truth
+COVERAGE_AREAS = tuple(_AREA_KEYS)
 from .intent_taxonomy import GATED_INTENTS, INTENT_SHORT, TERMINAL_INTENTS  # single source of truth
 INTENT_LABELS = dict(INTENT_SHORT)
 

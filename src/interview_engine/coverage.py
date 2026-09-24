@@ -12,22 +12,8 @@ from __future__ import annotations
 
 import re
 
-# (key, human label, what "concrete" means for closing it) - order is priority.
-AREAS = [
-    ("goal", "goal & core value", "the problem and who hurts, in a sentence"),
-    ("users", "stakeholder context", "primary and supporting stakeholders, their roles, and where/when they operate"),
-    ("flows", "operational scenarios", "at least one concrete trigger-to-outcome scenario with actors, ordered steps, and exceptions"),
-    ("data", "data model & sources", "what data, where it lives, who owns it"),
-    ("integrations", "integrations", "named systems/APIs, not categories"),
-    ("nfrs", "quality needs", "founder-visible business impact; engineering maps it to measurable targets"),
-    ("failures", "failure modes", "what breaks, what degrades, what must never happen"),
-    ("constraints", "constraints", "budget, deadlines, team - and asked OPENLY: 'any technology constraints - language/ecosystem, cloud affinity?' ('agnostic' closes it too)"),
-    ("risks", "risks", "what assumption kills the product if wrong"),
-    ("done", "done criteria", "how the founder will know it works"),
-    ("glossary", "glossary", "the founder's domain terms pinned to their meanings"),
-]
-AREA_KEYS = [k for k, _, _ in AREAS]
-_LABELS = {k: label for k, label, _ in AREAS}
+from .coverage_taxonomy import AREAS, AREA_KEYS, LABELS as _LABELS  # single source of truth
+
 
 
 def turn_output_schema() -> dict:

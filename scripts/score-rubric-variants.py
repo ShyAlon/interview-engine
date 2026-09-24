@@ -98,7 +98,8 @@ def truth(row, field):
     return None
 
 
-AREAS = ("goal", "users", "flows", "data", "integrations", "nfrs", "failures", "constraints", "risks", "done", "glossary")
+from interview_engine.coverage_taxonomy import AREA_KEYS  # noqa: E402  single source of truth
+AREAS = tuple(AREA_KEYS)
 
 
 def _yes(v):
