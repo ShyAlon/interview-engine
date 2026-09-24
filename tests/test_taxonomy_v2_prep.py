@@ -33,7 +33,7 @@ def test_v1_still_default():
 def test_pool_v3_derivation():
     pool = _load("derive-pool-v3").derive(json.loads((ROOT / "benchmarks" / "intent-pool-v2.json").read_text()))
     assert [q["area"] for q in pool["questions"]] == AREA_KEYS_V2
-    assert len(pool["responses"]) == 71
+    assert len(pool["responses"]) == 78  # pool-v2 final (70) + 8 prototypes
     assert not any("nfrs" in r.get("areas", []) for r in pool["responses"])
     rel = _load("build-intent-benchmark").relevance
     by = {r["id"]: r for r in pool["responses"]}
