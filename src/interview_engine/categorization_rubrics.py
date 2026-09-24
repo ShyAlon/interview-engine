@@ -277,6 +277,20 @@ _REL_V31 = {"addressed": "The answer answers every main part of the question ask
                        "concrete product detail, or on a nearby topic), is generic or pasted text that could follow any "
                        "question, or refuses.")}
 
+# Taxonomy v2 covers_* statements (nfrs split; bench-3) - PREPARED, NOT
+# REGISTERED. Needs coverage_request to take its area list from the variant
+# before it can be selected; lands with coverage-v2 after bench-2.
+_COVERS_V3_QUALITY_V2 = {
+    "performance": "The answer addresses how fast the system must be - for whom and in which moments - in response to the question asked.",
+    "reliability": "The answer addresses when and for how long the system may be unavailable, and what must never be lost, in response to the question asked.",
+    "security": "The answer addresses who may see or change what in the system, which data is sensitive, and any rules to follow, in response to the question asked.",
+    "scalability": "The answer addresses the volume the system must handle for now - users, transactions or records - in response to the question asked.",
+}
+COVERS_V3_TAX2 = {}
+for _k, _v in COVERS_V3.items():
+    COVERS_V3_TAX2.update(_COVERS_V3_QUALITY_V2 if _k == "nfrs" else {_k: _v})
+assert all(_CLAUSE in v for v in COVERS_V3_TAX2.values())
+
 RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-v1", RELEVANCE_KEY, "Control: the rubric the 133-case labels were collected against.",
                   {RELEVANCE_KEY: ChoiceQuestion("Did the answer address the question?", _REL_V1)}),

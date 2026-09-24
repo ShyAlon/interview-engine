@@ -39,6 +39,7 @@ CONTROL = set(INTENT_ORDER) - {"answer"}
 
 def relevance(resp, area):
     if area not in resp.get("areas", []): return "dodged"
+    if area in resp.get("partial_areas", []): return "partial"  # per-area override (pool-v3: ANS-06)
     return "addressed" if resp.get("full", True) else "partial"
 
 
