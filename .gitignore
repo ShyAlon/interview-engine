@@ -14,3 +14,4 @@ llm-calls.jsonl
 run.log
 .DS_Store
 decisions.jsonl
+/runs
