@@ -1,0 +1,1573 @@
+{
+ "status": "pool-v4 DRAFT: component truth (agent draft + Shy's markup, 2026-09-24). For Shy's edit.",
+ "product": "Fictional product for the whole pool: a booking app for a small dog-grooming salon (two groomers, one front-desk person, about 60 regular clients). One product keeps answers coherent across questions. A second product can be added later to check that nothing depends on this one.",
+ "taxonomy": "categorization-request-v1.3",
+ "questions": [
+  {
+   "id": "Q-goal",
+   "area": "goal",
+   "text": "What problem does this app solve, and who feels it most today?"
+  },
+  {
+   "id": "Q-users",
+   "area": "users",
+   "text": "Who will use the app, and what does each of them need from it?"
+  },
+  {
+   "id": "Q-flows",
+   "area": "flows",
+   "text": "Walk me through one booking from the moment a client wants an appointment to the moment the dog goes home."
+  },
+  {
+   "id": "Q-data",
+   "area": "data",
+   "text": "What information does the app need to keep, and where does it come from today?"
+  },
+  {
+   "id": "Q-integrations",
+   "area": "integrations",
+   "text": "Does the app need to connect to anything you already use - payments, calendars, messaging?"
+  },
+  {
+   "id": "Q-performance",
+   "area": "performance",
+   "text": "How fast and sleek does the app need to feel, and in which moments does waiting hurt most?"
+  },
+  {
+   "id": "Q-reliability",
+   "area": "reliability",
+   "text": "When is it OK for the app to be unavailable, and for how long?"
+  },
+  {
+   "id": "Q-security",
+   "area": "security",
+   "text": "Who should be able to see or change what, and is any of the data sensitive?"
+  },
+  {
+   "id": "Q-scalability",
+   "area": "scalability",
+   "text": "How many clients and bookings do you expect the app to handle in a week?"
+  },
+  {
+   "id": "Q-failures",
+   "area": "failures",
+   "text": "What happens if the app goes down on a busy Saturday - what must never go wrong?"
+  },
+  {
+   "id": "Q-constraints",
+   "area": "constraints",
+   "text": "Any constraints - budget, deadline, who maintains it, or technology you want or want to avoid?"
+  },
+  {
+   "id": "Q-risks",
+   "area": "risks",
+   "text": "What assumption, if it turned out wrong, would make this app a waste of money?"
+  },
+  {
+   "id": "Q-done",
+   "area": "done",
+   "text": "Three months after launch, how will you know it works?"
+  },
+  {
+   "id": "Q-glossary",
+   "area": "glossary",
+   "text": "Are there salon terms I should use exactly the way you do?"
+  },
+  {
+   "id": "F-goal.who",
+   "area": "goal",
+   "targets": "goal.who",
+   "text": "Who feels this problem most?"
+  },
+  {
+   "id": "F-users.client.context",
+   "area": "users",
+   "targets": "users.client.context",
+   "text": "Where is the client when they use it?"
+  },
+  {
+   "id": "F-flows.outcome",
+   "area": "flows",
+   "targets": "flows.outcome",
+   "text": "How does it end - what does done look like?"
+  },
+  {
+   "id": "F-data.what",
+   "area": "data",
+   "targets": "data.what",
+   "text": "What information exactly does it need to keep?"
+  },
+  {
+   "id": "F-integrations.systems",
+   "area": "integrations",
+   "targets": "integrations.systems",
+   "text": "Which company exactly?"
+  },
+  {
+   "id": "F-performance.client.number",
+   "area": "performance",
+   "targets": "performance.client.number",
+   "text": "For the client, how long is OK - in seconds?"
+  },
+  {
+   "id": "F-reliability.per_year",
+   "area": "reliability",
+   "targets": "reliability.per_year",
+   "text": "How much downtime a year could you live with - a few hours? A day?"
+  },
+  {
+   "id": "F-security.groomer.see",
+   "area": "security",
+   "targets": "security.groomer.see",
+   "text": "What can the groomer see?"
+  },
+  {
+   "id": "F-scalability.volume",
+   "area": "scalability",
+   "targets": "scalability.volume",
+   "text": "Roughly how many bookings in a busy week?"
+  },
+  {
+   "id": "F-done.target",
+   "area": "done",
+   "targets": "done.target",
+   "text": "What number would count as success?"
+  }
+ ],
+ "responses": [
+  {
+   "cls": "answer",
+   "id": "ANS-01",
+   "text": "Clients book by phone and we miss calls while our hands are wet. The front desk loses about a morning a week to phone tag, and people who can't get through go to the chain store.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "goal"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "goal": [
+     "goal.cost",
+     "goal.problem",
+     "goal.who"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-02",
+   "text": "Three kinds: clients booking and rescheduling on their phone, the two groomers checking their day on a tablet, and Dana at the front desk who fixes mistakes and handles walk-ins.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "users"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "users": [
+     "users.client.context",
+     "users.client.device",
+     "users.front_desk.context",
+     "users.groomer.context",
+     "users.groomer.count",
+     "users.groomer.device",
+     "users.personas"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-03",
+   "text": "Client picks a service and a groomer, sees open slots, pays a 20 shekel deposit. Day before, a reminder. At drop-off Dana checks the dog in; when the groomer marks it done, the owner gets a pickup message. No-show keeps the deposit.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "flows"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "flows": [
+     "flows.actors",
+     "flows.exceptions",
+     "flows.outcome",
+     "flows.steps",
+     "flows.trigger"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-04",
+   "text": "Owner name and phone, each dog's name, breed, size, temperament notes and vaccination date, plus booking history. Right now it's a paper book and the groomers' memory.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "data"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "data": [
+     "data.source",
+     "data.what"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-05",
+   "text": "Payments through the card terminal company we already use, and WhatsApp for reminders - our clients don't read email.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "integrations"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "integrations": [
+     "integrations.purpose"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-06",
+   "text": "Booking should feel instant on a phone. Groomers glance at the tablet with wet hands, so big buttons and no waiting. A few minutes of downtime at night is fine, not on a Saturday morning.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "performance",
+    "reliability"
+   ],
+   "full": true,
+   "note": "pool-v3: full for reliability (windows), partial for performance (no numbers). 'Big buttons' was usability - shelved, closes nothing.",
+   "partial_areas": [
+    "performance"
+   ],
+   "components": {
+    "performance": [
+     "performance.client.moment",
+     "performance.groomer.moment"
+    ],
+    "reliability": [
+     "reliability.allowed",
+     "reliability.forbidden"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-07",
+   "text": "Worst case is two dogs booked into the same slot, or a dog with a bite warning going to the new groomer. If it goes down, Dana needs a printout of the day so we keep working.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "failures"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "failures": [
+     "failures.never",
+     "failures.when_down",
+     "failures.worst"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-08",
+   "text": "About 15 thousand shekels to build, live before the holidays in December. Nobody here is technical, so whatever it is has to run without us touching servers.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "constraints"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "constraints": [
+     "constraints.budget",
+     "constraints.deadline",
+     "constraints.maintainer",
+     "constraints.technology"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-09",
+   "text": "That our older clients will actually book online. If most keep phoning, we've paid for something only Dana uses.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "risks"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "risks": [
+     "risks.assumption",
+     "risks.notice"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-10",
+   "text": "Phone calls cut in half, no double bookings for a month, and Dana leaves on time on Fridays.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "done"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "done": [
+     "done.by_when",
+     "done.measure",
+     "done.target"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-11",
+   "text": "A 'full groom' is bath, cut and nails; a 'tidy' is face, feet and nails only. 'Hand strip' is a separate service for wire-coated breeds, and it takes twice as long.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "glossary"
+   ],
+   "full": true,
+   "note": "On-topic prototype for its area.",
+   "components": {
+    "glossary": [
+     "glossary.meaning",
+     "glossary.terms"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P1",
+   "text": "Clients book on their phone and pay something up front.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "flows"
+   ],
+   "full": false,
+   "note": "Partial for Q-flows: no reminder, drop-off, pickup or exceptions.",
+   "components": {
+    "flows": [
+     "flows.actors",
+     "flows.steps",
+     "flows.trigger"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P2",
+   "text": "Mostly clients, I guess, and us.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "users"
+   ],
+   "full": false,
+   "note": "Partial/vague for Q-users.",
+   "components": {
+    "users": [
+     "users.personas"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P3",
+   "text": "It should just work, people hate waiting.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [],
+   "full": false,
+   "note": "pool-v3: Shy 'No, that's not an answer' - 'just work' means nothing; no area covered, dodged against every question. Deliberate calibration pair with ANS-PERF-P (partial).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P4",
+   "text": "Too many missed calls, basically.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "goal"
+   ],
+   "full": false,
+   "note": "Partial for Q-goal: Problem named; who feels it is missing. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "goal": [
+     "goal.problem"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P5",
+   "text": "Owner and dog details, the usual stuff.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "data"
+   ],
+   "full": false,
+   "note": "Partial for Q-data: Vague on what; nothing on where it comes from today. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "data": [
+     "data.what"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P6",
+   "text": "Probably payments, something like that.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "integrations"
+   ],
+   "full": false,
+   "note": "Partial for Q-integrations: One category, no named system; calendars/messaging open. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "integrations": [
+     "integrations.purpose"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P7",
+   "text": "Double bookings would be a disaster.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "failures"
+   ],
+   "full": false,
+   "note": "Partial for Q-failures: One must-never; nothing on what happens when it goes down. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "failures": [
+     "failures.never",
+     "failures.worst"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P8",
+   "text": "Maybe people just won't use it.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "risks"
+   ],
+   "full": false,
+   "note": "Partial for Q-risks: Vague risk, no specific assumption. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "risks": [
+     "risks.assumption"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P9",
+   "text": "Fewer phone calls, I suppose.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "done"
+   ],
+   "full": false,
+   "note": "Partial for Q-done: One vague measure, no target or time. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "done": [
+     "done.measure"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-P10",
+   "text": "We say 'full groom' a lot, and a couple of other terms.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "glossary"
+   ],
+   "full": false,
+   "note": "Partial for Q-glossary: Names a term, defines none. Dodged against the other questions (r2, Shy 2026-09-24).",
+   "components": {
+    "glossary": [
+     "glossary.terms"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-C1",
+   "text": "We're a family-run salon, fifteen years on the same street, and our clients treat us like their dog's second home. We want the app to feel as warm as the shop.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "goal"
+   ],
+   "full": true,
+   "note": "BOUNDARY - canned pitch. Intent answer by your locked rule. Relevance: dodged against every question except Q-goal (it touches the goal). Proposal: never pair it with Q-goal, so its relevance label stays clean.",
+   "components": {
+    "goal": [
+     "goal.problem"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-C2",
+   "text": "The main thing is the app has to be simple, modern and easy to use for everyone.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "BOUNDARY - generic product text that fits under any question. Intent answer; relevance dodged against all questions.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-R1",
+   "text": "The app should give the booking to whichever groomer has the shorter queue that day.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "flows"
+   ],
+   "full": true,
+   "note": "BOUNDARY vs delegate: a product rule where the APP decides. Intent answer, not delegate.",
+   "components": {
+    "flows": [
+     "flows.actors",
+     "flows.steps"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "delegate",
+   "id": "DEL-01",
+   "text": "Honestly, whatever you'd recommend is fine with me.",
+   "intent": [
+    "delegate"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "delegate",
+   "id": "DEL-02",
+   "text": "You know this stuff better than I do - go with what makes sense.",
+   "intent": [
+    "delegate"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "delegate",
+   "id": "DEL-03",
+   "text": "I don't mind how that works, pick something sensible.",
+   "intent": [
+    "delegate"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "delegate",
+   "id": "DEL-04",
+   "text": "Choose for us, I trust your judgment on it.",
+   "intent": [
+    "delegate"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "delegate",
+   "id": "DEL-05",
+   "text": "Do it however similar salon apps handle it.",
+   "intent": [
+    "delegate"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "defer",
+   "id": "DEF-01",
+   "text": "Good question - I need to talk to my business partner first, can we come back to it?",
+   "intent": [
+    "defer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "defer",
+   "id": "DEF-02",
+   "text": "I'd have to look at last year's numbers. I'll send you that later this week.",
+   "intent": [
+    "defer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "defer",
+   "id": "DEF-03",
+   "text": "Let me ask Dana tonight, she knows that better than me.",
+   "intent": [
+    "defer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "defer",
+   "id": "DEF-04",
+   "text": "Not sure yet, I'll check with the groomers and let you know.",
+   "intent": [
+    "defer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "defer",
+   "id": "DEF-05",
+   "text": "I'll get the details from our accountant and come back with an answer.",
+   "intent": [
+    "defer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "DIS-01",
+   "text": "I really don't want to get into pricing here.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "v1.3: was dismiss, now skip (dismiss removed).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "DIS-02",
+   "text": "That's not something we're going to deal with in this app.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "v1.3: was dismiss, now skip (dismiss removed).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "DIS-03",
+   "text": "Leave the staff side out of it, I'm not discussing that.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "v1.3: was dismiss, now skip (dismiss removed).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "DIS-04",
+   "text": "I'd prefer not to go there.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "v1.3: was dismiss, now skip (dismiss removed).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "DIS-05",
+   "text": "That topic doesn't matter to us, I won't spend time on it.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "v1.3: was dismiss, now skip (dismiss removed).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "SKP-01",
+   "text": "OK, what's next?",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "SKP-02",
+   "text": "Let's keep going.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "SKP-03",
+   "text": "Can we go to the next one?",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "SKP-04",
+   "text": "Fine, move along.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "skip",
+   "id": "SKP-05",
+   "text": "Nothing to add there - next.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-01",
+   "text": "I think we've covered enough - go ahead and put it together.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-02",
+   "text": "Let's stop here, I have what I need to give you.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-03",
+   "text": "I have to run, let's finish the interview now.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-04",
+   "text": "No more questions please, write it up.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-05",
+   "text": "That's it for me today - please draft the spec.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-06",
+   "text": "I think you've got the full picture now. Let's end here.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-07",
+   "text": "We're done. Send me what you have.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-08",
+   "text": "I'm out of time, let's call the interview finished.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-09",
+   "text": "OK, enough questions for today - go build it.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-10",
+   "text": "Let's end the interview here; I'll review whatever you come up with.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-11",
+   "text": "I don't want to answer any more questions. Just write it up.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-12",
+   "text": "My next client just walked in, so we have to stop the interview now.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-13",
+   "text": "Wrap it up please, I've told you everything I can.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-14",
+   "text": "Can we finish now? You have enough to start.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-15",
+   "text": "Stop here - that's the whole interview for me.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "enough",
+   "id": "ENF-16",
+   "text": "No more for today. Turn what we've covered into the spec.",
+   "intent": [
+    "enough"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "pool-v2: enough expansion (Shy 2026-09-24: at least 16).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "MIX-01",
+   "text": "Clients book and pay a deposit online; when to send the reminder - your call.",
+   "intent": [
+    "answer",
+    "delegate"
+   ],
+   "areas": [
+    "flows"
+   ],
+   "full": false,
+   "note": "Multi-intent answer+delegate (compatible). Relevance vs Q-flows: partial (reminder timing handed off, other steps missing).",
+   "components": {
+    "flows": [
+     "flows.actors",
+     "flows.steps",
+     "flows.trigger"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "MIX-02",
+   "text": "WhatsApp for reminders for sure. For payments, use whatever's easiest to set up.",
+   "intent": [
+    "answer",
+    "delegate"
+   ],
+   "areas": [
+    "integrations"
+   ],
+   "full": true,
+   "note": "Multi-intent answer+delegate. Relevance vs Q-integrations: addressed (both parts touched).",
+   "components": {
+    "integrations": [
+     "integrations.purpose"
+    ]
+   },
+   "delegated": {
+    "integrations": [
+     "integrations.systems"
+    ]
+   },
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "MIX-03",
+   "text": "Probably around 15 thousand, but I need to confirm with my partner before I commit.",
+   "intent": [
+    "answer",
+    "defer"
+   ],
+   "areas": [
+    "constraints"
+   ],
+   "full": false,
+   "note": "answer+defer: content given AND a real postponement. defer is compatible with nothing, so both labels go in the set. Relevance vs Q-constraints: partial.",
+   "components": {
+    "constraints": [
+     "constraints.budget"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-01",
+   "text": "Let's come back to that one later.",
+   "intent": [
+    "defer"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "NEAR-MISS defer vs skip. Proposed defer (wants to answer later). Your call - it also reads as 'move on for now'.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-02",
+   "text": "Park that, next question.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "NEAR-MISS skip vs defer. Proposed skip (wants to move on, no promise to answer). Your call.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-03",
+   "text": "I don't know.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "NEAR-MISS. The deterministic rules map 'I don't know' to delegate. Under v1.3 it is skip (no promise to answer, nothing handed off). Approved as skip.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-04",
+   "text": "My developer friend will pick the tech, not me.",
+   "intent": [
+    "delegate"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "NEAR-MISS delegate vs defer: a third party decides. v1.2 delegate = interviewer decides, defer = founder answers later - neither fits exactly. Proposed delegate (founder hands the choice off). Your call; may need a v1.3 wording.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-05",
+   "text": "That's all I've got.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "NEAR-MISS skip vs enough: about this question, not the interview. Proposed skip.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-06",
+   "text": "I'd rather not talk about money - and honestly let's wrap up soon.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "dismiss + a soft 'soon' that is not yet enough. Proposed {dismiss}. Tests that 'wrap up soon' doesn't trigger enough. v1.3: was dismiss, now skip (dismiss removed).",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "boundary",
+   "id": "NM-07",
+   "text": "Skip it.",
+   "intent": [
+    "skip"
+   ],
+   "areas": [],
+   "full": true,
+   "note": "Was a skip-vs-dismiss near-miss under v1.2; under v1.3 it is plainly skip. Kept as a control that the bare word 'skip' is skip.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-PERF",
+   "text": "Booking on a phone should take under a minute start to finish, and no screen should take more than a second or two. The groomers' tablet has to show the next dog instantly - they tap it with wet hands between dogs, so no spinners.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "performance"
+   ],
+   "full": true,
+   "note": "Full: who, which moments, numbers.",
+   "components": {
+    "performance": [
+     "performance.client.moment",
+     "performance.client.number",
+     "performance.groomer.moment"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-PERF-P",
+   "text": "It needs to be fast. Nobody likes waiting.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "performance"
+   ],
+   "full": false,
+   "note": "Partial: no moments, no numbers. Drill case. Calibration pair with ANS-P3 (Shy 2026-09-24): 'fast' implies a response-time target (~half a second in his experience), so it is a partial; 'just work' means nothing. A model that treats the two alike is wrong.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-REL",
+   "text": "Saturday 8 to 2 is our busiest window - it can't be down then at all. A few minutes at night for updates is fine, even every week, and half an hour on a quiet Tuesday we can live with. A confirmed booking must never disappear.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "reliability"
+   ],
+   "full": true,
+   "note": "Full: windows, durations, what must never be lost.",
+   "components": {
+    "reliability": [
+     "reliability.allowed",
+     "reliability.forbidden",
+     "reliability.never_lost"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-REL-P",
+   "text": "It should be up most of the time, especially on weekends.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "reliability"
+   ],
+   "full": false,
+   "note": "Partial: direction, no windows or durations. Drill case.",
+   "components": {
+    "reliability": [
+     "reliability.forbidden"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-SEC",
+   "text": "Clients see only their own dogs and bookings. Groomers see the day's schedule and the dog notes, bite warnings and vet info included, but not payment details. Only Dana and I can change prices or give refunds. We don't want card numbers stored with us at all - the payment company keeps them.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "security"
+   ],
+   "full": true,
+   "note": "Full: who sees/changes what, sensitive data. No standard needed.",
+   "components": {
+    "security": [
+     "security.client.see",
+     "security.front_desk.change",
+     "security.groomer.see",
+     "security.sensitive"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-SEC-P",
+   "text": "Keep clients' details private, obviously.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "security"
+   ],
+   "full": false,
+   "note": "Partial: privacy matters, but not who sees what or which data.",
+   "components": {
+    "security": [
+     "security.sensitive"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-SCALE",
+   "text": "About 60 regular clients. 25 to 35 bookings on a normal day, up to 50 on a Saturday before the holidays. Two groomers and Dana at the desk.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "scalability"
+   ],
+   "full": true,
+   "note": "Full: expected volume for now, with numbers.",
+   "components": {
+    "scalability": [
+     "scalability.peak",
+     "scalability.users_n",
+     "scalability.volume"
+    ]
+   },
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "ANS-SCALE-P",
+   "text": "Not huge - we're a small salon.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "scalability"
+   ],
+   "full": false,
+   "note": "Partial (Shy: 'requires a followup'). Drill case.",
+   "components": {},
+   "delegated": {},
+   "skipped": []
+  },
+  {
+   "cls": "answer",
+   "id": "NA-01",
+   "text": "Speed doesn't matter for Dana at the desk - she's never rushed with it.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "performance"
+   ],
+   "full": true,
+   "components": {},
+   "delegated": {},
+   "skipped": [
+    "performance.front_desk"
+   ],
+   "note": "Founder-skip test row (pool-v4)."
+  },
+  {
+   "cls": "answer",
+   "id": "NA-02",
+   "text": "The groomers won't change anything in it - they only look.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "security"
+   ],
+   "full": true,
+   "components": {
+    "security": [
+     "security.groomer.change"
+    ]
+   },
+   "delegated": {},
+   "skipped": [],
+   "note": "Founder-skip test row (pool-v4)."
+  },
+  {
+   "cls": "answer",
+   "id": "NA-03",
+   "text": "Scale isn't a thing for us - it's one salon and it will stay one salon.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "scalability"
+   ],
+   "full": true,
+   "components": {},
+   "delegated": {},
+   "skipped": [
+    "scalability"
+   ],
+   "note": "Founder-skip test row (pool-v4)."
+  },
+  {
+   "cls": "answer",
+   "id": "NA-04",
+   "text": "We don't want it connected to anything - it runs on its own.",
+   "intent": [
+    "answer"
+   ],
+   "areas": [
+    "integrations"
+   ],
+   "full": true,
+   "components": {},
+   "delegated": {},
+   "skipped": [
+    "integrations"
+   ],
+   "note": "Contradicts ANS-05 (the salon uses payments and WhatsApp); kept to test an area-level skip (Shy: keep)."
+  }
+ ],
+ "pairing_rules": {
+  "intent": "the response's label set, independent of the question",
+  "relevance": "derived from component truth by component_trees.derive_relevance",
+  "exclusions": [
+   "ANS-C1 x Q-goal"
+  ],
+  "followups": "follow-up questions pair with answer rows only; relevance truth = the targeted component filled (addressed) or not (dodged)"
+ },
+ "pair_count": 769,
+ "relevance_for_control_moves": "not scored (Shy's call a, 2026-09-24)",
+ "history": [
+  "2026-09-24: approved as drafted (Shy +1).",
+  "2026-09-24: v1.3 - dismiss removed (Shy: too close to skip). The 5 DIS-* responses and NM-06 are relabeled skip; texts unchanged.",
+  "2026-09-24: v2 - enough grows from 4 to 16 responses (Shy: 'we need a lot more data on enough... at least 16'). New rows are for Shy's edit.",
+  "2026-09-24: v2 final - ENF-05..16 approved as-is; ANS-P4..P10 partial prototypes added as drafted (r2 markup). ENF-02 reword dropped.",
+  "2026-09-24: v3 - nfrs split into performance, reliability, security, scalability (usability shelved). 8 prototypes, ANS-06/ANS-P3 re-mapped; Shy's pool-v3 markup.",
+  "2026-09-24: v4 - component truth per response (trees), NA-01..04 founder-skip rows, ten follow-up questions."
+ ],
+ "coverage_taxonomy": "coverage-v2",
+ "component_trees": "coverage-v2-trees-1",
+ "personas": [
+  "client",
+  "groomer",
+  "front desk"
+ ]
+}

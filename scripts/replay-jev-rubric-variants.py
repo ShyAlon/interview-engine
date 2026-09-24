@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / "src"))
 from interview_engine.categorization import ChoiceQuestion, ClassificationRequest, NoulQuestion, ScoreQuestion  # noqa: E402
-from interview_engine.categorization_rubrics import INTENT_VARIANTS, RELEVANCE_VARIANTS, VARIANT_ALIASES, RubricVariant, resolve_variant_id  # noqa: E402
+from interview_engine.categorization_rubrics import COMPONENT_VARIANTS, INTENT_VARIANTS, RELEVANCE_VARIANTS, VARIANT_ALIASES, RubricVariant, resolve_variant_id  # noqa: E402
 from interview_engine.categorization_shadow import RECORD_SCHEMA_VERSION, _side, input_package  # noqa: E402
 
 REPLAY_SLOTS = {"intent": "intent", "coverage": "relevance"}
@@ -78,6 +78,9 @@ def build_request(case, variant: RubricVariant) -> ClassificationRequest:
     state = case["state"]
     if case["slot"] == "intent":
         questions = dict(variant.questions)
+    elif variant.build is not None:  # component trees: every statement comes from the variant + context
+        questions = variant.build(case["context"] or {})
+        state = variant.state(state)
     else:  # coverage: swap relevance; covers_* from the variant when it has them, else as stored
         covers = variant.covers_questions((case["context"] or {}).get("target"))
         if covers is None: covers = {k: v for k, v in stored.items() if k.startswith("covers_")}
@@ -86,9 +89,11 @@ def build_request(case, variant: RubricVariant) -> ClassificationRequest:
     return ClassificationRequest(case["slot"], state, questions, case["context"], rubric_version=variant.rubric_version)
 
 
-def pick(table, spec):
+def pick(table, spec, opt_in=None):
+    """'all' = the table; opt-in variants (component trees) only when named."""
     if spec in ("", "none"): return []
     if spec == "all": return list(table.values())
+    table = {**table, **(opt_in or {})}
     out = []
     for vid in spec.split(","):
         rid = resolve_variant_id(vid)
@@ -110,7 +115,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     cases, skipped = load_cases(a.inputs)
-    variants = pick(INTENT_VARIANTS, a.intent_variants) + pick(RELEVANCE_VARIANTS, a.relevance_variants)
+    variants = pick(INTENT_VARIANTS, a.intent_variants) + pick(RELEVANCE_VARIANTS, a.relevance_variants, COMPONENT_VARIANTS)
     by_slot = Counter(c["slot"] for c in cases)
     print(f"cases: {len(cases)} {dict(by_slot)}  skipped: {dict(skipped)}")
     cov = [c for c in cases if c["slot"] == "coverage"]
@@ -147,7 +152,7 @@ def main(argv=None):
             req = build_request(case, v); t = time.monotonic()
             try:
                 res = jev.classify(req)
-                res = dataclasses.replace(res, answers=v.apply(res.answers))
+                res = dataclasses.replace(res, answers=v.apply(res.answers, case["context"]))
                 return case, req, _side(res, elapsed=time.monotonic() - t), None
             except Exception as e:  # noqa: BLE001
                 return case, req, _side(error=e, elapsed=time.monotonic() - t), e

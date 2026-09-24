@@ -52,6 +52,10 @@ class RubricVariant:
     covers_plain: Mapping[str, str] | None = None    # area -> statement without it (option B, non-target areas)
     covers_clause_all: bool = True                   # A: clause on every area; B: target area only
     preamble: str | None = None                      # prepended to the request state
+    # Context-built variants (component trees): questions come from the request
+    # context (target area, personas, open components), and finalize sees it too.
+    build: Callable[[Mapping[str, object]], dict[str, "Question"]] | None = None
+    finalize_ctx: Callable[[Mapping[str, ClassificationAnswer], Mapping[str, object]], dict[str, ClassificationAnswer]] | None = None
 
     @property
     def rubric_version(self) -> str:
@@ -71,7 +75,8 @@ class RubricVariant:
     def state(self, state: str) -> str:
         return f"{self.preamble}\n\n{state}" if self.preamble else state
 
-    def apply(self, answers: Mapping[str, ClassificationAnswer]) -> dict[str, ClassificationAnswer]:
+    def apply(self, answers: Mapping[str, ClassificationAnswer], context: Mapping[str, object] | None = None) -> dict[str, ClassificationAnswer]:
+        if self.finalize_ctx: return dict(self.finalize_ctx(answers, context or {}))
         return dict(self.finalize(answers)) if self.finalize else dict(answers)
 
 
@@ -291,6 +296,37 @@ for _k, _v in COVERS_V3.items():
     COVERS_V3_TAX2.update(_COVERS_V3_QUALITY_V2 if _k == "nfrs" else {_k: _v})
 assert all(_CLAUSE in v for v in COVERS_V3_TAX2.values())
 
+# relevance-trees-v1 (Shy 2026-09-24, component trees): no holistic relevance
+# choice. One yes/no per component of the ASKED area (v2 split), one per
+# skippable node (founder n/a), one "mentioned" per other area - same single
+# call. Code derives addressed/partial/dodged (component_trees.derive_relevance).
+TREES_PREAMBLE = ("In the context of a systems engineering task: a founder is being interviewed about a software system "
+                  "they want built. The interviewer asked one question and the founder replied. Judge each statement "
+                  "below against the founder's reply only: a statement is true only if the reply itself says it. "
+                  "General or pasted text that could follow any question makes no statement true.")
+
+
+def _trees_build(context: Mapping[str, object]) -> dict[str, "Question"]:
+    from .component_trees import DEFAULT_PERSONAS, statements
+    from .component_trees import TREES
+    area = str(context.get("target") or "")
+    if area not in TREES:
+        raise ValueError(f"component-tree variant needs a v2 target area, got {area!r} - replay a component bench (pool-v4+)")
+    personas = list(context.get("personas") or DEFAULT_PERSONAS)
+    return {k: NoulQuestion(v) for k, v in statements(area, personas).items()}
+
+
+def finalize_trees(answers: Mapping[str, ClassificationAnswer], context: Mapping[str, object]) -> dict[str, ClassificationAnswer]:
+    from .component_trees import DEFAULT_PERSONAS, derive_relevance, parse
+    area = str(context.get("target") or "")
+    personas = list(context.get("personas") or DEFAULT_PERSONAS)
+    filled, skipped, _ = parse({k: a.value for k, a in answers.items()})
+    label = derive_relevance(area, filled, skipped, open_components=context.get("open") or None, personas=personas)
+    out = dict(answers)
+    out[RELEVANCE_KEY] = ClassificationAnswer(label, None, {})
+    return out
+
+
 RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-v1", RELEVANCE_KEY, "Control: the rubric the 133-case labels were collected against.",
                   {RELEVANCE_KEY: ChoiceQuestion("Did the answer address the question?", _REL_V1)}),
@@ -316,6 +352,15 @@ RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
 # Version-named aliases for the moving production ids, so "intent-v1.3" means
 # the current canonical intent rubric (intent-v1) wherever a variant is named.
 VARIANT_ALIASES: dict[str, str] = {"intent-v1.3": "intent-v1"}
+
+
+# Opt-in only: context-built variants need a component bench (v2 areas, personas).
+# Kept out of RELEVANCE_VARIANTS so "all" and v1-bench replays never pick them.
+COMPONENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
+    RubricVariant("relevance-trees-v1", RELEVANCE_KEY, "Replay-only: component trees on the v2 14-area split (Shy 2026-09-24). Per-component yes/no + founder-skip + mentioned, one call; relevance derived by code.",
+                  {}, version="relevance-trees-v1", preamble=TREES_PREAMBLE, build=_trees_build, finalize_ctx=finalize_trees,
+                  production_ok=False),
+)}
 
 
 def resolve_variant_id(variant_id: str) -> str:

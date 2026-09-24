@@ -20,10 +20,18 @@ with key "-":
   python scripts/replay-jev-rubric-variants.py bench.csv -o OUT --intent-variants ... --relevance-variants ...
   python scripts/score-rubric-variants.py bench.csv - OUT
 
+Component pools (pool-v4+, "component_trees" set): coverage truth comes from
+the per-response component labels - relevance derived by
+component_trees.derive_relevance, plus "components" (every component of the
+asked area -> filled yes/no), "skipped" and "mentioned". The coverage context
+carries personas and, for follow-up questions ("targets"), the one open
+component. Follow-up questions get coverage rows only (intent truth does not
+depend on the question).
+
 Pure function of the pool file: same pool in, byte-identical CSV out.
 """
 from __future__ import annotations
-import argparse, csv, hashlib, io, json, sys
+import argparse, csv, dataclasses, hashlib, io, json, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / "src"))
@@ -43,6 +51,19 @@ def relevance(resp, area):
     return "addressed" if resp.get("full", True) else "partial"
 
 
+def component_truth(pool, resp, q):
+    from interview_engine.component_trees import component_ids, derive_relevance
+    area, personas = q["area"], pool.get("personas")
+    filled = set(resp.get("components", {}).get(area, []))
+    deleg = set(resp.get("delegated", {}).get(area, []))
+    skipped = [n for n in resp.get("skipped", []) if n == area or n.startswith(area + ".")]
+    open_ = [q["targets"]] if q.get("targets") else None
+    rel = derive_relevance(area, filled, skipped, deleg, open_components=open_, personas=personas)
+    return ({"relevance": rel, "components": {c: c in filled for c in component_ids(area, personas)},
+             "delegated": sorted(deleg), "skipped": skipped, "mentioned": list(resp.get("areas", []))},
+            {"target": area, "personas": personas, **({"open": open_} if open_ else {})})
+
+
 def build_rows(pool, intent_variant="intent-v1", relevance_variant="relevance-v1"):
     for r in pool["responses"]:
         bad = [l for l in r["intent"] if l not in INTENT_ORDER]
@@ -55,10 +76,15 @@ def build_rows(pool, intent_variant="intent-v1", relevance_variant="relevance-v1
             if (resp["id"], q["id"]) in excluded: continue
             pair = f"{resp['id']} x {q['id']}"
             notes = f"{pair} | class {resp['cls']}" + (f" | {resp['note']}" if resp.get("note") else "")
-            slots = [("intent", intent_request(q["text"], resp["text"], intent_variant), {"intent": resp["intent"]})]
+            trees = bool(pool.get("component_trees"))
+            slots = [] if q.get("targets") else [("intent", intent_request(q["text"], resp["text"], intent_variant), {"intent": resp["intent"]})]
             if "answer" in resp["intent"]:
-                slots.append(("coverage", coverage_request(q["text"], resp["text"], q["area"], relevance_variant),
-                              {"relevance": relevance(resp, q["area"]), "covers": list(resp.get("areas", []))}))
+                req = coverage_request(q["text"], resp["text"], q["area"], relevance_variant)
+                if trees:
+                    truth, ctx = component_truth(pool, resp, q)
+                    slots.append(("coverage", dataclasses.replace(req, context=ctx), truth))
+                else:
+                    slots.append(("coverage", req, {"relevance": relevance(resp, q["area"]), "covers": list(resp.get("areas", []))}))
             for slot, req, truth in slots:
                 pkg = input_package(req)
                 ref = "sha256:" + hashlib.sha256(f"{slot}|{pkg['state']}|{json.dumps(pkg['context'], sort_keys=True)}".encode()).hexdigest()
