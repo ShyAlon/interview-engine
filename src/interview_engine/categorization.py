@@ -298,17 +298,18 @@ def apply_coverage_answers(coverage: Mapping[str, str], answers: Mapping[str, Cl
 
 
 def classified_intent(answers: Mapping[str, ClassificationAnswer], terminal_threshold: float = .9) -> str:
+    from .intent_taxonomy import normalize
     answer = answers["intent"]
-    intent = str(answer.value)
+    intent = normalize(str(answer.value))  # a frozen variant may still say dismiss -> skip
     if intent in GATED_INTENTS and (answer.confidence is None or answer.confidence < terminal_threshold):
         return "answer"
     return intent
 
 
 # Re-ask guard (2026-09-23 merge): baseline intents that close an area get one
-# re-ask when Jev reads the same reply as an answer. dismiss since the merge;
-# skip added after the 10 uncovered baseline-skip + Jev-answer rows.
-INTENT_GUARD_BASELINE = frozenset({"dismiss", "skip"})
+# re-ask when Jev reads the same reply as an answer. v1.3: skip only (dismiss
+# is folded into skip; classified_intent normalizes old labels first).
+INTENT_GUARD_BASELINE = frozenset({"skip"})
 
 
 def guarded_intent(baseline: str | None, jev: str | None, already_reasked: bool) -> tuple[str | None, str | None]:

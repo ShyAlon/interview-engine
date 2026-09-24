@@ -26,8 +26,10 @@ V1_RUBRIC_VERSION = "categorization-request-v1"
 # intent-v1 plus the defer label (2026-09-23). The pre-defer text is kept
 # verbatim as intent-v1-133 so replays stay comparable with the 133 labels.
 V1_DEFER_RUBRIC_VERSION = "categorization-request-v1.1"
-# v1.2: Shy's "what the founder wants" criteria, from intent_taxonomy.
-V1_2_RUBRIC_VERSION = TAXONOMY_VERSION
+# v1.2: Shy's "what the founder wants" criteria (6 labels incl. dismiss), frozen.
+V1_2_RUBRIC_VERSION = "categorization-request-v1.2"
+# v1.3: dismiss folded into skip (2026-09-24), canonical, from intent_taxonomy.
+V1_3_RUBRIC_VERSION = TAXONOMY_VERSION
 INTENT_KEY = "intent"
 RELEVANCE_KEY = "relevance"
 INTENT_CANONICAL = INTENT_ORDER  # from intent_taxonomy, the single source of truth
@@ -87,18 +89,25 @@ _INTENT_V1_1 = {
     "dismiss": "founder closes the current topic/area", "skip": "founder explicitly skips the current area",
     "enough": "founder explicitly ends the whole interview",
 }
-_INTENT_V1 = dict(INTENT_SHORT)  # v1.2, canonical
+# Frozen: v1.2 = Shy's 2026-09-23 rewrite, the last text with dismiss (2e03444).
+_INTENT_V1_2 = {
+    "answer": "Founder gives product information, even if it doesn't directly address the question asked",
+    "delegate": "Founder wants the interviewer to decide", "defer": "Founder wants to answer later",
+    "dismiss": "Founder doesn't want to tackle this topic", "skip": "Founder wants to move on",
+    "enough": "Founder wants to end the whole interview",
+}
+_INTENT_V1 = dict(INTENT_SHORT)  # v1.3, canonical
 _INTENT_DEFS = dict(INTENT_DEFS)
 _INTENT_EXAMPLES = dict(INTENT_EXAMPLES)
 
 _OFFTOPIC_RULE = (
     " Rule for off-topic or pasted text: if the reply does not engage with the question (generic or canned text, "
     "text about a different topic, or a request unrelated to the question) and contains no explicit control phrase, "
-    "label it answer. Relevance is judged separately; do not turn a non-responsive reply into delegate, defer, dismiss or skip.")
+    "label it answer. Relevance is judged separately; do not turn a non-responsive reply into delegate, defer or skip.")
 
-_INTENT_V2A_INSTR = ("Classify what the founder wants with this one reply. Choose delegate, defer, dismiss, skip or enough "
+_INTENT_V2A_INSTR = ("Classify what the founder wants with this one reply. Choose delegate, defer, skip or enough "
                      "ONLY when the reply expresses that wish explicitly; otherwise choose answer.")
-_INTENT_V2B_INSTR = (_INTENT_V2A_INSTR + " delegate = the interviewer decides; defer = the founder answers later; dismiss = the founder won't tackle this topic; skip = move on to the next question; "
+_INTENT_V2B_INSTR = (_INTENT_V2A_INSTR + " delegate = the interviewer decides; defer = the founder answers later; skip = move on, or won't tackle this topic; "
                      "enough = end the whole interview. A rule saying the product/app decides something is answer.")
 
 
@@ -131,9 +140,9 @@ def finalize_decomposed_intent(answers: Mapping[str, ClassificationAnswer]) -> d
     t = DECOMPOSED_THRESHOLD
     content = s["intent_gives_content"]
     if s["intent_ends_interview"] >= t: label, conf = "enough", s["intent_ends_interview"]
-    # v1.2 meanings: declining the topic = dismiss; moving on = skip.
-    elif s["intent_declines"] >= t and s["intent_declines"] > content: label, conf = "dismiss", s["intent_declines"]
-    elif s["intent_closes_topic"] >= t and s["intent_closes_topic"] > content: label, conf = "skip", s["intent_closes_topic"]
+    # v1.3: declining the topic and moving on are both skip.
+    elif max(s["intent_declines"], s["intent_closes_topic"]) >= t and max(s["intent_declines"], s["intent_closes_topic"]) > content:
+        label, conf = "skip", max(s["intent_declines"], s["intent_closes_topic"])
     elif s["intent_postpones"] >= t and s["intent_postpones"] > content: label, conf = "defer", s["intent_postpones"]
     elif s["intent_hands_choice"] >= t: label, conf = "delegate", s["intent_hands_choice"]
     else:
@@ -145,8 +154,10 @@ def finalize_decomposed_intent(answers: Mapping[str, ClassificationAnswer]) -> d
 
 
 INTENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
-    RubricVariant("intent-v1", INTENT_KEY, "Production default: v1.2, Shy's 'what the founder wants' criteria from intent_taxonomy.",
-                  _intent_choice("Classify the founder's control intent", _INTENT_V1), version=V1_2_RUBRIC_VERSION),
+    RubricVariant("intent-v1", INTENT_KEY, "Production default: v1.3, Shy's 'what the founder wants' criteria with dismiss folded into skip.",
+                  _intent_choice("Classify the founder's control intent", _INTENT_V1), version=V1_3_RUBRIC_VERSION),
+    RubricVariant("intent-v1.2", INTENT_KEY, "Frozen: v1.2, the 6-label text with dismiss (2e03444).",
+                  _intent_choice("Classify the founder's control intent", _INTENT_V1_2), version=V1_2_RUBRIC_VERSION),
     RubricVariant("intent-v1.1", INTENT_KEY, "Frozen: the labeled v1 text plus defer (710d6c4).",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1_1), version=V1_DEFER_RUBRIC_VERSION),
     RubricVariant("intent-v1-133", INTENT_KEY, "Frozen control: the exact 5-label rubric the 133-case labels were collected against (no defer).",

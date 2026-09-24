@@ -69,8 +69,8 @@ def test_rejected_with_web_archetype_is_treated_as_accepted():
 
 
 # ---------------------------------------------------------------- guard
-def test_guard_fires_once_on_baseline_dismiss_or_skip_vs_jev_answer():
-    assert guarded_intent("dismiss", "answer", False) == ("answer", "dismiss")
+def test_guard_fires_once_on_baseline_skip_vs_jev_answer():
+    assert guarded_intent("dismiss", "answer", False) == ("dismiss", None)  # v1.3: callers normalize dismiss -> skip first
     assert guarded_intent("skip", "answer", False) == ("answer", "skip")
     assert guarded_intent("skip", "answer", True) == ("skip", None)       # second time: baseline wins
     assert guarded_intent("skip", "skip", False) == ("skip", None)
@@ -123,7 +123,8 @@ def test_v1_2_answer_covers_off_topic_product_info_and_examples_agree():
     from interview_engine.intent_taxonomy import INTENT_DEFS, INTENT_EXAMPLES, INTENT_SHORT, TAXONOMY_VERSION
     assert "doesn't directly address the question" in INTENT_SHORT["answer"]
     assert "off-topic" in INTENT_DEFS["answer"].lower()
-    for label in ("delegate", "defer", "dismiss", "skip", "enough"):
+    for label in ("delegate", "defer", "skip", "enough"):
         assert "off-topic" not in INTENT_EXAMPLES[label].lower()
-    assert "move on" in INTENT_EXAMPLES["skip"].lower() and "move on" not in INTENT_EXAMPLES["dismiss"].lower()
-    assert TAXONOMY_VERSION == "categorization-request-v1.2"
+    assert "move on" in INTENT_EXAMPLES["skip"].lower() and "rather not get into that" in INTENT_EXAMPLES["skip"].lower()
+    assert "dismiss" not in INTENT_EXAMPLES and "dismiss" not in json.dumps(INTENT_EXAMPLES)
+    assert TAXONOMY_VERSION == "categorization-request-v1.3"

@@ -15,6 +15,11 @@ answer/delegate are compatible (delegate is an autonomy grant, not a
 non-answer): predicting either one is correct when the set holds either one.
 defer is compatible with neither.
 
+v1.3 (2026-09-24): dismiss is folded into skip. By default every intent
+label - his labels, the original columns and replayed predictions - is
+normalized (dismiss -> skip) before scoring. --legacy-dismiss scores under
+the v1.2 six-label taxonomy instead, so v1.2-era numbers can be reproduced.
+
 covers_* (per-area coverage, added 2026-09-24): scored per area as a yes/no
 call at >= 0.5. Ground truth per row: human_verdict covers_<area> values, or a
 "covers" list/object in human_verdict, when present; otherwise the winner
@@ -30,9 +35,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # Intent labels and compatibility come from the single source of truth.
-from interview_engine.intent_taxonomy import COMPATIBLE_GROUPS, INTENT_ORDER, compatible  # noqa: E402
+from interview_engine.intent_taxonomy import COMPATIBLE_GROUPS, INTENT_ORDER, LEGACY_ALIASES, compatible, normalize  # noqa: E402
 
 INTENT_LABELS = INTENT_ORDER
+LEGACY = False  # set by --legacy-dismiss
+LEGACY_INTENT_LABELS = ("answer", "delegate", "defer", "dismiss", "skip", "enough")
+
+
+def _norm(label, field):
+    return label if (LEGACY or field != "intent") else normalize(label)
 
 
 def _parse(v):
@@ -53,19 +64,24 @@ def _labels(value):
 def truth_set(row, field):
     """His label set for this row, or None when no usable label exists."""
     hv = _parse(row.get("human_verdict"))
-    if isinstance(hv, dict) and _labels(hv.get(field)): return _labels(hv[field])
-    if isinstance(hv, list) and field == "intent" and _labels(hv): return _labels(hv)
+    def out(ls):  # normalized, de-duplicated, order kept
+        seen = []
+        for l in (_norm(x, field) for x in ls):
+            if l not in seen: seen.append(l)
+        return seen
+    if isinstance(hv, dict) and _labels(hv.get(field)): return out(_labels(hv[field]))
+    if isinstance(hv, list) and field == "intent" and _labels(hv): return out(_labels(hv))
     t = truth(row, field)
-    return [t] if t else None
+    return out([t]) if t else None
 
 
 def is_correct(pred, labels, field):
-    if field == "intent": return compatible(pred, labels)
+    if field == "intent": return compatible(pred, labels, legacy=LEGACY)
     return pred in labels
 
 
 def effective_truth(pred, labels, field):
-    return pred if is_correct(pred, labels, field) else labels[0]
+    return _norm(pred, field) if is_correct(pred, labels, field) else labels[0]
 
 
 def truth(row, field):
@@ -147,11 +163,14 @@ def metrics(pairs, labels):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("labeled"); ap.add_argument("key"); ap.add_argument("replay_dir")
-    ap.add_argument("-o", "--output"); a = ap.parse_args(argv)
+    ap.add_argument("-o", "--output")
+    ap.add_argument("--legacy-dismiss", action="store_true", help="score intent under v1.2 (dismiss separate from skip)")
+    a = ap.parse_args(argv)
+    global LEGACY; LEGACY = a.legacy_dismiss
     rows = list(csv.DictReader(open(a.labeled, encoding="utf-8-sig", newline="")))
     key = {} if a.key == "-" else {k["case_id"]: k for k in json.load(open(a.key))}
     out = []; P = out.append
-    for slot, field, labels in (("intent", "intent", INTENT_LABELS), ("coverage", "relevance", ("addressed", "partial", "dodged"))):
+    for slot, field, labels in (("intent", "intent", LEGACY_INTENT_LABELS if LEGACY else INTENT_LABELS), ("coverage", "relevance", ("addressed", "partial", "dodged"))):
         srows = [r for r in rows if r["slot"] == slot]
         gt = {r["case_id"]: truth_set(r, field) for r in srows}
         scored = {c: t for c, t in gt.items() if t}
@@ -178,7 +197,7 @@ def main(argv=None):
         head = "| system | n | accuracy | macro-F1 | " + " | ".join(f"{l} P/R" for l in labels) + " | conf right / wrong |"
         P(head); P("|" + "---|" * (head.count("|") - 1))
         for name, preds in systems.items():
-            pairs = [(p, effective_truth(p, scored[c], field)) for c, (p, _) in preds.items()]
+            pairs = [(_norm(p, field), effective_truth(p, scored[c], field)) for c, (p, _) in preds.items()]
             acc, macro, per = metrics(pairs, labels)
             right = [cf for c, (p, cf) in preds.items() if is_correct(p, scored[c], field) and isinstance(cf, (int, float))]
             wrong = [cf for c, (p, cf) in preds.items() if not is_correct(p, scored[c], field) and isinstance(cf, (int, float))]

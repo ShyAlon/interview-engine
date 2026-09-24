@@ -19,8 +19,8 @@ from tests.test_coverage import NEEDS, SCOPE, FakeModel, fake_models, start, str
 def test_steer_detection_matches_the_real_transcript():
     assert founder_steer("No. You do it.") == "delegate"
     assert founder_steer("You do it") == "delegate"
-    assert founder_steer("Can you move on from the UI?") == "dismiss"
-    assert founder_steer("next topic") == "dismiss"
+    assert founder_steer("Can you move on from the UI?") == "skip"   # v1.3: dismiss folded into skip
+    assert founder_steer("next topic") == "skip"
     assert founder_steer("not up to me") == "delegate"
     # ordinary answers are NOT steers
     assert founder_steer("Walking 10000 steps daily, meditating") is None
@@ -68,7 +68,7 @@ def test_delegate_records_delegation_and_never_reasks(monkeypatch):
     assert r["coverage"]["nfrs"] == "thin"
 
 
-def test_dismiss_with_topic_parks_but_keeps_area(monkeypatch):
+def test_skip_with_topic_parks_but_keeps_area(monkeypatch):
     probing = FakeModel([
         structured("What specific encryption standards should be used?", thin=["nfrs"]),
         structured("Apart from parked details, what uptime target matters most?"),
@@ -79,12 +79,13 @@ def test_dismiss_with_topic_parks_but_keeps_area(monkeypatch):
     r = g.invoke({"messages": [HumanMessage(content="Can you move on from the encryption?")]},
                  {"configurable": {"thread_id": "steer2"}})
     assert "security/encryption detail" in r["parked_topics"]
-    assert r["delegated_decisions"]
+    # v1.3: a skip is not a delegation (the only record is the uptime engineering default)
+    assert not any("encryption" in x["statement"] for x in r["delegated_decisions"])
     assert r["coverage"]["nfrs"] == "thin"      # topic closed, area not falsely skipped
     assert "encryption" not in r["messages"][-1].content.lower()
 
 
-def test_dismiss_without_topic_skips_the_area(monkeypatch):
+def test_skip_without_topic_skips_the_area(monkeypatch):
     probing = FakeModel([
         structured("What outcome would make this product worth building?", thin=["goal"]),
         structured("Who besides the primary user is affected?"),
@@ -94,7 +95,8 @@ def test_dismiss_without_topic_skips_the_area(monkeypatch):
     start(g, thread="steer2b")
     r = g.invoke({"messages": [HumanMessage(content="Can we move on?")]},
                  {"configurable": {"thread_id": "steer2b"}})
-    assert r["coverage"]["goal"] == "delegated"
+    assert r["coverage"]["goal"] == "skipped"          # v1.3: a move-on is skip, not a delegation
+    assert not r.get("delegated_decisions")
     assert r["messages"][-1].content == "Who besides the primary user is affected?"
 
 
@@ -207,19 +209,19 @@ def test_cloud_infrastructure_drilling_is_suppressed():
 def test_leading_steer_inside_a_longer_answer():
     assert founder_steer("You suggest. I'm good with any cloud infrastructure.") == "delegate"
     assert founder_steer("This is implementation. I just want the app to be accessible and to "
-                         "persist the users' data.") == "dismiss"
+                         "persist the users' data.") == "skip"
 
 # --- session 20260914-210005-68fa: historical-data question repeated 4x ---
 
 def test_historical_data_deflection_forms_are_terminal():
     assert founder_steer("You decide") == "delegate"
     assert founder_steer("The data science team will approve the final selection") == "delegate"
-    assert founder_steer("Leave the historical data") == "dismiss"
+    assert founder_steer("Leave the historical data") == "skip"
 
 
 def test_all_three_live_deflections_resolve_the_current_area(monkeypatch):
     replies=["You decide", "The data science team will approve the final selection", "Leave the historical data"]
-    expected=["delegated", "delegated", "delegated"]
+    expected=["delegated", "delegated", "uncovered"]  # v1.3: 'Leave the historical data' is skip - parks the sub-topic
     for i,(answer,status) in enumerate(zip(replies,expected)):
         probing=FakeModel([structured("Which historical datasets should train the model?"),
                            structured("Which historical data sources should train the model?")])
@@ -230,7 +232,8 @@ def test_all_three_live_deflections_resolve_the_current_area(monkeypatch):
         g.invoke({"messages":[HumanMessage(content="weather and port feeds")],"submission":{"free_text":"web supply chain predictor","founder_id":"t","submission_id":f"live-deflect-{i}"},"verdict":{"accepted":True},"coverage":cov,"coverage_target":"data"},cfg)
         r=g.invoke({"messages":[HumanMessage(content=answer)]},cfg)
         assert r["coverage"]["data"]==status
-        assert r["delegated_decisions"]
+        assert bool(r.get("delegated_decisions")) == (status == "delegated")
+        if status != "delegated": assert "historical-data source selection" in r["parked_topics"]
         assert "historical" not in r["messages"][-1].content.lower()
 
 
@@ -389,7 +392,8 @@ def test_direct_move_on_closes_current_subject_not_whole_interview(monkeypatch):
     g.invoke(initial, cfg)
     result = g.invoke({"messages": [HumanMessage(content="Move on.")]}, cfg)
     assert "[INTERVIEW COMPLETE]" not in result["messages"][-1].content
-    assert result["coverage"]["data"] == "delegated"
+    assert result["coverage"]["data"] == "skipped"       # v1.3 skip; the next area (flows) stays open
+    assert result["coverage"]["flows"] == "thin"
     assert result["coverage_target"] == "flows"
 
 

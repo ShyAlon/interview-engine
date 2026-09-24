@@ -53,8 +53,9 @@ def test_multilabel_sets_and_answer_delegate_compatibility():
     ]
     key = {r["case_id"]: {"system_a": "baseline", "system_b": "jev"} for r in rows}
     fails = cap.failing_rows(rows, key)
-    assert [(r["case_id"], t) for r, _, t, _, _ in fails] == [("m1", ["dismiss", "skip"]), ("m4", "answer")]
+    assert [(r["case_id"], t) for r, _, t, _, _ in fails] == [("m1", "skip"), ("m4", "answer")]  # v1.3: dismiss -> skip
     s = cap.score
     assert s.truth_set({"human_verdict": '{"intent": "skip"}'}, "intent") == ["skip"]
     assert s.is_correct("answer", ["delegate"], "intent") and not s.is_correct("answer", ["delegate"], "relevance")
     assert not s.is_correct("dismiss", ["answer", "delegate"], "intent")
+    assert s.is_correct("dismiss", ["skip"], "intent") and s.truth_set({"human_verdict": '{"intent": ["dismiss", "skip"]}'}, "intent") == ["skip"]

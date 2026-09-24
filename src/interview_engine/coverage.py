@@ -143,9 +143,9 @@ _DEFERRAL_RE = re.compile(
     r"(?:[a-z][\w -]+) (?:will|can|should) (?:decide|select|choose|approve)(?: the final (?:choice|selection))?)\s*[.!?]*\s*$",
     re.IGNORECASE)
 
-# Topic-level dismissal: "move on from the UI", "next topic", "stop asking
+# Move-on / decline phrases: "move on from the UI", "next topic", "stop asking
 # about X". Distinct from 'enough' (whole interview) and from a deferral
-# (delegate ONE detail): the founder closes the current AREA.
+# (delegate ONE detail). v1.3: these are skip (dismiss was folded into skip).
 _DISMISS_RE = re.compile(
     r"^this is (?:an? )?implementation\b|"
     r"^(?:please )?move on\b|"
@@ -200,9 +200,10 @@ def is_postponement(text: str) -> bool:
 def founder_steer(text: str) -> str | None:
     """An explicit founder steer (2026-09-12 transcript: 'No. You do it.',
     'Can you move on from the UI?'): 'delegate' hands the current detail to
-    implementation; 'dismiss' closes the current area entirely. Both are
-    terminal - no rephrase-and-ask-again. Whole-message matching only for
-    deferrals; dismissal needs one clear phrase."""
+    implementation; 'skip' moves on from the current question or topic
+    (v1.3 - this used to be 'dismiss'). Both are terminal - no
+    rephrase-and-ask-again. Whole-message matching only for deferrals; a skip
+    needs one clear phrase."""
     t = (text or "").strip()
     if is_postponement(t):
         return "defer"
@@ -211,9 +212,9 @@ def founder_steer(text: str) -> str | None:
     # a steer may LEAD a longer answer ('You suggest. I'm good with any cloud.')
     first = re.split(r"(?<=[.!?])\s+", t, maxsplit=1)[0] if t else ""
     if first != t and (is_deferral(first) or _DISMISS_RE.search(first)):
-        return "delegate" if is_deferral(first) else "dismiss"
+        return "delegate" if is_deferral(first) else "skip"
     if _DISMISS_RE.search(t):
-        return "dismiss"
+        return "skip"
     return None
 
 

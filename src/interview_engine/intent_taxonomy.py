@@ -11,25 +11,31 @@ Add or rename a label here and nowhere else.
 ("I have to check with someone and come back to you"). It is not delegate
 (nobody was handed the choice) and not settled, so the interview must not
 treat the question as decided.
+
+v1.3 (2026-09-24, Shy): ``dismiss`` is removed. It sat too close to skip and
+added noise either way, so ``skip`` now covers both "wants to move on" and
+"doesn't want to tackle this topic". Old records and frozen rubric variants
+may still say dismiss; ``normalize`` maps it to skip.
 """
 from __future__ import annotations
 
 import json
 
 # Canonical order: the order labels appear in prompts, tables and tools.
-INTENT_ORDER: tuple[str, ...] = ("answer", "delegate", "defer", "dismiss", "skip", "enough")
+INTENT_ORDER: tuple[str, ...] = ("answer", "delegate", "defer", "skip", "enough")
+# Retired labels -> their v1.3 label. Applied to classifier output, stored
+# labels and scoring so older records stay usable.
+LEGACY_ALIASES: dict[str, str] = {"dismiss": "skip"}
 
 # One-line criteria: the canonical label text shown to classifiers and
 # labelers. v1.2 (2026-09-23, Shy's rewrite): each label is phrased as what
-# the founder WANTS, so the classes do not overlap. Note the v1.2 meanings of
-# dismiss and skip: dismiss = does not want to tackle the topic at all;
-# skip = wants to move on (v1/v1.1 had "move on" under dismiss).
+# the founder WANTS, so the classes do not overlap. v1.3 folds dismiss into
+# skip (the v1.2 text is frozen in categorization_rubrics as intent-v1.2).
 INTENT_SHORT: dict[str, str] = {
     "answer": "Founder gives product information, even if it doesn't directly address the question asked",
     "delegate": "Founder wants the interviewer to decide",
     "defer": "Founder wants to answer later",
-    "dismiss": "Founder doesn't want to tackle this topic",
-    "skip": "Founder wants to move on",
+    "skip": "Founder wants to move on, including not wanting to tackle this topic",
     "enough": "Founder wants to end the whole interview",
 }
 
@@ -41,9 +47,8 @@ INTENT_DEFS: dict[str, str] = {
     "delegate": "The founder wants the interviewer/builder to make this decision for them.",
     "defer": ("The founder wants to answer this later, for example after checking with someone on their side. "
               "Nothing is decided and nobody was handed the choice."),
-    "dismiss": ("The founder does not want to tackle this topic at all: they decline it, without handing the choice to anyone "
-                "and without promising to answer later."),
-    "skip": "The founder wants to move on from the current question to the next one; the interview continues.",
+    "skip": ("The founder wants to move on from the current question, or does not want to tackle this topic at all; "
+             "nobody is handed the choice, nothing is promised for later, and the interview continues."),
     "enough": "The founder wants to end the whole interview now.",
 }
 
@@ -62,20 +67,18 @@ INTENT_EXAMPLES: dict[str, str] = {
     "defer": INTENT_DEFS["defer"] + (
         " Examples: 'Let me check with my cofounder and come back to you on that.' / "
         "'I need to confirm this with our accountant first.' / 'I'll find out and get back to you.' "
-        "Not defer: 'you choose' (that is delegate); 'I'd rather not get into that' (that is dismiss); a tentative answer with content (that is answer)."),
-    "dismiss": INTENT_DEFS["dismiss"] + (
-        " Examples: 'I'd rather not get into that.' / 'That topic isn't relevant for us.' / 'I don't want to discuss pricing here.' "
-        "Not dismiss: 'you choose' (that is delegate); 'next question' (that is skip); 'I'll come back to you on that' (that is defer)."),
+        "Not defer: 'you choose' (that is delegate); 'I'd rather not get into that' (that is skip); a tentative answer with content (that is answer)."),
     "skip": INTENT_DEFS["skip"] + (
-        " Examples: 'Let's move on.' / 'Next question.' / 'I've said all I have on that.' "
-        "Not skip: declining the topic itself (that is dismiss); ending the whole interview (that is enough)."),
+        " Examples: 'Let's move on.' / 'Next question.' / 'I've said all I have on that.' / 'I'd rather not get into that.' "
+        "/ 'That topic isn't relevant for us.' "
+        "Not skip: 'you choose' (that is delegate); 'I'll come back to you on that' (that is defer); ending the whole interview (that is enough)."),
     "enough": INTENT_DEFS["enough"] + (
         " Examples: 'That's enough, write the spec.' / 'I'm done with the interview.' "
         "Not enough: moving on from only the current question (that is skip)."),
 }
 
 # Labels that close the current area / interview.
-TERMINAL_INTENTS: frozenset[str] = frozenset({"dismiss", "skip", "enough"})
+TERMINAL_INTENTS: frozenset[str] = frozenset({"skip", "enough"})
 # Control moves a classifier must assert with high confidence before code acts
 # on them; a low-confidence one falls back to answer.
 GATED_INTENTS: frozenset[str] = TERMINAL_INTENTS | {"defer"}
@@ -87,8 +90,16 @@ COMPATIBLE_GROUPS: tuple[frozenset[str], ...] = (frozenset({"answer", "delegate"
 assert tuple(INTENT_SHORT) == tuple(INTENT_DEFS) == tuple(INTENT_EXAMPLES) == INTENT_ORDER
 
 
-def compatible(pred: str, labels) -> bool:
-    """True when ``pred`` is in ``labels`` or shares a compatibility group with one."""
+def normalize(label):
+    """Map a retired label (dismiss) to its v1.3 label; other values pass through."""
+    return LEGACY_ALIASES.get(label, label) if isinstance(label, str) else label
+
+
+def compatible(pred: str, labels, legacy: bool = False) -> bool:
+    """True when ``pred`` is in ``labels`` or shares a compatibility group with one.
+    Retired labels are normalized first unless ``legacy`` (score under v1.2)."""
+    if not legacy:
+        pred = normalize(pred); labels = [normalize(str(l)) for l in labels]
     labels = [str(l) for l in labels]
     if pred in labels:
         return True
@@ -96,7 +107,7 @@ def compatible(pred: str, labels) -> bool:
 
 
 # Rubric version of the canonical criteria above. Bump with any text change.
-TAXONOMY_VERSION = "categorization-request-v1.2"
+TAXONOMY_VERSION = "categorization-request-v1.3"
 # Labelers may pick several intent labels for one reply (locked 2026-09-23).
 MULTI_SELECT = True
 
@@ -106,7 +117,7 @@ def taxonomy_json() -> str:
     return json.dumps({"version": TAXONOMY_VERSION, "slot": "intent", "key": "intent", "multi_select": MULTI_SELECT,
                        "order": list(INTENT_ORDER), "short": INTENT_SHORT, "definitions": INTENT_DEFS,
                        "compatible_groups": [sorted(g) for g in COMPATIBLE_GROUPS],
-                       "terminal": sorted(TERMINAL_INTENTS)}, indent=2)
+                       "terminal": sorted(TERMINAL_INTENTS), "legacy_aliases": LEGACY_ALIASES}, indent=2)
 
 
 if __name__ == "__main__":  # python -m interview_engine.intent_taxonomy

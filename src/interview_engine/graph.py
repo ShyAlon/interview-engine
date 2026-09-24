@@ -209,7 +209,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 intent_result = categorizer.classify(intent_request(prior_question, founder_answer))
                 classified_control = classified_intent(intent_result.answers)
                 # Re-ask guard (2026-09-23 merge): the baseline owns intent, but
-                # when it closes the area (dismiss or skip) while Jev reads the
+                # when it closes the area (skip) while Jev reads the
                 # same reply as an answer, re-ask once instead of closing. A
                 # second disagreement on the same area honors the baseline.
                 jev_seen = getattr(categorizer, "last_jev", {}).get("intent")
@@ -226,8 +226,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
 
         # Founder steers are terminal (2026-09-12 transcript: 'No. You do it.'
         # got rephrased and re-asked twice). 'delegate' parks the sub-topic and
-        # records the delegation for the intent model; 'dismiss' closes the
-        # whole target area. Neither may be rephrased and re-asked.
+        # records the delegation for the intent model; 'skip' moves on (below).
+        # Neither may be rephrased and re-asked.
         guard_area_out = guard_area if guard_fired else ""
         steer = (classified_control if categorizer.active("intent") else
                  (founder_steer(getattr(last, "content", "")) if last is not None and getattr(last, "type", "") == "human" else None))
@@ -244,7 +244,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                        "source_turns": [len(state["messages"]) - 1]})
             if area and coverage.get(area) in ("uncovered", "thin"):
                 coverage[area] = DEFERRED
-        steer = steer if steer in ("delegate", "dismiss") else None
+        steer_skip = steer == "skip"
+        steer = steer if steer == "delegate" else None
         delegated = [dict(d) for d in (state.get("delegated_decisions") or [])]
         if steer:
             prior_question = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
@@ -261,7 +262,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                              f"decision ('{words}'); the spec/architecture stage owns the choice.",
                 "research_brief": f"Research {topic} using current registries, vendor documentation, and web sources; propose a requirement-specific choice for founder review.",
                 "source_turns": [turn_idx]})
-            # Explicit delegation or dismissal resolves the current area as
+            # Explicit delegation resolves the current area as
             # covered-by-delegation. The assumption remains visible in the
             # intent artifact; this is neither a non-answer nor silent coverage.
             if area_label in coverage:
@@ -270,14 +271,28 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         # founder control (ADR-0016): deterministic, never costs a model call
         control = (classified_control if categorizer.active("intent") else
                    (founder_control(getattr(last, "content", "")) if last is not None else None))
+        if control is None and steer_skip:
+            control = "skip"  # fallback path: a move-on phrase founder_control's strict regex misses
         control = control if control in ("skip", "enough") else None
         if control == "enough":
             return {"messages": [AIMessage(content="Understood - wrapping up.\n\n[INTERVIEW COMPLETE]")],
                     "coverage": coverage, "turn_count": turn}
+        skipped_area = None
         if control == "skip":
+            # v1.3 skip (absorbs dismiss): when the question was about a
+            # recognizable sub-topic, park that sub-topic so it is never
+            # re-probed and leave the rest of the area open; otherwise the
+            # whole target area is skipped. Nothing is recorded as delegated.
+            prior_q = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
+                            if getattr(m, "type", "") == "ai"), "")
+            parked = question_topic(prior_q)
             target = state.get("coverage_target") or next_area(coverage)
-            if target:
+            if parked:
+                if parked not in parked_topics:
+                    parked_topics.append(parked)
+            elif target:
                 coverage[target] = "skipped"
+                skipped_area = target
 
         target = next_area(coverage)
         # Two unanswered attempts are enough. Close the stubborn area as a
@@ -381,8 +396,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         if parsed is not None:
             if not categorizer.active("coverage") and not repeated:
                 coverage = apply_reply(coverage, parsed)
-            if control == "skip" and target:
-                coverage[target] = SKIPPED
+            # Re-assert the skip on the area the founder skipped. (Before
+            # 2026-09-24 this used the recomputed next target, which silently
+            # skipped the NEXT area as well.)
+            if skipped_area:
+                coverage[skipped_area] = SKIPPED
             # Quantified-NFR guard (run-5): the model may not close "quantified
             # NFRs" while the founder's own words contain no numbers - unless the
             # founder explicitly said there are none (demo mode). Coded guardrail,

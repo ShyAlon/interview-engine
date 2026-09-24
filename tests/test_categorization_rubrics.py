@@ -38,14 +38,27 @@ V1_2_INTENT = {"answer": "Founder gives product information, even if it doesn't 
                "enough": "Founder wants to end the whole interview"}
 
 
-def test_default_intent_is_v1_2_from_the_taxonomy_and_relevance_v1_unchanged():
-    from interview_engine.categorization_rubrics import V1_2_RUBRIC_VERSION
+V1_3_INTENT = {k: v for k, v in V1_2_INTENT.items() if k != "dismiss"}
+V1_3_INTENT["skip"] = "Founder wants to move on, including not wanting to tackle this topic"
+
+
+def test_default_intent_is_v1_3_from_the_taxonomy_and_relevance_v1_unchanged():
+    from interview_engine.categorization_rubrics import V1_3_RUBRIC_VERSION
     i = intent_request("Q", "A"); c = coverage_request("Q", "A")
     assert i.questions["intent"] == ChoiceQuestion("Classify the founder's control intent", INTENT_LABELS)
-    assert dict(INTENT_LABELS) == V1_2_INTENT and list(INTENT_LABELS) == list(V1_2_INTENT)
+    assert dict(INTENT_LABELS) == V1_3_INTENT and list(INTENT_LABELS) == list(V1_3_INTENT)
+    assert "dismiss" not in INTENT_LABELS
     assert c.questions["relevance"] == ChoiceQuestion("Did the answer address the question?", V1_REL)
-    assert input_package(i)["rubric_version"] == V1_2_RUBRIC_VERSION == "categorization-request-v1.2"
+    assert input_package(i)["rubric_version"] == V1_3_RUBRIC_VERSION == "categorization-request-v1.3"
     assert input_package(c)["rubric_version"] == V1_RUBRIC_VERSION
+
+
+def test_intent_v1_2_stays_replayable_frozen():
+    from interview_engine.categorization_rubrics import V1_2_RUBRIC_VERSION
+    i = intent_request("Q", "A", "intent-v1.2")
+    assert i.questions["intent"] == ChoiceQuestion("Classify the founder's control intent", V1_2_INTENT)
+    assert list(i.questions["intent"].criteria) == list(V1_2_INTENT)
+    assert input_package(i)["rubric_version"] == V1_2_RUBRIC_VERSION == "categorization-request-v1.2"
 
 
 def test_intent_v1_1_stays_replayable_frozen():
@@ -80,7 +93,7 @@ def test_every_v2_variant_has_its_own_rubric_version_and_ref():
 
 def test_choice_variants_keep_the_canonical_label_sets():
     for v in INTENT_VARIANTS.values():
-        if v.finalize is None and v.id not in ("intent-v1-133",): assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
+        if v.finalize is None and v.id not in ("intent-v1-133", "intent-v1.1", "intent-v1.2"): assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
     for v in RELEVANCE_VARIANTS.values():
         if v.finalize is None: assert set(v.questions["relevance"].criteria) == set(V1_REL)
 
@@ -146,7 +159,7 @@ BASE = dict(intent_ends_interview=0.0, intent_closes_topic=0.0, intent_declines=
     (dict(intent_gives_content=.9, intent_hands_choice=.2), "answer"),          # "the app should decide - rotate fairly"
     (dict(), "answer"),                                                         # off-topic grocery request, no control move
     (dict(intent_closes_topic=.9), "skip"),                                     # "Can we move on?" (v1.2: move on = skip)
-    (dict(intent_declines=.8), "dismiss"),                                      # v1.2: won't tackle the topic = dismiss
+    (dict(intent_declines=.8), "skip"),                                      # v1.2: won't tackle the topic = dismiss
     (dict(intent_declines=.6, intent_gives_content=.9), "answer"),              # content outweighs a soft decline
     (dict(intent_ends_interview=.9, intent_hands_choice=.9), "enough"),         # ending the interview wins
 ])
@@ -244,7 +257,7 @@ def test_scorer_accepts_multilabel_intent(tmp_path):
     out = tmp_path / "empty"; out.mkdir()
     r = subprocess.run([sys.executable, str(ROOT / "scripts/score-rubric-variants.py"), str(lab), str(key), str(out)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "{'skip+dismiss': 1}" in r.stdout
+    assert "{'skip': 1}" in r.stdout   # v1.3: dismiss folded into skip
     assert "| baseline (original) | 1 | 0.00" in r.stdout   # delegate not in {skip, dismiss}, not compatible
 
 

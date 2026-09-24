@@ -1,7 +1,7 @@
 {
   "status": "Approved by Shy as drafted (+1, 2026-09-24). The texts and labels are the benchmark; edit here and re-run the generator.",
   "product": "Fictional product for the whole pool: a booking app for a small dog-grooming salon (two groomers, one front-desk person, about 60 regular clients). One product keeps answers coherent across questions. A second product can be added later to check that nothing depends on this one.",
-  "taxonomy": "categorization-request-v1.2",
+  "taxonomy": "categorization-request-v1.3",
   "questions": [
     {
       "id": "Q-goal",
@@ -390,59 +390,59 @@
       "note": ""
     },
     {
-      "cls": "dismiss",
+      "cls": "skip",
       "id": "DIS-01",
       "text": "I really don't want to get into pricing here.",
       "intent": [
-        "dismiss"
+        "skip"
       ],
       "areas": [],
       "full": true,
-      "note": ""
+      "note": "v1.3: was dismiss, now skip (dismiss removed)."
     },
     {
-      "cls": "dismiss",
+      "cls": "skip",
       "id": "DIS-02",
       "text": "That's not something we're going to deal with in this app.",
       "intent": [
-        "dismiss"
+        "skip"
       ],
       "areas": [],
       "full": true,
-      "note": ""
+      "note": "v1.3: was dismiss, now skip (dismiss removed)."
     },
     {
-      "cls": "dismiss",
+      "cls": "skip",
       "id": "DIS-03",
       "text": "Leave the staff side out of it, I'm not discussing that.",
       "intent": [
-        "dismiss"
+        "skip"
       ],
       "areas": [],
       "full": true,
-      "note": ""
+      "note": "v1.3: was dismiss, now skip (dismiss removed)."
     },
     {
-      "cls": "dismiss",
+      "cls": "skip",
       "id": "DIS-04",
       "text": "I'd prefer not to go there.",
       "intent": [
-        "dismiss"
+        "skip"
       ],
       "areas": [],
       "full": true,
-      "note": ""
+      "note": "v1.3: was dismiss, now skip (dismiss removed)."
     },
     {
-      "cls": "dismiss",
+      "cls": "skip",
       "id": "DIS-05",
       "text": "That topic doesn't matter to us, I won't spend time on it.",
       "intent": [
-        "dismiss"
+        "skip"
       ],
       "areas": [],
       "full": true,
-      "note": ""
+      "note": "v1.3: was dismiss, now skip (dismiss removed)."
     },
     {
       "cls": "skip",
@@ -616,7 +616,7 @@
       ],
       "areas": [],
       "full": true,
-      "note": "NEAR-MISS. Today the deterministic rules map 'I don't know' to delegate. Under v1.2 it's none of delegate/defer/dismiss cleanly. Proposed skip; could be {skip, dismiss}. Your call."
+      "note": "NEAR-MISS. The deterministic rules map 'I don't know' to delegate. Under v1.3 it is skip (no promise to answer, nothing handed off). Approved as skip."
     },
     {
       "cls": "boundary",
@@ -645,11 +645,11 @@
       "id": "NM-06",
       "text": "I'd rather not talk about money - and honestly let's wrap up soon.",
       "intent": [
-        "dismiss"
+        "skip"
       ],
       "areas": [],
       "full": true,
-      "note": "dismiss + a soft 'soon' that is not yet enough. Proposed {dismiss}. Tests that 'wrap up soon' doesn't trigger enough."
+      "note": "dismiss + a soft 'soon' that is not yet enough. Proposed {dismiss}. Tests that 'wrap up soon' doesn't trigger enough. v1.3: was dismiss, now skip (dismiss removed)."
     },
     {
       "cls": "boundary",
@@ -660,7 +660,7 @@
       ],
       "areas": [],
       "full": true,
-      "note": "NEAR-MISS skip vs dismiss under v1.2: the word 'skip' vs the meaning. Proposed skip (moving on), since there's no refusal of the topic. Your call."
+      "note": "Was a skip-vs-dismiss near-miss under v1.2; under v1.3 it is plainly skip. Kept as a control that the bare word 'skip' is skip."
     }
   ],
   "pairing_rules": {
@@ -671,5 +671,9 @@
     ]
   },
   "pair_count": 560,
-  "relevance_for_control_moves": "not scored (Shy's call a, 2026-09-24)"
+  "relevance_for_control_moves": "not scored (Shy's call a, 2026-09-24)",
+  "history": [
+    "2026-09-24: approved as drafted (Shy +1).",
+    "2026-09-24: v1.3 - dismiss removed (Shy: too close to skip). The 5 DIS-* responses and NM-06 are relabeled skip; texts unchanged."
+  ]
 }
