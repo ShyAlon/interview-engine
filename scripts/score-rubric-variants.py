@@ -14,6 +14,12 @@ string or a JSON array. A prediction is correct if it is in the label set, and
 answer/delegate are compatible (delegate is an autonomy grant, not a
 non-answer): predicting either one is correct when the set holds either one.
 defer is compatible with neither.
+
+covers_* (per-area coverage, added 2026-09-24): scored per area as a yes/no
+call at >= 0.5. Ground truth per row: human_verdict covers_<area> values, or a
+"covers" list/object in human_verdict, when present; otherwise the winner
+side's covers_* (on a tie, only areas where both sides agree). Only coverage
+rows with a usable covers truth are scored. Keys may be "-" for no key file.
 For the per-label P/R columns, a correct prediction counts as that label; a
 miss counts against the first label in his set.
 """
@@ -76,6 +82,55 @@ def truth(row, field):
     return None
 
 
+AREAS = ("goal", "users", "flows", "data", "integrations", "nfrs", "failures", "constraints", "risks", "done", "glossary")
+
+
+def _yes(v):
+    if isinstance(v, bool): return v
+    try: return float(v) >= .5
+    except (TypeError, ValueError): return None
+
+
+def covers_truth(row):
+    """area -> bool for this coverage row, or None when there is no usable truth."""
+    hv = _parse(row.get("human_verdict"))
+    if isinstance(hv, dict):
+        c = hv.get("covers")
+        if isinstance(c, list): return {a: a in c for a in AREAS}
+        if isinstance(c, dict): return {a: bool(_yes(c.get(a, c.get(f"covers_{a}", 0)))) for a in AREAS}
+        keys = {a: _yes(hv[f"covers_{a}"]) for a in AREAS if f"covers_{a}" in hv}
+        if keys: return {a: bool(keys.get(a, False)) for a in AREAS}
+    a, b = _parse(row.get("system_a_verdict")) or {}, _parse(row.get("system_b_verdict")) or {}
+    side = {"a": a, "b": b}.get((row.get("winner") or "").strip().lower())
+    if side is not None:
+        vals = {x: _yes(side.get(f"covers_{x}")) for x in AREAS}
+        return {x: v for x, v in vals.items() if v is not None} or None
+    if (row.get("winner") or "").strip().lower() == "tie":
+        out = {x: _yes(a.get(f"covers_{x}")) for x in AREAS if _yes(a.get(f"covers_{x}")) is not None and _yes(a.get(f"covers_{x}")) == _yes(b.get(f"covers_{x}"))}
+        return out or None
+    return None
+
+
+def covers_table(systems_covers, truths):
+    """One row per system: per-area F1 plus overall micro accuracy/F1 over every scored area call."""
+    head = "| system | rows | micro acc | micro F1 | " + " | ".join(AREAS) + " |"
+    lines = [head, "|" + "---|" * (head.count("|") - 1)]
+    for name, preds in systems_covers.items():
+        tp = fp = fn = tn = 0; per = []
+        for area in AREAS:
+            atp = afp = afn = 0
+            for cid, pred in preds.items():
+                t = truths[cid].get(area); p = _yes(pred.get(f"covers_{area}"))
+                if t is None or p is None: continue
+                atp += p and t; afp += p and not t; afn += (not p) and t; tn += (not p) and not t
+            tp += atp; fp += afp; fn += afn
+            per.append(f"{2 * atp / (2 * atp + afp + afn):.2f}" if atp + afp + afn else "-")
+        n = tp + fp + fn + tn
+        acc = f"{(tp + tn) / n:.2f}" if n else "-"; f1 = f"{2 * tp / (2 * tp + fp + fn):.2f}" if tp + fp + fn else "-"
+        lines.append(f"| {name} | {len(preds)} | {acc} | {f1} | " + " | ".join(per) + " |")
+    return lines
+
+
 def metrics(pairs, labels):
     n = len(pairs); acc = sum(p == t for p, t in pairs) / n if n else 0
     per = {}
@@ -94,7 +149,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("labeled"); ap.add_argument("key"); ap.add_argument("replay_dir")
     ap.add_argument("-o", "--output"); a = ap.parse_args(argv)
     rows = list(csv.DictReader(open(a.labeled, encoding="utf-8-sig", newline="")))
-    key = {k["case_id"]: k for k in json.load(open(a.key))}
+    key = {} if a.key == "-" else {k["case_id"]: k for k in json.load(open(a.key))}
     out = []; P = out.append
     for slot, field, labels in (("intent", "intent", INTENT_LABELS), ("coverage", "relevance", ("addressed", "partial", "dodged"))):
         srows = [r for r in rows if r["slot"] == slot]
@@ -131,6 +186,24 @@ def main(argv=None):
             cells = " | ".join(f"{per[l][0]:.2f}/{per[l][1]:.2f}" if per[l][1] is not None else f"{per[l][0]:.2f}/-" for l in labels)
             P(f"| {name} | {len(pairs)} | {acc:.2f} | {macro:.2f} | {cells} | {cr} / {cw} |")
         P("")
+        if slot == "coverage":
+            ct = {r["case_id"]: covers_truth(r) for r in srows}
+            ct = {c: t for c, t in ct.items() if t}
+            P("## coverage / covers_* per area (F1 per area; call = value >= 0.5)\n")
+            P(f"Coverage rows with a usable covers truth: {len(ct)} of {len(srows)}\n")
+            sc = {}
+            for r in srows:
+                if r["case_id"] not in ct or r["case_id"] not in key: continue
+                for side in ("system_a", "system_b"):
+                    name = "baseline (original)" if key[r["case_id"]][side] == "baseline" else "jev-v1 (original)"
+                    sc.setdefault(name, {})[r["case_id"]] = _parse(r[side + "_verdict"]) or {}
+            for f in sorted(Path(a.replay_dir).glob("replay-*.jsonl")):
+                for rec in (json.loads(l) for l in f.open() if l.strip()):
+                    cid = rec.get("replay", {}).get("case_id")
+                    if rec.get("slot") == "coverage" and cid in ct and rec["jev"].get("status") == "ok":
+                        sc.setdefault(f.stem.replace("replay-", ""), {})[cid] = rec["jev"]["verdict"]
+            for line in covers_table(sc, ct): P(line)
+            P("")
     text = "\n".join(out); print(text)
     if a.output: Path(a.output).write_text(text + "\n")
     return 0

@@ -45,11 +45,29 @@ class RubricVariant:
     finalize: Finalize | None = None
     production_ok: bool = True  # decomposed variants need finalize wiring in the chain first
     version: str | None = None  # explicit rubric_version; default derives from the id
+    # Relevance variants only. None keeps the legacy covers_* template (v1..v2).
+    covers: Mapping[str, str] | None = None          # area -> statement WITH the question clause
+    covers_plain: Mapping[str, str] | None = None    # area -> statement without it (option B, non-target areas)
+    covers_clause_all: bool = True                   # A: clause on every area; B: target area only
+    preamble: str | None = None                      # prepended to the request state
 
     @property
     def rubric_version(self) -> str:
         if self.version: return self.version
         return V1_RUBRIC_VERSION if self.id.endswith("-v1") else f"categorization-request-v2/{self.id}"
+
+    def covers_questions(self, target: str | None) -> dict[str, "Question"] | None:
+        """The 11 covers_* questions this variant asks, or None for the legacy template."""
+        if self.covers is None: return None
+        out = {}
+        for area, text in self.covers.items():
+            if not self.covers_clause_all and area != (target or "") and self.covers_plain:
+                text = self.covers_plain[area]
+            out[f"covers_{area}"] = NoulQuestion(text)
+        return out
+
+    def state(self, state: str) -> str:
+        return f"{self.preamble}\n\n{state}" if self.preamble else state
 
     def apply(self, answers: Mapping[str, ClassificationAnswer]) -> dict[str, ClassificationAnswer]:
         return dict(self.finalize(answers)) if self.finalize else dict(answers)
@@ -190,6 +208,37 @@ def finalize_decomposed_relevance(answers: Mapping[str, ClassificationAnswer]) -
     return out
 
 
+# relevance-v3-se: the relevance makeover draft Shy +1'd on 2026-09-24, with the
+# question clause on the targeted area only (option B). relevance-v3-se-a keeps
+# the clause on every area (option A) so the replay can compare both. Systems-
+# engineering preamble, relevance criteria without "substantively"/"without
+# delegating", and one plain statement per coverage area replacing the old
+# "supplies concrete product facts for coverage area: <token>" template.
+REL_V3_PREAMBLE = ("In the context of a systems engineering task: a founder is being interviewed about a software system "
+                   "they want built. The interviewer asked one question and the founder replied. Judge each statement "
+                   "below against that question and that reply.")
+_REL_V3_INSTR = "Does the answer address the question asked?"
+_REL_V3 = {"addressed": "The answer addresses every main part of the question asked.",
+           "partial": "The answer addresses the question asked, but leaves a main part open or stays vague.",
+           "dodged": "The answer does not address the question asked (another topic, generic or pasted text, or a refusal)."}
+_CLAUSE = " in response to the question asked"
+COVERS_V3 = {
+    "goal": "The answer addresses the goal of the system, and the problem it solves, in response to the question asked.",
+    "users": "The answer addresses the users and other stakeholders of the system in response to the question asked.",
+    "flows": "The answer addresses how the system is used - an operational scenario from trigger to outcome - in response to the question asked.",
+    "data": "The answer addresses the data the system handles - what it is, where it comes from, who owns it - in response to the question asked.",
+    "integrations": "The answer addresses the external systems or services the system connects to in response to the question asked.",
+    "nfrs": ("The answer addresses the quality needs of the system - such as speed, reliability, scale, security or privacy "
+             "as the founder experiences them - in response to the question asked."),
+    "failures": "The answer addresses the failure modes of the system - what can break or degrade, and what must never happen - in response to the question asked.",
+    "constraints": "The answer addresses the constraints on the system - budget, deadline, team or technology - in response to the question asked.",
+    "risks": "The answer addresses the risks to the system - assumptions that would sink the product if wrong - in response to the question asked.",
+    "done": "The answer addresses how the founder will know the system works - its done criteria - in response to the question asked.",
+    "glossary": "The answer addresses the domain terms used for the system and what they mean in response to the question asked.",
+}
+COVERS_V3_PLAIN = {k: v.replace(_CLAUSE, "").replace(" ,", ",") for k, v in COVERS_V3.items()}
+assert all(_CLAUSE in v for v in COVERS_V3.values())
+
 RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-v1", RELEVANCE_KEY, "Control: the rubric the 133-case labels were collected against.",
                   {RELEVANCE_KEY: ChoiceQuestion("Did the answer address the question?", _REL_V1)}),
@@ -199,6 +248,12 @@ RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
                   {RELEVANCE_KEY: ChoiceQuestion(_REL_V2B_INSTR, _REL_STRICT)}),
     RubricVariant("relevance-v2c-decomposed", RELEVANCE_KEY, "Four yes/no signals, code-owned mapping to addressed/partial/dodged.",
                   {k: NoulQuestion(v) for k, v in _DECOMP_REL.items()}, finalize_decomposed_relevance, production_ok=False),
+    RubricVariant("relevance-v3-se", RELEVANCE_KEY, "Relevance makeover (Shy +1, 2026-09-24): SE preamble + plain per-area covers_*; question clause on the targeted area only (option B).",
+                  {RELEVANCE_KEY: ChoiceQuestion(_REL_V3_INSTR, _REL_V3)}, version="relevance-v3-se",
+                  covers=COVERS_V3, covers_plain=COVERS_V3_PLAIN, covers_clause_all=False, preamble=REL_V3_PREAMBLE),
+    RubricVariant("relevance-v3-se-a", RELEVANCE_KEY, "Replay-comparison only: v3-se with the question clause on every area (option A, as first drafted).",
+                  {RELEVANCE_KEY: ChoiceQuestion(_REL_V3_INSTR, _REL_V3)}, version="relevance-v3-se-a",
+                  covers=COVERS_V3, covers_plain=COVERS_V3_PLAIN, covers_clause_all=True, preamble=REL_V3_PREAMBLE),
 )}
 
 

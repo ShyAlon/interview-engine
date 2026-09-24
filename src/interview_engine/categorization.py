@@ -270,9 +270,11 @@ def coverage_request(question: str, answer: str, target: str | None = None, rele
     from .categorization_rubrics import configured_variant, get_variant
     variant = get_variant(relevance_variant) if isinstance(relevance_variant, str) else (relevance_variant or configured_variant("relevance"))
     questions: dict[str, Question] = dict(variant.questions)
-    for area in COVERAGE_AREAS:
-        questions[f"covers_{area}"] = NoulQuestion(f"The answer supplies concrete product facts for coverage area: {area}")
-    return ClassificationRequest("coverage", f"Question: {question}\nAnswer: {answer}", questions, {"target": target or ""},
+    covers = variant.covers_questions(target)
+    if covers is None:  # legacy template (relevance-v1 .. v2*)
+        covers = {f"covers_{area}": NoulQuestion(f"The answer supplies concrete product facts for coverage area: {area}") for area in COVERAGE_AREAS}
+    questions.update(covers)
+    return ClassificationRequest("coverage", variant.state(f"Question: {question}\nAnswer: {answer}"), questions, {"target": target or ""},
                                  rubric_version=variant.rubric_version)
 
 def intent_request(question: str, answer: str, variant=None) -> ClassificationRequest:

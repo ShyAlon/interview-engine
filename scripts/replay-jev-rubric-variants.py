@@ -4,7 +4,10 @@
 No baseline, no interview, no LLM. Each stored input package keeps its exact
 state (question + founder answer); only the rubric under test is swapped:
 intent variants replace the intent question, relevance variants replace the
-coverage relevance question (the 11 covers_* questions stay as stored).
+coverage relevance question. The 11 covers_* questions stay as stored unless
+the variant carries its own (relevance-v3-se*: new per-area statements, the
+SE preamble prepended to the state, and - for option B - the question clause
+only on the stored target area).
 
 Inputs: enriched categorization-shadow JSONL (v2) and/or an adjudication CSV
 (labeled or not - input_state and rubric columns are enough).
@@ -72,11 +75,15 @@ def load_cases(paths):
 
 def build_request(case, variant: RubricVariant) -> ClassificationRequest:
     stored = {k: _question(v) for k, v in case["questions"].items()}
+    state = case["state"]
     if case["slot"] == "intent":
         questions = dict(variant.questions)
-    else:  # coverage: swap relevance, keep covers_* as stored
-        questions = {**dict(variant.questions), **{k: v for k, v in stored.items() if k.startswith("covers_")}}
-    return ClassificationRequest(case["slot"], case["state"], questions, case["context"], rubric_version=variant.rubric_version)
+    else:  # coverage: swap relevance; covers_* from the variant when it has them, else as stored
+        covers = variant.covers_questions((case["context"] or {}).get("target"))
+        if covers is None: covers = {k: v for k, v in stored.items() if k.startswith("covers_")}
+        questions = {**dict(variant.questions), **covers}
+        state = variant.state(state)
+    return ClassificationRequest(case["slot"], state, questions, case["context"], rubric_version=variant.rubric_version)
 
 
 def pick(table, spec):
@@ -102,6 +109,9 @@ def main(argv=None):
     variants = pick(INTENT_VARIANTS, a.intent_variants) + pick(RELEVANCE_VARIANTS, a.relevance_variants)
     by_slot = Counter(c["slot"] for c in cases)
     print(f"cases: {len(cases)} {dict(by_slot)}  skipped: {dict(skipped)}")
+    cov = [c for c in cases if c["slot"] == "coverage"]
+    if cov:  # option B depends on the stored target; say how many cases have one
+        print(f"coverage cases with a stored target area: {sum(bool((c['context'] or {}).get('target')) for c in cov)}/{len(cov)}")
     plan = [(v, r) for v in variants for r in range(a.repeats)]
     calls = sum(by_slot["intent" if v.slot_key == "intent" else "coverage"] for v, _ in plan)
     print(f"variants: {', '.join(v.id for v in variants)}  repeats: {a.repeats}  Jev calls: {calls}")
