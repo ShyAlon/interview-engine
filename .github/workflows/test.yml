@@ -18,4 +18,4 @@ jobs:
           git config --global url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/ShyAlon/vmodel-contracts"
           git config --global --add url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/shyalon/vmodel-contracts"
       - run: pip install -e .[dev]
-      - run: pytest -q
+      - run: python -m pytest -q  # puts the repo root on sys.path (tests import tests.*)
