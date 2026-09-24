@@ -24,3 +24,10 @@ def test_enough_rows_do_not_copy_rubric_examples():
     text = " ".join(INTENT_EXAMPLES.values()).casefold()
     for r in _pool("intent-pool-v2.json")["responses"]:
         assert r["text"].casefold().rstrip(".") not in text
+
+
+def test_pool_texts_not_copied_into_v1_4_examples():
+    from interview_engine.categorization_rubrics import get_variant
+    text = " ".join(get_variant("intent-v1.4").questions["intent"].criteria.values()).casefold()
+    for r in _pool("intent-pool-v2.json")["responses"]:
+        assert r["text"].casefold().rstrip(".") not in text, r["id"]

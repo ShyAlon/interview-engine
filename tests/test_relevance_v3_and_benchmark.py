@@ -149,3 +149,23 @@ def test_explain_benchmark_misses_groups_by_response(tmp_path):
     text = ex.report(str(lab), str(rd))
     assert "relevance-v3-se (coverage) - 3 misses" in text      # 1 addressed + 2 dodged mislabeled partial
     assert "| dodged |  | 2 |  |" in text and "- A1 (" in text and "Missed calls" in text
+
+
+def test_bench2_variants_registered_replay_only():
+    from interview_engine.categorization_rubrics import get_variant, COVERS_V3
+    r = get_variant("relevance-v3.1-se"); i = get_variant("intent-v1.4")
+    assert r.covers is COVERS_V3 and not r.covers_clause_all and not r.production_ok
+    assert "answers at least one part" in r.questions["relevance"].criteria["partial"]
+    assert not i.production_ok and "Stop the questions" in i.questions["intent"].criteria["enough"]
+    # production defaults untouched
+    assert get_variant("intent-v1").production_ok and get_variant("relevance-v3-se").production_ok
+
+
+def test_pool_v2_final_shape():
+    import json
+    from pathlib import Path
+    pool = json.loads((Path(__file__).resolve().parents[1] / "benchmarks" / "intent-pool-v2.json").read_text())
+    ids = [r["id"] for r in pool["responses"]]
+    assert len(ids) == 70 == len(set(ids))
+    parts = [r for r in pool["responses"] if r["cls"] == "answer" and "answer" in r["intent"] and not r.get("full", True) and len(r["areas"]) == 1 and not r["id"].startswith("MIX")]
+    assert {r["areas"][0] for r in parts} >= {"goal", "data", "integrations", "failures", "risks", "done", "glossary"}

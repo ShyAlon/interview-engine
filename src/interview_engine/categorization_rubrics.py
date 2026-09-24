@@ -98,6 +98,16 @@ _INTENT_V1_2 = {
 }
 _INTENT_V1 = dict(INTENT_SHORT)  # v1.3, canonical
 _INTENT_DEFS = dict(INTENT_DEFS)
+# v1.4 (r2 markup): v1.3 criteria unchanged, enough/skip gain examples.
+# Paraphrased - not copied from the benchmark pool.
+_INTENT_V1_4 = {**_INTENT_V1,
+    "enough": _INTENT_V1["enough"] + (". Examples: 'That's enough, write the spec.' / 'I'm done with the interview.' / "
+                                      "'Stop the questions, just put it together.' Not enough: 'That's everything I have on this one.' "
+                                      "(done with this question only - skip) / 'we should finish soon' (not ending yet)."),
+    "skip": _INTENT_V1["skip"] + (". Examples: 'Let's move on.' / 'Next question.' / 'I've said all I have on that.' / "
+                                  "'I'd rather not get into that.' Not skip: 'no more questions at all' / 'write it up now' "
+                                  "(ends the interview - enough)."),
+}
 _INTENT_EXAMPLES = dict(INTENT_EXAMPLES)
 
 _OFFTOPIC_RULE = (
@@ -156,6 +166,9 @@ def finalize_decomposed_intent(answers: Mapping[str, ClassificationAnswer]) -> d
 INTENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("intent-v1", INTENT_KEY, "Production default: v1.3, Shy's 'what the founder wants' criteria with dismiss folded into skip.",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1), version=V1_3_RUBRIC_VERSION),
+    RubricVariant("intent-v1.4", INTENT_KEY, "Replay-only until Shy rules: v1.3 plus enough/skip examples (r2 markup, 2026-09-24) to separate 'no more questions at all' (enough) from 'done with this one' (skip).",
+                  _intent_choice("Classify the founder's control intent", _INTENT_V1_4), version="categorization-request-v1.4",
+                  production_ok=False),
     RubricVariant("intent-v1.2", INTENT_KEY, "Frozen: v1.2, the 6-label text with dismiss (2e03444).",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1_2), version=V1_2_RUBRIC_VERSION),
     RubricVariant("intent-v1.1", INTENT_KEY, "Frozen: the labeled v1 text plus defer (710d6c4).",
@@ -250,6 +263,20 @@ COVERS_V3 = {
 COVERS_V3_PLAIN = {k: v.replace(_CLAUSE, "").replace(" ,", ",") for k, v in COVERS_V3.items()}
 assert all(_CLAUSE in v for v in COVERS_V3.values())
 
+# v3.1-se (Shy's r2 markup, 2026-09-24): only the relevance choice changes -
+# preamble and covers_* stay as v3-se (option B). Fixes the bench-1 leak:
+# concrete or vague answers to a DIFFERENT question were called partial.
+# Partial now needs at least one part of THIS question answered.
+_REL_V31_INSTR = ("Does the answer respond to the question asked? Judge it only against this question. If the reply "
+                  "answers no part of this question, choose dodged - even if it is detailed and useful, about the same "
+                  "product, or close to the topic.")
+_REL_V31 = {"addressed": "The answer answers every main part of the question asked.",
+            "partial": ("The answer answers at least one part of the question asked, and leaves another main part open "
+                        "or answers it only vaguely."),
+            "dodged": ("The answer answers no part of the question asked: it answers a different question (even with "
+                       "concrete product detail, or on a nearby topic), is generic or pasted text that could follow any "
+                       "question, or refuses.")}
+
 RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-v1", RELEVANCE_KEY, "Control: the rubric the 133-case labels were collected against.",
                   {RELEVANCE_KEY: ChoiceQuestion("Did the answer address the question?", _REL_V1)}),
@@ -262,6 +289,10 @@ RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-v3-se", RELEVANCE_KEY, "Relevance makeover (Shy +1, 2026-09-24): SE preamble + plain per-area covers_*; question clause on the targeted area only (option B).",
                   {RELEVANCE_KEY: ChoiceQuestion(_REL_V3_INSTR, _REL_V3)}, version="relevance-v3-se",
                   covers=COVERS_V3, covers_plain=COVERS_V3_PLAIN, covers_clause_all=False, preamble=REL_V3_PREAMBLE),
+    RubricVariant("relevance-v3.1-se", RELEVANCE_KEY, "Replay-only until Shy rules: v3-se with the partial fix (r2 markup, 2026-09-24) - partial needs part of THIS question answered; a different question's answer is dodged.",
+                  {RELEVANCE_KEY: ChoiceQuestion(_REL_V31_INSTR, _REL_V31)}, version="relevance-v3.1-se",
+                  covers=COVERS_V3, covers_plain=COVERS_V3_PLAIN, covers_clause_all=False, preamble=REL_V3_PREAMBLE,
+                  production_ok=False),
     RubricVariant("relevance-v3-se-a", RELEVANCE_KEY, "Replay-comparison only: v3-se with the question clause on every area (option A, as first drafted).",
                   {RELEVANCE_KEY: ChoiceQuestion(_REL_V3_INSTR, _REL_V3)}, version="relevance-v3-se-a",
                   covers=COVERS_V3, covers_plain=COVERS_V3_PLAIN, covers_clause_all=True, preamble=REL_V3_PREAMBLE),

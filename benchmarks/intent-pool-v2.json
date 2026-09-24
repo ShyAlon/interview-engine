@@ -1,5 +1,5 @@
 {
-  "status": "pool-v2 DRAFT: v1 + 12 enough responses (16 total). Partial prototypes (ANS-P4..P10) pending Shy's r2 markup.",
+  "status": "pool-v2 FINAL (bench-2): v1 + 12 enough responses (ENF-05..16, Shy: fine as-is) + 7 partial prototypes (ANS-P4..P10, r2 markup).",
   "product": "Fictional product for the whole pool: a booking app for a small dog-grooming salon (two groomers, one front-desk person, about 60 regular clients). One product keeps answers coherent across questions. A second product can be added later to check that nothing depends on this one.",
   "taxonomy": "categorization-request-v1.3",
   "questions": [
@@ -241,6 +241,97 @@
       ],
       "full": false,
       "note": "Partial/generic for Q-nfrs."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P4",
+      "text": "Too many missed calls, basically.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "goal"
+      ],
+      "full": false,
+      "note": "Partial for Q-goal: Problem named; who feels it is missing. Dodged against the other questions (r2, Shy 2026-09-24)."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P5",
+      "text": "Owner and dog details, the usual stuff.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "data"
+      ],
+      "full": false,
+      "note": "Partial for Q-data: Vague on what; nothing on where it comes from today. Dodged against the other questions (r2, Shy 2026-09-24)."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P6",
+      "text": "Probably payments, something like that.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "integrations"
+      ],
+      "full": false,
+      "note": "Partial for Q-integrations: One category, no named system; calendars/messaging open. Dodged against the other questions (r2, Shy 2026-09-24)."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P7",
+      "text": "Double bookings would be a disaster.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "failures"
+      ],
+      "full": false,
+      "note": "Partial for Q-failures: One must-never; nothing on what happens when it goes down. Dodged against the other questions (r2, Shy 2026-09-24)."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P8",
+      "text": "Maybe people just won't use it.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "risks"
+      ],
+      "full": false,
+      "note": "Partial for Q-risks: Vague risk, no specific assumption. Dodged against the other questions (r2, Shy 2026-09-24)."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P9",
+      "text": "Fewer phone calls, I suppose.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "done"
+      ],
+      "full": false,
+      "note": "Partial for Q-done: One vague measure, no target or time. Dodged against the other questions (r2, Shy 2026-09-24)."
+    },
+    {
+      "cls": "answer",
+      "id": "ANS-P10",
+      "text": "We say 'full groom' a lot, and a couple of other terms.",
+      "intent": [
+        "answer"
+      ],
+      "areas": [
+        "glossary"
+      ],
+      "full": false,
+      "note": "Partial for Q-glossary: Names a term, defines none. Dodged against the other questions (r2, Shy 2026-09-24)."
     },
     {
       "cls": "answer",
@@ -802,11 +893,12 @@
       "ANS-C1 x Q-goal"
     ]
   },
-  "pair_count": 692,
+  "pair_count": 769,
   "relevance_for_control_moves": "not scored (Shy's call a, 2026-09-24)",
   "history": [
     "2026-09-24: approved as drafted (Shy +1).",
     "2026-09-24: v1.3 - dismiss removed (Shy: too close to skip). The 5 DIS-* responses and NM-06 are relabeled skip; texts unchanged.",
-    "2026-09-24: v2 - enough grows from 4 to 16 responses (Shy: 'we need a lot more data on enough... at least 16'). New rows are for Shy's edit."
+    "2026-09-24: v2 - enough grows from 4 to 16 responses (Shy: 'we need a lot more data on enough... at least 16'). New rows are for Shy's edit.",
+    "2026-09-24: v2 final - ENF-05..16 approved as-is; ANS-P4..P10 partial prototypes added as drafted (r2 markup). ENF-02 reword dropped."
   ]
 }
