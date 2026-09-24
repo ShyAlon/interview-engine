@@ -135,3 +135,17 @@ def test_scorer_reports_covers_per_area_for_replayed_variant(tmp_path):
     r = subprocess.run([sys.executable, str(ROOT / "scripts/score-rubric-variants.py"), str(lab), "-", str(rd)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "| relevance-v3-se | 5 | 1.00 | 1.00 |" in r.stdout      # relevance table and covers table both perfect
+
+
+def test_explain_benchmark_misses_groups_by_response(tmp_path):
+    gen = _load("gen3", "scripts/build-intent-benchmark.py"); ex = _load("ex", "scripts/explain-benchmark-misses.py")
+    rows = gen.build_rows(POOL); lab = tmp_path / "b.csv"; lab.write_text(gen.to_csv(rows))
+    rd = tmp_path / "r"; rd.mkdir()
+    with (rd / "replay-relevance-v3-se.jsonl").open("w") as f:
+        for r in rows:
+            if r["slot"] == "coverage":  # predict partial everywhere
+                f.write(json.dumps({"slot": "coverage", "replay": {"case_id": r["case_id"]},
+                                    "jev": {"status": "ok", "verdict": {"relevance": "partial"}, "confidence": {"relevance": .6}}}) + "\n")
+    text = ex.report(str(lab), str(rd))
+    assert "relevance-v3-se (coverage) - 3 misses" in text      # 1 addressed + 2 dodged mislabeled partial
+    assert "| dodged |  | 2 |  |" in text and "- A1 (" in text and "Missed calls" in text
