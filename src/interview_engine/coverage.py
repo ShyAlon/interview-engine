@@ -72,10 +72,12 @@ def next_area(coverage: dict[str, str]) -> str | None:
     return None
 
 
-def status_block(coverage: dict[str, str]) -> str:
-    """Compact per-turn coverage status for the interviewer system prompt."""
+def status_block(coverage: dict[str, str], target: str | None = None) -> str:
+    """Compact per-turn coverage status for the interviewer system prompt.
+    ``target`` overrides the priority pick (the partial-answer drill keeps the
+    thin area it is following up on)."""
     marks = " ".join(f"{k}={_MARK[coverage.get(k, UNCOVERED)]}" for k in AREA_KEYS)
-    nxt = next_area(coverage)
+    nxt = target or next_area(coverage)
     legend = "+ covered, d covered by explicit delegation, ~ thin, - uncovered, x skipped, ? deferred by founder (open, answer pending)"
     block = f"COVERAGE [{marks}]  ({legend})"
     if nxt:

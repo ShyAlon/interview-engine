@@ -24,6 +24,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
+from .coverage import AREAS as _AREAS
 from .coverage import (COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
                          founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
@@ -50,10 +51,33 @@ class InterviewState(TypedDict, total=False):
     repeat_strikes: int       # cumulative repeated-non-answer detections (repeat_guard)
     deferred_questions: list[dict]  # founder-postponed questions: open, not decided, not delegated
     intent_guard_area: str    # area where the intent re-ask guard last fired ('' when it did not)
+    drilled_areas: list[str]  # areas that already got their one partial-answer follow-up (drill)
     turn_count: int
 
 
 MAX_TURNS = 60  # hard stop: 30-60 min target; a runaway interview is a cost leak
+
+# Partial-answer drill (Shy, 2026-09-24: "allow drilling on partial once and
+# then moving on"). When the classifier calls the reply partial and the
+# targeted area turns thin on this turn, the next question stays on that area
+# once, as a specific self-contained follow-up; after it the interview moves on
+# as before (the area stays thin and comes back in the normal end pass). Off
+# by default: it only turns on once partial precision clears the agreed bar
+# (0.6 on bench-2). INTERVIEW_ENGINE_DRILL=on enables it.
+MAX_DRILLS = 6        # per interview
+DRILL_LAST_TURN = 45  # no drills this close to the MAX_TURNS hard stop
+
+
+def drill_enabled() -> bool:
+    return (model_config._env("INTERVIEW_ENGINE_DRILL") or "").strip().lower() in ("1", "on", "true", "yes")
+
+
+def drill_block(area: str) -> str:
+    label, concretes = next(((l, c) for k, l, c in _AREAS if k == area), (area, ""))
+    return ("\n\nFOLLOW-UP (once): the founder's last reply answered only part of the " + label + " question. "
+            "Ask ONE short follow-up about the part still missing (" + label + " is closed only by: " + concretes + "). "
+            "Name what they already said, so the question makes sense on its own without the previous one. "
+            "Do not ask a generic 'can you elaborate?'. After this follow-up the interview moves on.")
 
 
 
@@ -160,6 +184,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         last = state["messages"][-1] if state.get("messages") else None
 
         coverage = dict(state.get("coverage") or initial_coverage())
+        coverage_before = dict(coverage)
+        relevance_label = None
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
         classified_control = None
@@ -205,6 +231,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         sequence=turn,raw_text=founder_answer,target=state.get("coverage_target"),result=coverage_result)
                 if not repeated:
                     coverage = apply_coverage_answers(coverage, coverage_result.answers)
+                rel = coverage_result.answers.get("relevance")
+                relevance_label = str(rel.value) if rel is not None else None
             if categorizer.active("intent"):
                 intent_result = categorizer.classify(intent_request(prior_question, founder_answer))
                 classified_control = classified_intent(intent_result.answers)
@@ -295,6 +323,29 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 skipped_area = target
 
         target = next_area(coverage)
+        # Partial-answer drill: one specific follow-up on the area the partial
+        # reply just turned thin, then move on. Never on a repeat, a guard
+        # re-ask, or a control move (those leave the area non-thin anyway),
+        # never twice on one area, and never past the per-visit two attempts.
+        drilled_areas = list(state.get("drilled_areas") or [])
+        drill_area = None
+        prev_target = state.get("coverage_target") or ""
+        if (drill_enabled() and prev_target and relevance_label == "partial" and not repeated and not guard_fired
+                and control is None and coverage_before.get(prev_target) == "uncovered"
+                and coverage.get(prev_target) == THIN and prev_target not in drilled_areas
+                and len(drilled_areas) < MAX_DRILLS and turn <= DRILL_LAST_TURN):
+            prev_attempts = 0
+            for asked in reversed(state.get("question_history") or []):
+                if asked.get("area") != prev_target:
+                    break
+                prev_attempts += 1
+            if prev_attempts < 2:
+                drill_area = prev_target
+                target = drill_area
+                drilled_areas.append(drill_area)
+                if progress is not None:
+                    progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _time.time(), 0.0,
+                                                f"partial answer on {_LABELS.get(drill_area, drill_area)} - one follow-up, then moving on"))
         # Two unanswered attempts are enough. Close the stubborn area as a
         # visible assumption and move on rather than phrasing the same ask a
         # third way. This is code-owned and survives model drift.
@@ -328,7 +379,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             + ", ".join(parked_topics)) if parked_topics else ""
             guard_block = ("\n\nAMBIGUOUS LAST REPLY: it may close this area or may be an answer. Ask once, briefly, "
                            "whether the founder wants to answer it or move on.") if guard_fired else ""
-            system = INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage) + parked_block + guard_block + "\n\n" + STRUCTURED_TURN_FORMAT
+            follow_block = drill_block(drill_area) if drill_area else ""
+            system = (INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage, drill_area) + parked_block + guard_block
+                      + follow_block + "\n\n" + STRUCTURED_TURN_FORMAT)
             _t0 = _time.time()
             request_messages = [SystemMessage(content=system), *history,
                                 HumanMessage(content="FINAL RESPONSE CONTRACT: " + STRUCTURED_TURN_FORMAT)]
@@ -418,7 +471,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             "interview_turn", "Coverage", "completed", _t.time(), 0.0,
                             "NFRs claimed covered with no numbers given - holding thin; "
                             "say 'no numbers for the demo' to close it honestly"))
-            next_target = next_area(coverage)
+            next_target = drill_area or next_area(coverage)
             candidate = parsed["question"].strip()
             owned = engineering_default(candidate)
             if owned:
@@ -461,7 +514,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 "coverage_target": emitted_target or "", "parked_topics": parked_topics,
                 "delegated_decisions": delegated, "question_history": history_log,
                 "deferred_questions": deferred_questions, "intent_guard_area": guard_area_out,
-                "repeat_strikes": repeat_strikes, "turn_count": turn}
+                "drilled_areas": drilled_areas, "repeat_strikes": repeat_strikes, "turn_count": turn}
 
     def route_interview(state: InterviewState) -> str:
         last = state["messages"][-1]
