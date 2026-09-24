@@ -224,7 +224,9 @@ def main(argv=None):
             for line in covers_table(sc, ct): P(line)
             P("")
     text = "\n".join(out); print(text)
-    if a.output: Path(a.output).write_text(text + "\n")
+    if a.output:
+        Path(a.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.output).write_text(text + "\n")
     return 0
 
 

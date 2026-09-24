@@ -268,8 +268,18 @@ RELEVANCE_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
 )}
 
 
+# Version-named aliases for the moving production ids, so "intent-v1.3" means
+# the current canonical intent rubric (intent-v1) wherever a variant is named.
+VARIANT_ALIASES: dict[str, str] = {"intent-v1.3": "intent-v1"}
+
+
+def resolve_variant_id(variant_id: str) -> str:
+    return VARIANT_ALIASES.get(variant_id.strip(), variant_id.strip())
+
+
 def get_variant(variant_id: str) -> RubricVariant:
     table = {**INTENT_VARIANTS, **RELEVANCE_VARIANTS}
+    variant_id = resolve_variant_id(variant_id)
     try: return table[variant_id]
     except KeyError: raise ValueError(f"unknown rubric variant {variant_id!r}; known: {', '.join(table)}") from None
 

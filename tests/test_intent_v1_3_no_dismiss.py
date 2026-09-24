@@ -45,3 +45,33 @@ def test_benchmark_pool_has_no_dismiss_labels():
     assert pool["taxonomy"] == "categorization-request-v1.3"
     assert not any("dismiss" in r["intent"] for r in pool["responses"])
     assert sum(r["intent"] == ["skip"] for r in pool["responses"]) == 15
+
+
+def test_replay_accepts_every_shippable_variant_and_aliases(tmp_path):
+    """Every registered rubric id (plus version aliases like intent-v1.3) must
+    be accepted by the replay CLI - the 2026-09-24 command block used one that wasn't."""
+    from interview_engine.categorization_rubrics import INTENT_VARIANTS, RELEVANCE_VARIANTS, VARIANT_ALIASES, get_variant
+    assert get_variant("intent-v1.3") is INTENT_VARIANTS["intent-v1"]
+    assert get_variant("intent-v1.3").rubric_version == "categorization-request-v1.3"
+    out = tmp_path / "bench.csv"
+    env = {"PYTHONPATH": ":".join(sys.path), "PATH": ""}
+    assert subprocess.run([sys.executable, str(ROOT / "scripts/build-intent-benchmark.py"), "-o", str(out)], env=env).returncode == 0
+    ids_i = ",".join([*INTENT_VARIANTS, *[a for a in VARIANT_ALIASES if a.startswith("intent-")]])
+    ids_r = ",".join(RELEVANCE_VARIANTS)
+    r = subprocess.run([sys.executable, str(ROOT / "scripts/replay-jev-rubric-variants.py"), str(out), "-o", str(tmp_path / "o"),
+                        "--intent-variants", ids_i, "--relevance-variants", ids_r, "--dry-run"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "note: intent-v1.3 is an alias of intent-v1" in r.stdout
+    listed = r.stdout.split("variants: ")[1].split("  repeats")[0].split(", ")
+    assert listed.count("intent-v1") == 1 and set(listed) == {*INTENT_VARIANTS, *RELEVANCE_VARIANTS}
+
+
+def test_scorer_creates_the_report_directory(tmp_path):
+    out = tmp_path / "bench.csv"
+    env = {"PYTHONPATH": ":".join(sys.path), "PATH": ""}
+    subprocess.run([sys.executable, str(ROOT / "scripts/build-intent-benchmark.py"), "-o", str(out)], env=env, check=True)
+    report = tmp_path / "runs" / "bench-1" / "report.md"
+    r = subprocess.run([sys.executable, str(ROOT / "scripts/score-rubric-variants.py"), str(out), "-", str(tmp_path / "runs" / "bench-1"),
+                        "-o", str(report)], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert report.exists()

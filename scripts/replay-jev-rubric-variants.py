@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / "src"))
 from interview_engine.categorization import ChoiceQuestion, ClassificationRequest, NoulQuestion, ScoreQuestion  # noqa: E402
-from interview_engine.categorization_rubrics import INTENT_VARIANTS, RELEVANCE_VARIANTS, RubricVariant  # noqa: E402
+from interview_engine.categorization_rubrics import INTENT_VARIANTS, RELEVANCE_VARIANTS, VARIANT_ALIASES, RubricVariant, resolve_variant_id  # noqa: E402
 from interview_engine.categorization_shadow import RECORD_SCHEMA_VERSION, _side, input_package  # noqa: E402
 
 REPLAY_SLOTS = {"intent": "intent", "coverage": "relevance"}
@@ -91,8 +91,12 @@ def pick(table, spec):
     if spec == "all": return list(table.values())
     out = []
     for vid in spec.split(","):
-        if vid.strip() not in table: raise SystemExit(f"unknown variant {vid!r}; known: {', '.join(table)}")
-        out.append(table[vid.strip()])
+        rid = resolve_variant_id(vid)
+        if rid not in table:
+            aliases = [a for a, t in VARIANT_ALIASES.items() if t in table]
+            raise SystemExit(f"unknown variant {vid!r}; known: {', '.join([*table, *aliases])}")
+        if rid != vid.strip(): print(f"note: {vid.strip()} is an alias of {rid}")
+        if table[rid] not in out: out.append(table[rid])  # an alias plus its target runs once
     return out
 
 
