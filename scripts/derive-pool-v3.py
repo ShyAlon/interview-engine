@@ -27,12 +27,12 @@ def _ans(i, area, text, full, note):
 
 PROTOTYPES = [
     _ans("ANS-PERF", "performance", "Booking on a phone should take under a minute start to finish, and no screen should take more than a second or two. The groomers' tablet has to show the next dog instantly - they tap it with wet hands between dogs, so no spinners.", True, "Full: who, which moments, numbers."),
-    _ans("ANS-PERF-P", "performance", "It needs to be fast. Nobody likes waiting.", False, "Partial: no moments, no numbers. Drill case."),
+    _ans("ANS-PERF-P", "performance", "It needs to be fast. Nobody likes waiting.", False, "Partial: no moments, no numbers. Drill case. Calibration pair with ANS-P3 (Shy 2026-09-24): 'fast' implies a response-time target (~half a second in his experience), so it is a partial; 'just work' means nothing. A model that treats the two alike is wrong."),
     _ans("ANS-REL", "reliability", "Saturday 8 to 2 is our busiest window - it can't be down then at all. A few minutes at night for updates is fine, even every week, and half an hour on a quiet Tuesday we can live with. A confirmed booking must never disappear.", True, "Full: windows, durations, what must never be lost."),
     _ans("ANS-REL-P", "reliability", "It should be up most of the time, especially on weekends.", False, "Partial: direction, no windows or durations. Drill case."),
     _ans("ANS-SEC", "security", "Clients see only their own dogs and bookings. Groomers see the day's schedule and the dog notes, bite warnings and vet info included, but not payment details. Only Dana and I can change prices or give refunds. We don't want card numbers stored with us at all - the payment company keeps them.", True, "Full: who sees/changes what, sensitive data. No standard needed."),
     _ans("ANS-SEC-P", "security", "Keep clients' details private, obviously.", False, "Partial: privacy matters, but not who sees what or which data."),
-    _ans("ANS-SCALE", "scalability", "About 400 regular clients. 25 to 35 bookings on a normal day, up to 50 on a Saturday before the holidays. Two groomers and Dana at the desk.", True, "Full: expected volume for now, with numbers."),
+    _ans("ANS-SCALE", "scalability", "About 60 regular clients. 25 to 35 bookings on a normal day, up to 50 on a Saturday before the holidays. Two groomers and Dana at the desk.", True, "Full: expected volume for now, with numbers."),
     _ans("ANS-SCALE-P", "scalability", "Not huge - we're a small salon.", False, "Partial (Shy: 'requires a followup'). Drill case."),
 ]
 
@@ -41,7 +41,7 @@ REMAP = {
     "ANS-06": {"areas": ["performance", "reliability"], "full": True, "partial_areas": ["performance"],
                "note": "pool-v3: full for reliability (windows), partial for performance (no numbers). 'Big buttons' was usability - shelved, closes nothing."},
     "ANS-P3": {"areas": [], "full": False,
-               "note": "pool-v3: Shy 'No, that's not an answer' - vacuous, no area covered; dodged against every question."},
+               "note": "pool-v3: Shy 'No, that's not an answer' - 'just work' means nothing; no area covered, dodged against every question. Deliberate calibration pair with ANS-PERF-P (partial)."},
 }
 
 

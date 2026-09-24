@@ -257,7 +257,7 @@
       ],
       "areas": [],
       "full": false,
-      "note": "pool-v3: Shy 'No, that's not an answer' - vacuous, no area covered; dodged against every question."
+      "note": "pool-v3: Shy 'No, that's not an answer' - 'just work' means nothing; no area covered, dodged against every question. Deliberate calibration pair with ANS-PERF-P (partial)."
     },
     {
       "cls": "answer",
@@ -835,7 +835,7 @@
         "performance"
       ],
       "full": false,
-      "note": "Partial: no moments, no numbers. Drill case."
+      "note": "Partial: no moments, no numbers. Drill case. Calibration pair with ANS-P3 (Shy 2026-09-24): 'fast' implies a response-time target (~half a second in his experience), so it is a partial; 'just work' means nothing. A model that treats the two alike is wrong."
     },
     {
       "cls": "answer",
@@ -892,7 +892,7 @@
     {
       "cls": "answer",
       "id": "ANS-SCALE",
-      "text": "About 400 regular clients. 25 to 35 bookings on a normal day, up to 50 on a Saturday before the holidays. Two groomers and Dana at the desk.",
+      "text": "About 60 regular clients. 25 to 35 bookings on a normal day, up to 50 on a Saturday before the holidays. Two groomers and Dana at the desk.",
       "intent": [
         "answer"
       ],
