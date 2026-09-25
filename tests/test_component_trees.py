@@ -151,3 +151,20 @@ def test_trees_v3_calibration_examples_and_isolation():
     assert v.apply(ans, ctx)["relevance"].value == "dodged"
     ans["about__flows"] = ClassificationAnswer(1.0)
     assert v.apply(ans, ctx)["relevance"].value == "partial"
+
+
+def test_trees_v4_targeted_delta():
+    v3 = COMPONENT_VARIANTS["relevance-trees-v3"]
+    v4 = COMPONENT_VARIANTS["relevance-trees-v4"]
+    assert not v4.production_ok
+    with pytest.raises(ValueError): get_variant("relevance-trees-v4")
+    for area in AREA_KEYS_V2:
+        a = ct.statements_v3(area); b = ct.statements_v4(area)
+        assert set(a) == set(b)
+        changed = {k for k in a if a[k] != b[k]}
+        expected = {"flows": {"about__flows", "comp__flows__steps"}, "done": {"comp__done__target"}}.get(area, set())
+        assert changed == expected, (area, changed)
+    assert "single actual booking action" in ct.statements_v4("flows")["about__flows"]
+    assert "price or deposit" in ct.statements_v4("done")["comp__done__target"]
+    ctx = {"target": "flows", "personas": list(ct.DEFAULT_PERSONAS)}
+    assert set(v4.build(ctx)) == set(v3.build(ctx))

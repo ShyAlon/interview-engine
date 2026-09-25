@@ -444,6 +444,31 @@ def statements_v3(area: str, personas: Iterable[str] = DEFAULT_PERSONAS, *, doma
     return out
 
 
+# v4 isolates the cross-area flows leak without reverting the partial-answer
+# gates. Exclusions refer to the reply's own topic, not whether the reply is
+# long or a complete end-to-end walkthrough.
+STATEMENTS_V4 = {**STATEMENTS_V3,
+    ("flows", "steps"): "The reply says at least one actual action in a booking sequence: someone or the app does something as part of that booking. One action is enough. A problem, a list of people/devices or stored fields, a worst case or a choice of outside service is not a booking step by itself.",
+    ("done", "target"): "The reply gives a target value for a result to check after launch. A price or deposit paid by a client is not a post-launch target.",
+}
+AREA_GATE_EXCLUSIONS_V4 = {**AREA_GATE_EXCLUSIONS_V3,
+    "flows": "A problem statement, a list of personas or devices, a list of stored fields, a worst-case failure, or an integration preference is not a booking sequence by itself. A single actual booking action does count; do not require a full walkthrough.",
+}
+
+
+def statements_v4(area: str, personas: Iterable[str] = DEFAULT_PERSONAS, *, domain: str = "salon") -> dict[str, str]:
+    """trees-v4: v3 plus targeted flows exclusions and done target boundary."""
+    out = statements_v3(area, personas, domain=domain)
+    if area in AREA_GATE_EXCLUSIONS_V4:
+        # v3's goal exclusion is already present; only append the new delta.
+        if area not in AREA_GATE_EXCLUSIONS_V3:
+            out[f"about__{area}"] += " " + AREA_GATE_EXCLUSIONS_V4[area]
+    for c in TREES[area]:
+        if (area, c.key) not in STATEMENTS_V4 or (area, c.key) not in (("flows", "steps"), ("done", "target")): continue
+        out[_key(f"{area}.{c.key}", "comp")] = STATEMENTS_V4[(area, c.key)]
+    return out
+
+
 def effective_fills(area: str, answers: Mapping[str, object]) -> tuple[set[str], set[str], set[str]]:
     """(filled, skipped, mentioned) after the asked-area gate: when the call carries
     about__<area> and it is no, nothing in the asked area counts as filled.

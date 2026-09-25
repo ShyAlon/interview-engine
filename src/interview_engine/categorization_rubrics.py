@@ -391,6 +391,15 @@ def _trees_v3_build(context: Mapping[str, object]) -> dict[str, "Question"]:
                                                            domain=str(context.get("example_domain") or "salon")).items()}
 
 
+def _trees_v4_build(context: Mapping[str, object]) -> dict[str, "Question"]:
+    from .component_trees import DEFAULT_PERSONAS, TREES, statements_v4
+    area = str(context.get("target") or "")
+    if area not in TREES:
+        raise ValueError(f"component-tree variant needs a v2 target area, got {area!r} - replay a component bench (pool-v4+)")
+    return {k: NoulQuestion(v) for k, v in statements_v4(area, list(context.get("personas") or DEFAULT_PERSONAS),
+                                                           domain=str(context.get("example_domain") or "salon")).items()}
+
+
 COMPONENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-trees-v1", RELEVANCE_KEY, "Replay-only: component trees on the v2 14-area split (Shy 2026-09-24). Per-component yes/no + founder-skip + mentioned, one call; relevance derived by code.",
                   {}, version="relevance-trees-v1", preamble=TREES_PREAMBLE, build=_trees_build, finalize_ctx=finalize_trees,
@@ -400,6 +409,9 @@ COMPONENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
                   production_ok=False),
     RubricVariant("relevance-trees-v3", RELEVANCE_KEY, "Replay-only: trees-v2 calibrated gates and components with domain example slots (Shy 2026-09-25). Same truth and call count.",
                   {}, version="relevance-trees-v3", preamble=TREES_V2_PREAMBLE, build=_trees_v3_build, finalize_ctx=finalize_trees_v2,
+                  production_ok=False),
+    RubricVariant("relevance-trees-v4", RELEVANCE_KEY, "Replay-only: trees-v3 with explicit cross-area flows exclusions and post-launch done target (Shy 2026-09-25).",
+                  {}, version="relevance-trees-v4", preamble=TREES_V2_PREAMBLE, build=_trees_v4_build, finalize_ctx=finalize_trees_v2,
                   production_ok=False),
 )}
 
