@@ -4,7 +4,7 @@
 Defaults to out/ and runs/ under repo root. Reads interview/checkpoints.sqlite,
 transcript JSON lists, shadow/replay JSONL with a complete input package, and
 adjudication CSVs. Does not infer Q/A from decision-only logs. Synthetic bench
-artifacts (bench*.csv, benchmarks/, synthetic-benchmark) are excluded.
+artifacts (bench*.csv, synthetic-benchmark) are excluded.
 
 The blind CSV contains neither candidate hints nor system verdicts. A separate
 manifest gives source and deterministic control-phrase flags for sampling;

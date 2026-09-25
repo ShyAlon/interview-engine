@@ -69,6 +69,8 @@ def html(rows):
     key='jev-l3:'+hashlib.sha256(raw.encode()).hexdigest()[:16]
     template=Path(__file__).parent/'templates'/'jev-l3-review.html'
     result=template.read_text(encoding='utf-8')
+    assert result.count('__SHARED_LABEL_CSV_JS__')==1
+    result=result.replace('__SHARED_LABEL_CSV_JS__', (template.parent/'label-csv.js').read_text(encoding='utf-8').rstrip())
     for k,v in {'__CASES_JSON__':raw,'__STORE_KEY__':key,'__EXPORT_NAME__':'JEV-L3-reviewed.csv'}.items():
         if result.count(k)!=1:raise ValueError('template token count: '+k)
         result=result.replace(k,v)

@@ -155,3 +155,28 @@ then recover any matching inputs by their existing hash without rewriting the so
 
 Unrecoverable hashes remain explicit legacy rows. They are never guessed or silently
 dropped.
+
+### Rubric and testbed status (September 2026)
+
+Production still defaults to intent-v1 (v1.3 five-label criteria) and
+relevance-v1. Explicit opt-in replay variants intent-v1.4, intent-v1.5,
+intent-v1.6, and relevance-trees-v1..v5 are **research only**. The new
+`proceed` and `non-answer` outputs from intent-v1.5/v1.6 have no production
+graph behavior yet. Replaying a rubric does not enable it at runtime.
+
+JEV-L2 is the 195-case real question/reply label set. For the September 25
+run, eight reviewer-marked summaries and two clarification requests were
+split out after export, leaving 185 five-label cases. The original export,
+filtered CSV, clarification audit, and replay JSONLs should be kept together
+outside git. JEV-L3 is a separate blind 34-case addressing review: 20
+contested real calls, eight real controls, six synthetic wrong-area replies.
+The review CSV and its audit manifest must be kept with the corresponding
+replay; two boundary verdicts remain unscored. Cat probes are synthetic and
+are reported separately from real cases. The strict merged/v1.5/v1.6 reports
+have a different scoring contract from the historical `score-rubric-variants.py`
+answer/delegate compatibility score.
+
+Research scripts remain under `scripts/` with their original CLI paths so
+past runs can be reproduced. Input datasets under `benchmarks/` are versioned;
+generated runs belong under ignored `runs/` or `out/`. Do not infer
+production readiness from synthetic pass rates or historical variant names.

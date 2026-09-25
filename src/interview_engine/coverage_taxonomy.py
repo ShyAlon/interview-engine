@@ -36,9 +36,9 @@ _LABELS = LABELS  # legacy private name
 
 
 # ---------------------------------------------------------------------------
-# Taxonomy v2 - PREPARED, NOT WIRED. Ships as bench-3 after bench-2 lands
-# (Shy 2026-09-24, nfrs-scoping + pool-v3 markups). v1 above stays the default;
-# nothing reads the v2 names yet.
+# Taxonomy v2 - PREPARED FOR REPLAY, NOT WIRED INTO PRODUCTION.
+# Component-tree replay reads AREA_KEYS_V2; production remains v1. Bench-3 follows bench-2
+# (Shy 2026-09-24, nfrs-scoping + pool-v3 markups).
 #   - nfrs splits into performance, reliability, security & privacy,
 #     scalability, in that order, where nfrs sat. Usability shelved (overlaps
 #     users). 14 areas.

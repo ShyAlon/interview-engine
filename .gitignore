@@ -15,4 +15,8 @@ run.log
 .DS_Store
 decisions.jsonl
 /runs
-bench*
+# Generated benchmark/replay output lives in /runs or /out.
+# Keep benchmarks/ definitions visible for deliberate versioning.
+/bench*.csv
+/bench*.jsonl
+/bench*.md

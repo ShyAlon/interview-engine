@@ -52,6 +52,8 @@ def build(rows, *, title, subtitle, export_name, manual_intent=False) -> tuple[s
     tax = taxonomy_json().replace("</", "<\\/")
     template = ROOT / "scripts" / "templates" / "manual-intent-labeling-tool.html" if manual_intent else TEMPLATE
     html = template.read_text()
+    assert html.count("__SHARED_LABEL_CSV_JS__") == 1
+    html = html.replace("__SHARED_LABEL_CSV_JS__", (ROOT / "scripts" / "templates" / "label-csv.js").read_text().rstrip())
     esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     for k, v in (("__CSV_B64__", base64.b64encode(data).decode()), ("__TAXONOMY_JSON__", tax), ("__STORE_KEY__", store),
                  ("__TITLE__", esc(title)), ("__SUBTITLE__", esc(subtitle)), ("__EXPORT_NAME__", export_name.replace("'", "")),

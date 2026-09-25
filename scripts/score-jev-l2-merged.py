@@ -9,6 +9,10 @@ from __future__ import annotations
 import argparse,csv,json
 from collections import Counter
 from pathlib import Path
+import importlib.util
+_strict_spec=importlib.util.spec_from_file_location("_jev_strict_scoring",Path(__file__).with_name("_jev_strict_scoring.py"))
+_strict=importlib.util.module_from_spec(_strict_spec);_strict_spec.loader.exec_module(_strict)
+label_stats=_strict.label_stats
 
 LABELS=('answer','proceed','skip','enough')
 # September 25 reviewer rulings: B1/B2/C1 proceed, B3 non-answer held out,
@@ -51,20 +55,13 @@ def analyze(source,paths):
         for cid,ls in truth.items():
             pred=by_id[cid]
             confusion[pred if pred in ls else ls[0],pred]+=1
-        # Multi-label support is fixed across systems. A prediction is correct
-        # only when it belongs to the human label set, with no compatibility.
-        acc=sum(by_id[cid] in ls for cid,ls in truth.items())/len(truth)
-        per={}
-        for label in LABELS:
-            tp=sum(by_id[cid]==label and label in ls for cid,ls in truth.items())
-            fp=sum(by_id[cid]==label and label not in ls for cid,ls in truth.items())
-            fn=sum(label in ls and by_id[cid]!=label for cid,ls in truth.items())
-            precision=tp/(tp+fp) if tp+fp else 0
-            recall=tp/(tp+fn) if tp+fn else None
-            f1=2*precision*recall/(precision+recall) if recall and precision+recall else 0
-            per[label]={'precision':precision,'recall':recall,'f1':f1,'support':tp+fn}
-        macro=sum(x['f1'] for x in per.values() if x['support'])/sum(bool(x['support']) for x in per.values())
-        results[variant]={'n':len(truth),'accuracy':acc,'macro_f1':macro,'per_label':per,
+        # Reuse the same strict set-valued metrics as native v1.5/v1.6,
+        # while preserving the historical report's shape and confusion rule.
+        stats=label_stats(truth,{cid:by_id[cid] for cid in truth},LABELS)
+        results[variant]={'n':stats['n'],'accuracy':stats['accuracy'],'macro_f1':stats['macro_f1'],
+                          'per_label':{label:{'precision':v['precision'],'recall':v['recall'],
+                                              'f1':v['f1'],'support':v['support']}
+                                       for label,v in stats['per_label'].items()},
                           'confusion':{f'{t}->{p}':n for (t,p),n in sorted(confusion.items())}}
     return {'source_rows':len(rows),'held_out_non_answer':HOLDOUT,'scored_rows':len(truth),
             'truth_distribution':dict(Counter('+'.join(x) for x in truth.values())),

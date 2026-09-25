@@ -1,0 +1,48 @@
+{
+  "source_rows": 4,
+  "held_out_non_answer": "708e80db09a22198",
+  "scored_rows": 3,
+  "truth_distribution": {
+    "proceed": 2,
+    "answer+skip": 1
+  },
+  "sensitivity_only": "historical five-choice predictions remapped, no new model calls",
+  "results": {
+    "intent-v1": {
+      "n": 3,
+      "accuracy": 0.6666666666666666,
+      "macro_f1": 0.4444444444444444,
+      "per_label": {
+        "answer": {
+          "precision": 0.5,
+          "recall": 1.0,
+          "f1": 0.6666666666666666,
+          "support": 1
+        },
+        "proceed": {
+          "precision": 1.0,
+          "recall": 0.5,
+          "f1": 0.6666666666666666,
+          "support": 2
+        },
+        "skip": {
+          "precision": 0,
+          "recall": 0.0,
+          "f1": 0,
+          "support": 1
+        },
+        "enough": {
+          "precision": 0,
+          "recall": null,
+          "f1": 0,
+          "support": 0
+        }
+      },
+      "confusion": {
+        "answer->answer": 1,
+        "proceed->answer": 1,
+        "proceed->proceed": 1
+      }
+    }
+  }
+}

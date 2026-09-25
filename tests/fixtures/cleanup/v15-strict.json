@@ -1,0 +1,52 @@
+{
+  "n": 3,
+  "correct": 2,
+  "accuracy": 0.6666666666666666,
+  "macro_f1": 0.5,
+  "truth_distribution": {
+    "answer+skip": 1,
+    "proceed": 1,
+    "non-answer": 1
+  },
+  "per_label": {
+    "answer": {
+      "support": 1,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0
+    },
+    "proceed": {
+      "support": 1,
+      "precision": 0,
+      "recall": 0.0,
+      "f1": 0
+    },
+    "skip": {
+      "support": 1,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "enough": {
+      "support": 0,
+      "precision": 0,
+      "recall": null,
+      "f1": 0
+    },
+    "non-answer": {
+      "support": 1,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    }
+  },
+  "mistakes": [
+    {
+      "case_id": "b",
+      "truth": [
+        "proceed"
+      ],
+      "prediction": "answer"
+    }
+  ]
+}
