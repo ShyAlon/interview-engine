@@ -148,6 +148,42 @@ _INTENT_V1_5_INSTRUCTIONS = ("Classify this founder reply against the exact ques
     "A closing 'No' to 'Anything else?' ends the interview. A topic-only move-on does not.")
 assert tuple(_INTENT_V1_5) == ("answer", "proceed", "skip", "enough", "non-answer")
 
+# v1.6 decomposes question-addressing from control, then code combines them.
+# One Jev request, two independent choice questions. The addressing signal is
+# evaluated only when the reply makes no explicit control move. Examples are
+# deliberately unlike JEV-L2/L3 and cat probe inputs.
+_V16_CONTROL = {
+    "none": "No explicit wish to hand off the detail, move to another question or end the interview.",
+    "proceed": ("Founder addresses this detail by saying the choice is yours, or they do not know it now; "
+                "continue without re-asking. A product rule saying the APP decides is not this."),
+    "skip": "Founder explicitly wants to leave this topic and continue the interview.",
+    "enough": "Founder wants to end the whole interview; use the closing question as context.",
+}
+_V16_ADDRESS = {
+    "addressed": ("Reply engages the particular question: a direct answer, an implicit but reasonable answer, "
+                  "a partial fact, or a relevant preference. It need not give all details and may challenge "
+                  "a flawed question. An unstated product requirement can still be inferred from the reply. "
+                  "Distinguish vague but applicable requirements from content about a different subject."),
+    "not-addressed": ("No relevant fact, preference or reasonable implication about what was asked. "
+                      "A shared product name or topical word by itself does not count. A generic slogan "
+                      "with no applicable choice may miss the question; facts solely about another area do."),
+}
+
+def finalize_intent_v16(answers: Mapping[str, ClassificationAnswer]) -> dict[str, ClassificationAnswer]:
+    """Code-owned precedence; preserve both source judgments in the result."""
+    control=answers["control"];addressed=answers["addressing"]
+    c=str(control.value);a=str(addressed.value)
+    if c not in _V16_CONTROL or a not in _V16_ADDRESS:raise ValueError('invalid v1.6 source judgment')
+    label=c if c!="none" else ("answer" if a=="addressed" else "non-answer")
+    confidence=control.confidence if c!="none" else addressed.confidence
+    return {**answers,"intent":ClassificationAnswer(label,confidence)}
+
+_V16_QUESTIONS={
+    "control": ChoiceQuestion("Independently identify an explicit founder control move. Do not infer skip from an unrelated reply. 'I don't know' about the asked detail means proceed, not non-answer. Choose none if no such move.",_V16_CONTROL),
+    "addressing": ChoiceQuestion("Independently compare the founder reply with the exact question, ignoring control intent. An implicit or partial answer counts. No external world knowledge is needed to add unstated details; infer only what the reply reasonably implies. Is any specific part addressed?",_V16_ADDRESS),
+}
+
+
 
 _OFFTOPIC_RULE = (
     " Rule for off-topic or pasted text: if the reply does not engage with the question (generic or canned text, "
@@ -211,6 +247,9 @@ INTENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("intent-v1.5", INTENT_KEY, "Research only: question-conditioned five-class taxonomy; new proceed and non-answer behavior needs graph wiring before production.",
                   _intent_choice(_INTENT_V1_5_INSTRUCTIONS, _INTENT_V1_5),
                   version="categorization-request-v1.5", production_ok=False),
+    RubricVariant("intent-v1.6", INTENT_KEY, "Research only: independent question-addressing and control judgments combined by code.",
+                  _V16_QUESTIONS, finalize_intent_v16,
+                  version="categorization-request-v1.6", production_ok=False),
     RubricVariant("intent-v1.2", INTENT_KEY, "Frozen: v1.2, the 6-label text with dismiss (2e03444).",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1_2), version=V1_2_RUBRIC_VERSION),
     RubricVariant("intent-v1.1", INTENT_KEY, "Frozen: the labeled v1 text plus defer (710d6c4).",

@@ -55,3 +55,14 @@ def test_v1_5_real_truth_reviewed_mapping(tmp_path):
                                'x':['proceed'],'bf15e609120d6bba':['enough']}
     result=mod.score({'a':['non-answer'],'b':['proceed']},{'a':'answer','b':'proceed'})
     assert result['n']==2 and result['correct']==1 and result['per_label']['non-answer']['recall']==0
+
+def test_v16_combination_precedence():
+    from interview_engine.categorization import ClassificationAnswer as A
+    from interview_engine.categorization_rubrics import get_variant
+    v=get_variant('intent-v1.6')
+    assert not v.production_ok and v.rubric_version=='categorization-request-v1.6'
+    assert set(v.questions)=={'control','addressing'}
+    for control,addressing,want in [('none','addressed','answer'),('none','not-addressed','non-answer'),
+                                    ('proceed','not-addressed','proceed'),('skip','addressed','skip'),('enough','not-addressed','enough')]:
+        got=v.apply({'control':A(control,.83),'addressing':A(addressing,.71)})
+        assert got['intent'].value==want and got['intent'].confidence==(.83 if control!='none' else .71)
