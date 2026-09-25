@@ -231,9 +231,12 @@ contains older results. It does not promote any variant.
 The six component-tree bars are checked as actual failures. The runner
 recomputes all four pool CSVs from versioned definitions, validates exact
 replay IDs, source input hashes, variant IDs and `ok` status, scores every
-pool and the reviewed real set, and writes `manifest.json` with the commit,
-source/replay hashes and metrics. The reviewed JEV-L3 boundary cases are
-excluded from real scoring. `--check` recomputes the manifest from an
+pool and the real set, and writes `manifest.json` with the commit,
+source/replay hashes and metrics. For intent-v1.4 the real 185 rows use
+the original five-label L2 truth; the JEV-L3 `non-answer` overlay is not a
+label in its taxonomy and is kept as separate review evidence, not silently
+remapped. For research-only v1.5-v1.7, the reviewed L3 overlay scores 183
+real rows with two boundary cases excluded. `--check` recomputes the manifest from an
 existing completed output directory without Jev calls. A missing, partial,
 mixed, or stale replay blocks the gate. A green technical run still is not a
 production decision: no numerical approval bars have been set for the four
