@@ -23,7 +23,7 @@ error unless --keep-going. Refuses to write into a non-empty OUT_DIR.
 from __future__ import annotations
 import argparse, csv, dataclasses, hashlib, json, sys, time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -105,14 +105,31 @@ def pick(table, spec, opt_in=None):
     return out
 
 
+
+def ordered_results(pool, run, todo, progress_every, started, variant_id, wait_seconds=30):
+    """Keep replay order while reporting if a slow result blocks progress."""
+    futures = [pool.submit(run, case) for case in todo]
+    for done, future in enumerate(futures, 1):
+        while True:
+            try:
+                yield done, future.result(timeout=wait_seconds)
+                break
+            except FutureTimeout:
+                if progress_every:
+                    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                    print(f"{stamp} | [{variant_id}] waiting | {done-1}/{len(todo)} cases written; elapsed={time.monotonic()-started:.0f}s", flush=True)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("inputs", nargs="+"); p.add_argument("-o", "--out-dir", required=True)
     p.add_argument("--intent-variants", default="all"); p.add_argument("--relevance-variants", default="all")
     p.add_argument("--repeats", type=int, default=1, help="run each variant N times to measure Jev run-to-run variance")
     p.add_argument("--workers", type=int, default=4); p.add_argument("--keep-going", action="store_true")
+    p.add_argument("--progress-every", type=int, default=0, help="print timestamped progress every N completed cases (0=off)")
     p.add_argument("--dry-run", action="store_true", help="build every request and print counts; no Jev calls, no key needed")
     a = p.parse_args(argv)
+    if a.progress_every < 0: p.error("--progress-every must be >= 0")
 
     cases, skipped = load_cases(a.inputs)
     variants = pick(INTENT_VARIANTS, a.intent_variants) + pick(RELEVANCE_VARIANTS, a.relevance_variants, COMPONENT_VARIANTS)
@@ -158,8 +175,12 @@ def main(argv=None):
                 return case, req, _side(error=e, elapsed=time.monotonic() - t), e
 
         labels, errors, toks, lat = Counter(), 0, 0, 0.0
+        started = time.monotonic()
+        if a.progress_every:
+            stamp=datetime.now().astimezone().isoformat(timespec="seconds")
+            print(f"{stamp} | [{v.id}] start | 0/{len(todo)} cases; workers={max(1,a.workers)}",flush=True)
         with path.open("w") as f, ThreadPoolExecutor(max_workers=max(1, a.workers)) as pool:
-            for case, req, side, err in pool.map(run, todo):
+            for done,(case, req, side, err) in ordered_results(pool, run, todo, a.progress_every, started, v.id):
                 rec = {"record_schema_version": RECORD_SCHEMA_VERSION, "session_id": case.get("session_id"),
                        "timestamp": datetime.now(timezone.utc).isoformat(), "slot": slot, "input_ref": case["input_ref"],
                        "input": input_package(req), "baseline": {"status": "not_rerun"}, "jev": side, "agreement": None,
@@ -169,6 +190,10 @@ def main(argv=None):
                 f.write(json.dumps(rec, separators=(",", ":"), default=str) + "\n"); f.flush()
                 if err is not None:
                     errors += 1
+                if a.progress_every and (done % a.progress_every == 0 or done == len(todo)):
+                    stamp=datetime.now().astimezone().isoformat(timespec="seconds")
+                    print(f"{stamp} | [{v.id}] progress | {done}/{len(todo)} cases; errors={errors}; elapsed={time.monotonic()-started:.0f}s",flush=True)
+                if err is not None:
                     print(f"  ERROR {v.id} {case['case_id']}: {type(err).__name__}: {str(err)[:300]}")
                     if not a.keep_going:
                         pool.shutdown(cancel_futures=True)

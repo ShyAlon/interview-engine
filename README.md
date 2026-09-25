@@ -252,8 +252,13 @@ research scorers use the reviewed L3 overlay (183 scored real rows).
 directory without Jev calls. If a run was interrupted, `--resume` validates
 each complete replay leg against exact case IDs, input refs, variant and rubric
 version before reusing it; partial existing legs block rather than rerun or
-overwrite. Resume requires the same clean candidate checkout and input files. A missing, partial,
-mixed, or stale replay blocks the gate. The approved relative bars require
+overwrite. Resume requires the same clean candidate checkout and input files.
+The runner now logs numbered, timestamped leg starts and completions, and
+prints completed-case progress every 100 replay rows (plus the last row).
+When an ordered result is slow, it prints a waiting heartbeat every 30 seconds,
+so long live Jev legs do not look stalled. A completed, reused leg is marked
+`reused`; progress logs do not affect scoring or the replay file format.
+A missing, partial, mixed, or stale replay blocks the gate. The approved relative bars require
 accuracy and macro-F1 to match or beat current production v1.3 on
 pool-v4 intent and v1.4 on the JEV-L2 real five-label truth. Paired baseline replays are run at the exact candidate
 commit, with the same IDs and truth. For intent-v1.4, the real bar is a

@@ -22,7 +22,8 @@ A complete run is evidence for a human quality ruling, NOT automatic permission 
 pre-registered component bars must pass; absence/error/mismatch fails closed.
 """
 from __future__ import annotations
-import argparse,csv,hashlib,importlib.util,json,subprocess,sys
+import argparse,csv,hashlib,importlib.util,json,subprocess,sys,time
+from datetime import datetime
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
@@ -35,6 +36,10 @@ def load_script(name):
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def run(*argv):subprocess.run([sys.executable,str(ROOT/'scripts'/argv[0])+'.py',*map(str,argv[1:])],check=True)
 def fail(text):raise ValueError(text)
+def progress(index,total,name,state,detail=''):
+    stamp=datetime.now().astimezone().isoformat(timespec='seconds')
+    print(f'{stamp} | [{index}/{total}] {name}.{state}'+(f' | {detail}' if detail else ''),flush=True)
+
 
 def records(path,cases,variant,slot):
     expected={r['case_id']:r for r in cases if r['slot']==slot}
@@ -109,15 +114,17 @@ def main(argv=None):
     # itself be the baseline; the existing replay is then reused, not rerun.
     if a.intent_variant!='intent-v1':jobs.append(('baseline-pool-v4-intent',pool_meta[4][2],pool_meta[4][1],'intent','intent-v1'))
     if a.intent_variant!='intent-v1.4':jobs.append(('baseline-jev-l2-real',paths['real-csv'],real,'intent','intent-v1.4'))
-    for name,source,rows,slot,variant in jobs:
+    for idx,(name,source,rows,slot,variant) in enumerate(jobs,1):
         dest=out/name
+        started=time.monotonic()
+        progress(idx,len(jobs),name,'start',f'expected={sum(r["slot"]==slot for r in rows)} variant={variant}')
         if a.dry_run:
             cases=[{'slot':r['slot'],'state':r['input_state'],'context':json.loads(r['input_context'] or '{}'),
                     'questions':json.loads(r['rubric'] or '{}')} for r in rows]
             variant_obj=INTENT_VARIANTS[variant] if slot=='intent' else COMPONENT_VARIANTS[variant]
             for c in cases:
                 if c['slot']==slot:replayer.build_request(c,variant_obj)
-            print(f'DRY {name}: {sum(r["slot"]==slot for r in rows)} requests built')
+            progress(idx,len(jobs),name,'dry-pass',f'{sum(r["slot"]==slot for r in rows)} requests built')
             continue
         replay=dest/f'replay-{variant}.jsonl'
         if a.resume and dest.exists() and any(dest.iterdir()):
@@ -126,11 +133,12 @@ def main(argv=None):
             if len(summary.splitlines())!=1 or f'errors=0' not in summary or f'n={sum(r["slot"]==slot for r in rows):3d}' not in summary:
                 fail('replay summary missing or mismatched: '+str(dest))
             got=records(replay,rows,variant,slot)
-            print(f'REUSED {name}: {len(got)} validated records')
+            progress(idx,len(jobs),name,'reused',f'{len(got)} validated records')
         else:
             if not a.check:
                 run('replay-jev-rubric-variants',source,'--intent-variants',variant if slot=='intent' else 'none',
-                    '--relevance-variants',variant if slot=='coverage' else 'none','--workers',a.workers,'-o',dest)
+                    '--relevance-variants',variant if slot=='coverage' else 'none','--workers',a.workers,
+                    '--progress-every',100,'-o',dest)
             got=records(replay,rows,variant,slot)
         manifest['runs'][name]={'n':len(got),'replay_sha256':sha(replay)}
         if slot=='intent':
@@ -164,6 +172,7 @@ def main(argv=None):
                 k,n=vals[key];passed=n>0 and ((k/n<=bar) if key=='false_yes' else (k/n>=bar))
                 bars[key]={'n':n,'numerator':k,'bar':bar,'pass':passed}
             manifest['runs'][name]['component_bars']=bars
+        progress(idx,len(jobs),name,'pass',f'{len(got)} records validated and scored; elapsed={time.monotonic()-started:.0f}s')
     if a.dry_run:return 0
     def compare(candidate,baseline):
         a=manifest['runs'][candidate]['strict'];b=manifest['runs'][baseline]['strict']
