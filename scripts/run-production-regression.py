@@ -12,7 +12,9 @@ The candidate commit must be checked out with a clean tree. Modes: --dry-run
 builds all requests but makes no Jev calls; --check only validates existing
 replays in OUT without running Jev. A new full run uses fresh OUT. It covers
 four pinned intent pools, pool-v4 component-tree coverage, and JEV-L2 real
-with the reviewed L3 addressing overlay. No current numeric approval bars
+with the reviewed L3 addressing overlay only for research-only v1.5-v1.7.
+v1.4 uses the original five-label L2 truth (L3 non-answer is out of taxonomy).
+No current numeric approval bars
 exist for four intent pools or real data. A complete run is evidence for a
 human quality ruling, NOT automatic permission to promote or deploy. Six
 pre-registered component bars must pass; absence/error/mismatch fails closed.
@@ -68,6 +70,7 @@ def main(argv=None):
     out=Path(a.out).expanduser().resolve()
     if not a.check and out.exists() and any(out.iterdir()):fail('output directory must be fresh/empty: '+str(out))
     if a.check and not out.is_dir():fail('missing existing regression output: '+str(out))
+    if a.check and not (out/'manifest.json').is_file():fail('missing completed regression manifest: '+str(out))
     builder=load_script('build-intent-benchmark');replayer=load_script('replay-jev-rubric-variants')
     pool_meta={}
     for n in range(1,5):
@@ -139,7 +142,7 @@ def main(argv=None):
     if a.dry_run:return 0
     if a.check:
         original=json.loads((out/'manifest.json').read_text())
-        if original['candidate_commit']!=commit or original['runner_sha256']!=manifest['runner_sha256'] or original['sources']!=manifest['sources'] or original['runs']!=manifest['runs']:
+        if original!=manifest:
             fail('existing manifest differs from recomputed evidence')
     else:(out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     for name,v in manifest['runs'].items():

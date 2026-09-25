@@ -209,7 +209,7 @@ Before any production default flip, use the full pinned regression runner below.
 
 Run this on Shy's Mac from a **clean checkout of the exact candidate commit**,
 with working Jev credentials and the preserved real/review inputs. This is
-not a CI smoke test: it makes roughly 4,502 Jev calls for four synthetic
+not a CI smoke test: it makes 4,687 Jev calls for four synthetic
 intent pools (560 + 769 + 1,091 + 1,147), pool-v4 component coverage (935),
 and JEV-L2 real (185). The command refuses to run if HEAD differs from the
 candidate, the worktree is dirty, an input is missing, or the output folder
