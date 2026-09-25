@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / "src"))
-from interview_engine.component_trees import effective_fills  # noqa: E402
+from interview_engine.component_trees import effective_fills, parse  # noqa: E402
 
 GATES = [  # (id, text, bar)
     ("dodged_recall", "Derived dodged recall", .90),
@@ -64,6 +64,9 @@ def score(rows, recs):
             own = area in hv.get("mentioned", [])
             yes = float(g) >= .5
             extra["gate_n"] += 1; extra["gate_ok"] += yes == own; extra["gate_closed_own"] += own and not yes
+            if own and not yes:
+                raw_filled, _, _ = parse(v)
+                extra["gate_lost_components"] += sum(bool(t) and c in raw_filled for c, t in comps.items())
         if hv.get("skipped"): extra["skip_n"] += 1; extra["skip_ok"] += set(hv["skipped"]) <= skipped
         for a in mentioned: extra["mentioned_yes"] += 1; extra["mentioned_tp"] += a in hv.get("mentioned", [])
     return s, fy, fn, models, extra
@@ -113,7 +116,7 @@ def main(argv=None):
         P(f"7. Follow-up rows (no bar): {extra['followup_ok']}/{extra['followup_n']} derived label = truth")
         P(f"8. Founder-skip rows (no bar): skip caught on {extra['skip_ok']}/{extra['skip_n']}")
         P(f"9. mentioned (no bar): precision {extra['mentioned_tp']}/{extra['mentioned_yes']}")
-        if extra["gate_n"]: P(f"9b. Asked-area gate (no bar): agrees with the reply's own areas on {extra['gate_ok']}/{extra['gate_n']}; closed on an own-area reply {extra['gate_closed_own']} times")
+        if extra["gate_n"]: P(f"9b. Asked-area gate (no bar): agrees with the reply's own areas on {extra['gate_ok']}/{extra['gate_n']}; closed on an own-area reply {extra['gate_closed_own']} times; lost {extra['gate_lost_components']} true components already marked yes")
         worst = [f"{c} {n}" for c, n in fy.most_common(8) if n]
         if worst: P(f"10. Most false yes: {', '.join(worst)}")
         miss = [f"{c} {n}" for c, n in fn.most_common(8) if n]

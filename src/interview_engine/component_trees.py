@@ -350,6 +350,100 @@ def statements_v2(area: str, personas: Iterable[str] = DEFAULT_PERSONAS) -> dict
     return out
 
 
+# trees-v3 calibration: rules remain domain-neutral; examples live here instead
+# of being baked into the rule. The salon pack is the benchmark's default.
+# Other domains can supply their own examples without changing the tree,
+# truth, or yes/no keys. No persona-name aliasing in v3: the replay context
+# only carries titles, and earlier questions are not preserved in the call.
+# Future production support should persist detected entities across questions,
+# resolve a name ("Bob") to a role/title when known, and prefer the title in
+# statements, while still supporting systems built specifically for Bob.
+DOMAIN_EXAMPLES_V3: dict[str, dict[tuple[str, str], str]] = {
+    "salon": {
+        ("goal", "cost"): "lost time, money or customers",
+        ("users", "context"): "on a phone or at the desk",
+        ("users", "device"): "a phone or a tablet",
+        ("flows", "exceptions"): "a cancellation or a no-show",
+        ("data", "what"): "owner and dog details",
+        ("data", "source"): "a paper book or a spreadsheet",
+        ("integrations", "systems"): "WhatsApp, Stripe or Google Calendar",
+        ("reliability", "forbidden"): "on weekends",
+        ("reliability", "per_year"): "99.9% or a few hours a year",
+        ("security", "signin"): "a password or a phone number",
+        ("security", "standards"): "GDPR",
+        ("constraints", "technology"): "a language, cloud or platform",
+        ("done", "target"): "a number",
+    },
+}
+
+# Delta from v2. Keep unchanged component statements frozen so that the
+# comparison measures the calibration, not an incidental rewrite.
+STATEMENTS_V3 = {**STATEMENTS_V2,
+    ("flows", "steps"): "The reply says at least one thing that happens in the flow. One step is enough.",
+    ("data", "what"): "The reply says what information the app keeps, even in general words like {example}.",
+    ("integrations", "systems"): "The reply names every outside service it mentions by product name, for example {example}. A description like 'the company we use' is not a name. Answer no if any mentioned service is only described, not named.",
+    ("integrations", "purpose"): "The reply says the job an outside app or service does. Naming the job is enough, even if the reply does not name that service.",
+    ("reliability", "forbidden"): "The reply says a time when the app must be up, such as {example}.",
+    ("failures", "never"): "The reply says something must never happen, using words like 'never', 'must not', 'can't', 'worst case' or 'would be a disaster'.",
+    ("done", "measure"): "The reply says what result will show the app works after launch. Answer no if the reply does not talk about after launch.",
+}
+assert set(STATEMENTS_V3) == set(STATEMENTS_V2)
+
+# Move illustrative examples out of the inherited v2 wording. These are
+# explanatory only; the rule remains in STATEMENTS_V3.
+_V3_EXAMPLE_SUFFIX = {
+    ("goal", "cost"): "such as lost time, money or customers.",
+    ("users", "context"): "for example on a phone or at the desk.",
+    ("users", "device"): "such as a phone or a tablet.",
+    ("flows", "exceptions"): "such as a cancellation or a no-show.",
+    ("data", "source"): "such as a paper book or a spreadsheet.",
+    ("reliability", "per_year"): "such as 99.9% or 'a few hours a year'.",
+    ("security", "signin"): "such as with a password or a phone number.",
+    ("security", "standards"): "such as GDPR.",
+    ("done", "target"): "such as a number.",
+}
+for _key_v3, _example_v3 in _V3_EXAMPLE_SUFFIX.items():
+    _text_v3 = STATEMENTS_V3[_key_v3]
+    assert _example_v3 in _text_v3, _key_v3
+    STATEMENTS_V3[_key_v3] = _text_v3.replace(_example_v3, "for example {example}.")
+# Constraints' parenthetical is a rule (what counts as a technology), not an
+# illustrative domain-specific example, so it stays attached to the rule.
+
+AREA_ABOUT_V3 = {**AREA_ABOUT,
+    "flows": "anything a person or the app does in a booking, even one step",
+    "reliability": "anything about when the app must be up or may be down",
+    "glossary": "a special word the business uses, even without explaining it",
+}
+# The goal gate was leaky on unrelated replies. An explicit exclusion gives
+# margin without broadening the other gates in this calibration run.
+AREA_GATE_EXCLUSIONS_V3 = {
+    "goal": "A list of who uses the app, without saying what problem they have, is not about the goal.",
+}
+
+
+def statements_v3(area: str, personas: Iterable[str] = DEFAULT_PERSONAS, *, domain: str = "salon") -> dict[str, str]:
+    """trees-v3: v2 keys and one call, with per-domain illustrative examples."""
+    if domain not in DOMAIN_EXAMPLES_V3:
+        raise ValueError(f"unknown trees-v3 example domain: {domain!r}")
+    examples = DOMAIN_EXAMPLES_V3[domain]
+    personas = list(personas)
+    gate = f"The reply is about {AREA_ABOUT_V3[area]}. Answer yes only if that is what the reply talks about."
+    if area in AREA_GATE_EXCLUSIONS_V3: gate += " " + AREA_GATE_EXCLUSIONS_V3[area]
+    out = {f"about__{area}": gate}
+    for c in TREES[area]:
+        text = STATEMENTS_V3[(area, c.key)]
+        if "{example}" in text:
+            if (area, c.key) not in examples:
+                raise ValueError(f"missing trees-v3 example for {domain}: {area}.{c.key}")
+            text = text.replace("{example}", examples[(area, c.key)])
+        if c.per_persona:
+            for p in personas: out[_key(f"{area}.{slug(p)}.{c.key}", "comp")] = text.replace("{p}", p)
+        else: out[_key(f"{area}.{c.key}", "comp")] = text
+    base = statements(area, personas)
+    out.update({k: v for k, v in base.items() if not k.startswith("comp__")})
+    return out
+
+
 def effective_fills(area: str, answers: Mapping[str, object]) -> tuple[set[str], set[str], set[str]]:
     """(filled, skipped, mentioned) after the asked-area gate: when the call carries
     about__<area> and it is no, nothing in the asked area counts as filled.

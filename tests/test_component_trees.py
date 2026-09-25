@@ -126,3 +126,28 @@ def test_trees_v2_gate_and_wording():
     assert v.apply(ans, ctx)["relevance"].value == "partial"
     f, _, _ = ct.effective_fills("users", {"comp__users__personas": 1.0})  # no gate key (v1) = plain parse
     assert f == {"users.personas"}
+
+
+def test_trees_v3_calibration_examples_and_isolation():
+    v = COMPONENT_VARIANTS["relevance-trees-v3"]
+    assert not v.production_ok and "relevance-trees-v3" not in RELEVANCE_VARIANTS
+    with pytest.raises(ValueError): get_variant("relevance-trees-v3")
+    for area in AREA_KEYS_V2:
+        ctx = {"target": area, "personas": list(ct.DEFAULT_PERSONAS)}
+        assert set(v.build(ctx)) == set(COMPONENT_VARIANTS["relevance-trees-v2"].build(ctx))
+    flows = ct.statements_v3("flows")
+    assert "even one step" in flows["about__flows"]
+    assert "at least one thing" in flows["comp__flows__steps"]
+    assert "at least two steps" in ct.statements_v2("flows")["comp__flows__steps"]
+    assert "list of who uses the app" in ct.statements_v3("goal")["about__goal"]
+    assert "owner and dog details" in ct.statements_v3("data")["comp__data__what"]
+    assert "{example}" in ct.STATEMENTS_V3[("data", "what")]
+    assert "name" in ct.statements_v3("integrations")["comp__integrations__systems"]
+    with pytest.raises(ValueError): ct.statements_v3("data", domain="unknown")
+    ctx = {"target": "flows", "personas": list(ct.DEFAULT_PERSONAS)}
+    qs = v.build(ctx)
+    ans = {k: ClassificationAnswer(0.0) for k in qs}
+    ans["comp__flows__steps"] = ClassificationAnswer(1.0)
+    assert v.apply(ans, ctx)["relevance"].value == "dodged"
+    ans["about__flows"] = ClassificationAnswer(1.0)
+    assert v.apply(ans, ctx)["relevance"].value == "partial"
