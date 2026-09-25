@@ -11,12 +11,13 @@ Usage: .venv/bin/python scripts/run-production-regression.py \
 The candidate commit must be checked out with a clean tree. Modes: --dry-run
 builds all requests but makes no Jev calls; --check only validates existing
 replays in OUT without running Jev. A new full run uses fresh OUT. It covers
-four pinned intent pools, pool-v4 component-tree coverage, and JEV-L2 real
-with the reviewed L3 addressing overlay only for research-only v1.5-v1.7.
+pool-v4 intent, pool-v4 component-tree coverage, and JEV-L2 real by default
+(2,267 Jev calls). --full-four-pools additionally includes intent pools
+v1-v3 (4,687 calls total), for the one-time pre-flip audit.
+The reviewed L3 addressing overlay applies only to research-only v1.5-v1.7.
 v1.4 uses the original five-label L2 truth (L3 non-answer is out of taxonomy).
-No current numeric approval bars
-exist for four intent pools or real data. A complete run is evidence for a
-human quality ruling, NOT automatic permission to promote or deploy. Six
+No approved numeric quality bars exist for intent pools or real data.
+A complete run is evidence for a human quality ruling, NOT automatic permission to promote or deploy. Six
 pre-registered component bars must pass; absence/error/mismatch fails closed.
 """
 from __future__ import annotations
@@ -57,7 +58,9 @@ def main(argv=None):
     for key in ('candidate-commit','intent-variant','tree-variant','real-csv','review-csv','audit-csv','cat-csv','swaps-csv','out'):
         p.add_argument('--'+key,required=True)
     mode=p.add_mutually_exclusive_group();mode.add_argument('--dry-run',action='store_true');mode.add_argument('--check',action='store_true')
-    p.add_argument('--workers',type=int,default=4);a=p.parse_args(argv)
+    p.add_argument('--workers',type=int,default=4)
+    p.add_argument('--full-four-pools',action='store_true',help='one-time pre-flip run: add pools v1-v3 to the lean default')
+    a=p.parse_args(argv)
     if a.intent_variant not in INTENT_VARIANTS or a.tree_variant not in COMPONENT_VARIANTS:fail('unknown candidate variant')
     if a.workers<1:fail('workers must be >=1')
     if a.intent_variant not in ('intent-v1.4','intent-v1.5','intent-v1.6','intent-v1.7'):
@@ -75,7 +78,7 @@ def main(argv=None):
     if a.check and not (out/'manifest.json').is_file():fail('missing completed regression manifest: '+str(out))
     builder=load_script('build-intent-benchmark');replayer=load_script('replay-jev-rubric-variants')
     pool_meta={}
-    for n in range(1,5):
+    for n in ((1,2,3,4) if a.full_four_pools else (4,)):
         src=ROOT/f'benchmarks/intent-pool-v{n}.json';pool=json.loads(src.read_text())
         rows=builder.build_rows(pool);csvpath=out/f'pool-v{n}.csv'
         if a.check:
@@ -92,6 +95,7 @@ def main(argv=None):
     if not modern and any(not set(labels)<= {'answer','delegate','defer','skip','enough'} for labels in legacy_real.values()):
         fail('legacy real truth has out-of-taxonomy labels')
     manifest={'candidate_commit':commit,'intent_variant':a.intent_variant,'tree_variant':a.tree_variant,
+              'scope':'full-four-pools' if a.full_four_pools else 'lean',
               'runner_sha256':sha(ROOT/'scripts/run-production-regression.py'),
               'sources':{str(x):sha(x) for x in [*paths.values(),*(v[0] for v in pool_meta.values())]},
               'runs':{},'production_approval':'NOT GRANTED; quality bars and operator review required'}

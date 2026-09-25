@@ -203,17 +203,21 @@ past runs can be reproduced. Input datasets under `benchmarks/` are versioned;
 generated runs belong under ignored `runs/` or `out/`. Do not infer
 production readiness from synthetic pass rates or historical variant names.
 
-Before any production default flip, use the full pinned regression runner below.
+Before any production default flip, use the pinned regression runner below. The
+lean matrix is the default; the full four-pool pass requires `--full-four-pools`.
 
 ### Pre-promotion regression gate
 
 Run this on Shy's Mac from a **clean checkout of the exact candidate commit**,
-with working Jev credentials and the preserved real/review inputs. This is
-not a CI smoke test: it makes 4,687 Jev calls for four synthetic
-intent pools (560 + 769 + 1,091 + 1,147), pool-v4 component coverage (935),
-and JEV-L2 real (185). The command refuses to run if HEAD differs from the
-candidate, the worktree is dirty, an input is missing, or the output folder
-contains older results. It does not promote any variant.
+with working Jev credentials and the preserved real/review inputs. The lean
+default makes **2,267 Jev calls**: pool-v4 intent 1,147 + pool-v4 component
+coverage 935 + JEV-L2 real 185. The one-time full pre-flip pass adds the
+three earlier intent pools (560 + 769 + 1,091), for **4,687 calls** with
+`--full-four-pools`. Pool-v4 contains many prior hard cases, but the three
+earlier frozen pools remain separate regression evidence. The command refuses
+to run if HEAD differs from the candidate, the worktree is dirty, an input is
+missing, or the output folder contains older results. It does not promote any
+variant.
 
 ```bash
 .venv/bin/python scripts/run-production-regression.py \
@@ -225,12 +229,13 @@ contains older results. It does not promote any variant.
   --cat-csv runs/JEV-L2-cat-probe.csv \
   --swaps-csv runs/JEV-L3-swaps.csv \
   --out runs/regression-COMMIT --dry-run
-# Remove --dry-run, use a fresh output directory, and run on Shy's Mac.
+# Remove --dry-run and use a fresh output directory for the paid lean run.
+# Before a production flip, also use --full-four-pools with a new output directory.
 ```
 
 The six component-tree bars are checked as actual failures. The runner
-recomputes all four pool CSVs from versioned definitions, validates exact
-replay IDs, source input hashes, variant IDs and `ok` status, scores every
+recomputes pool-v4 (and v1-v3 with `--full-four-pools`) from
+versioned definitions, validates exact replay IDs, source input hashes, variant IDs and `ok` status, scores every
 pool and the real set, and writes `manifest.json` with the commit,
 source/replay hashes and metrics. For intent-v1.4 the real 185 rows use
 the original five-label L2 truth; the JEV-L3 `non-answer` overlay is not a
@@ -239,9 +244,12 @@ remapped. For research-only v1.5-v1.7, the reviewed L3 overlay scores 183
 real rows with two boundary cases excluded. `--check` recomputes the manifest from an
 existing completed output directory without Jev calls. A missing, partial,
 mixed, or stale replay blocks the gate. A green technical run still is not a
-production decision: no numerical approval bars have been set for the four
-intent pools or JEV-L2 real set, and real non-answer precision/re-ask risk
-needs review. Existing trees bars apply to pool-v4 only. Pool-v3/v4 are
-marked DRAFT; their provenance and Shy's approval must be settled before a
+production decision: no numerical approval bars have been set for the intent pools or JEV-L2
+real set, and real non-answer precision/re-ask risk needs review. Suggested relative comparisons - the candidate against current
+production v1.3 on the same intent pool rows, and against v1.4 on the same
+JEV-L2 five-label real truth - are quality-ruling inputs, **not yet approved
+automatic bars**. They require matched baseline replays from this exact
+commit and Shy's separate ruling. Existing trees bars apply to pool-v4 only.
+Pool-v3/v4 are marked DRAFT; their provenance and Shy's approval must be settled before a
 production promotion. Both the intent and tree candidates are opt-in here;
 the script does not turn them on at runtime.
