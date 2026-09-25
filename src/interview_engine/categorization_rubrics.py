@@ -356,9 +356,38 @@ VARIANT_ALIASES: dict[str, str] = {"intent-v1.3": "intent-v1"}
 
 # Opt-in only: context-built variants need a component bench (v2 areas, personas).
 # Kept out of RELEVANCE_VARIANTS so "all" and v1-bench replays never pick them.
+# relevance-trees-v2 (Shy 2026-09-25): same trees and truth; literal "read, don't
+# reason" statements plus one blunt asked-area gate, same single call.
+TREES_V2_PREAMBLE = ("A founder is being interviewed about an app they want built. The interviewer asked one question and "
+                     "the founder replied. Read the reply literally. Answer yes to a statement only if the reply says it "
+                     "in words. If you have to guess or work it out, answer no.")
+
+
+def _trees_v2_build(context: Mapping[str, object]) -> dict[str, "Question"]:
+    from .component_trees import DEFAULT_PERSONAS, TREES, statements_v2
+    area = str(context.get("target") or "")
+    if area not in TREES:
+        raise ValueError(f"component-tree variant needs a v2 target area, got {area!r} - replay a component bench (pool-v4+)")
+    return {k: NoulQuestion(v) for k, v in statements_v2(area, list(context.get("personas") or DEFAULT_PERSONAS)).items()}
+
+
+def finalize_trees_v2(answers: Mapping[str, ClassificationAnswer], context: Mapping[str, object]) -> dict[str, ClassificationAnswer]:
+    from .component_trees import DEFAULT_PERSONAS, derive_relevance, effective_fills
+    area = str(context.get("target") or "")
+    filled, skipped, _ = effective_fills(area, {k: a.value for k, a in answers.items()})
+    label = derive_relevance(area, filled, skipped, open_components=context.get("open") or None,
+                             personas=list(context.get("personas") or DEFAULT_PERSONAS))
+    out = dict(answers)
+    out[RELEVANCE_KEY] = ClassificationAnswer(label, None, {})
+    return out
+
+
 COMPONENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("relevance-trees-v1", RELEVANCE_KEY, "Replay-only: component trees on the v2 14-area split (Shy 2026-09-24). Per-component yes/no + founder-skip + mentioned, one call; relevance derived by code.",
                   {}, version="relevance-trees-v1", preamble=TREES_PREAMBLE, build=_trees_build, finalize_ctx=finalize_trees,
+                  production_ok=False),
+    RubricVariant("relevance-trees-v2", RELEVANCE_KEY, "Replay-only: trees-v1 with literal 'read, don't reason' statements and a blunt asked-area gate (Shy 2026-09-25). Same trees, truth and call count.",
+                  {}, version="relevance-trees-v2", preamble=TREES_V2_PREAMBLE, build=_trees_v2_build, finalize_ctx=finalize_trees_v2,
                   production_ok=False),
 )}
 

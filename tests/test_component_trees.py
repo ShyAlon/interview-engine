@@ -110,3 +110,19 @@ def test_perfect_replay_passes_every_gate(bench, tmp_path):
     _load("score-component-bench").main([str(csvp), str(d), "-o", str(rep)])
     text = rep.read_text()
     assert "model: fake/perfect" in text and text.count("PASS") == 6 and "FAIL" not in text
+
+
+def test_trees_v2_gate_and_wording():
+    from interview_engine.categorization_rubrics import COMPONENT_VARIANTS
+    v = COMPONENT_VARIANTS["relevance-trees-v2"]
+    assert not v.production_ok
+    ctx = {"target": "users", "personas": list(ct.DEFAULT_PERSONAS)}
+    qs = v.build(ctx)
+    assert "about__users" in qs and set(k for k in qs if k.startswith("comp__")) == set(k for k in ct.statements("users") if k.startswith("comp__"))
+    ans = {k: ClassificationAnswer(0.0) for k in qs}
+    ans["comp__users__personas"] = ClassificationAnswer(1.0)
+    assert v.apply(ans, ctx)["relevance"].value == "dodged"  # gate closed: the name-drop does not count
+    ans["about__users"] = ClassificationAnswer(0.9)
+    assert v.apply(ans, ctx)["relevance"].value == "partial"
+    f, _, _ = ct.effective_fills("users", {"comp__users__personas": 1.0})  # no gate key (v1) = plain parse
+    assert f == {"users.personas"}

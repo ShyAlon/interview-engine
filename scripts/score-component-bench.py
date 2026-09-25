@@ -7,7 +7,9 @@ Reads the bench CSV (build-intent-benchmark.py on a component pool) and every
 replay-*.jsonl in REPLAY_DIR whose records carry component answers (comp__*).
 Gates (Shy 2026-09-24) are scored on the 14 area questions; follow-up rows,
 founder-skip rows and the "mentioned" signal are reported without a bar.
-Call = value >= 0.5. Exit code 0 always; PASS/FAIL is printed per gate.
+Call = value >= 0.5. Components are scored after the asked-area gate when the
+variant has one (trees-v2: about__<area> = no -> nothing in that area filled).
+Also reports the gate itself (no bar). Exit code 0 always; PASS/FAIL is printed per gate.
 """
 from __future__ import annotations
 import argparse, csv, json, math, sys
@@ -15,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / "src"))
-from interview_engine.component_trees import parse  # noqa: E402
+from interview_engine.component_trees import effective_fills  # noqa: E402
 
 GATES = [  # (id, text, bar)
     ("dodged_recall", "Derived dodged recall", .90),
@@ -45,7 +47,7 @@ def score(rows, recs):
         if cid not in rows: continue
         row = rows[cid]; hv = json.loads(row["human_verdict"]); ctx = json.loads(row["input_context"])
         v = rec["jev"]["verdict"]; models[f"{rec['jev'].get('provider')}/{rec['jev'].get('model')}"] += 1
-        filled, skipped, mentioned = parse(v)
+        filled, skipped, mentioned = effective_fills(ctx["target"], v)  # after the asked-area gate, when present
         pred = str(v.get("relevance")); truth = hv["relevance"]
         if ctx.get("open"):  # follow-up question: no bar
             extra["followup_n"] += 1; extra["followup_ok"] += pred == truth; continue
@@ -57,6 +59,11 @@ def score(rows, recs):
         if truth == "dodged": s["dodged_n"] += 1; s["dodged_ok"] += pred == "dodged"
         if truth == "partial": s["partial_n"] += 1; s["partial_ok"] += pred == "partial"
         if truth == "addressed": s["addr_n"] += 1; s["addr_ok"] += pred == "addressed"
+        g = v.get(f"about__{area}")
+        if g is not None and not ctx.get("open"):
+            own = area in hv.get("mentioned", [])
+            yes = float(g) >= .5
+            extra["gate_n"] += 1; extra["gate_ok"] += yes == own; extra["gate_closed_own"] += own and not yes
         if hv.get("skipped"): extra["skip_n"] += 1; extra["skip_ok"] += set(hv["skipped"]) <= skipped
         for a in mentioned: extra["mentioned_yes"] += 1; extra["mentioned_tp"] += a in hv.get("mentioned", [])
     return s, fy, fn, models, extra
@@ -71,7 +78,7 @@ def wrong_question(rows, recs, concrete_ids):
         if ctx.get("open"): continue
         resp = row["review_notes"].split(" x ")[0]
         if resp in concrete_ids and ctx["target"] not in hv.get("mentioned", []):
-            n += 1; filled, _, _ = parse(rec["jev"]["verdict"])
+            n += 1; filled, _, _ = effective_fills(ctx["target"], rec["jev"]["verdict"])
             ok += not any(c.startswith(ctx["target"] + ".") for c in filled)
     return ok, n
 
@@ -106,6 +113,7 @@ def main(argv=None):
         P(f"7. Follow-up rows (no bar): {extra['followup_ok']}/{extra['followup_n']} derived label = truth")
         P(f"8. Founder-skip rows (no bar): skip caught on {extra['skip_ok']}/{extra['skip_n']}")
         P(f"9. mentioned (no bar): precision {extra['mentioned_tp']}/{extra['mentioned_yes']}")
+        if extra["gate_n"]: P(f"9b. Asked-area gate (no bar): agrees with the reply's own areas on {extra['gate_ok']}/{extra['gate_n']}; closed on an own-area reply {extra['gate_closed_own']} times")
         worst = [f"{c} {n}" for c, n in fy.most_common(8) if n]
         if worst: P(f"10. Most false yes: {', '.join(worst)}")
         miss = [f"{c} {n}" for c, n in fn.most_common(8) if n]

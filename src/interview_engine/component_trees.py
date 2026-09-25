@@ -244,3 +244,120 @@ PLAIN_WORD_PROBES = {
     "scalability": "How small, roughly - tens of clients? Hundreds?",
 }
 MAX_PLAIN_WORD_PROBES_PER_AREA = 1
+
+
+# ---------------------------------------------------------------------------
+# trees-v2 statements (Shy 2026-09-25, after bench-v4): "Jev is very weak in
+# reasoning. The questions should be very direct... let's dumb it down."
+# Every statement asks Jev to READ, not reason: literal, checkable, and where
+# judgment can't be avoided, the instruction to be explicit is in the statement.
+# Only the wording changes; trees, IDs, R/O and truth are the same as v1.
+# Plus one blunt asked-area gate (about__<area>): components count only when it
+# says yes (option A2). Same single call.
+# ---------------------------------------------------------------------------
+_NO_GUESS = " Answer no if you would have to guess."
+_ONLY_P = " Answer no if the reply does not mention the {p}."
+STATEMENTS_V2: dict[tuple[str, str], str] = {
+    ("goal", "problem"): "The reply says in plain words what is going wrong for the business today." + _NO_GUESS,
+    ("goal", "who"): "The reply says which people have that problem. Answer no if people are only mentioned, not said to have the problem.",
+    ("goal", "cost"): "The reply says what the problem costs today, such as lost time, money or customers.",
+    ("users", "personas"): "The reply lists the kinds of people who will use the app.",
+    ("users", "context"): "The reply says where or when the {p} uses the app, for example on a phone or at the desk." + _ONLY_P,
+    ("users", "device"): "The reply names the device the {p} uses, such as a phone or a tablet." + _ONLY_P,
+    ("users", "count"): "The reply gives how many {p} there are, as a number." + _ONLY_P,
+    ("flows", "trigger"): "The reply says what the first step is - what starts it.",
+    ("flows", "actors"): "The reply says which people do the steps it describes. Answer no if the reply describes no steps.",
+    ("flows", "steps"): "The reply lists at least two steps in the order they happen.",
+    ("flows", "outcome"): "The reply says what the last step is - how it ends.",
+    ("flows", "exceptions"): "The reply says what happens when something goes differently, such as a cancellation or a no-show.",
+    ("data", "what"): "The reply lists pieces of information the app must store, such as names, phone numbers or dates.",
+    ("data", "source"): "The reply says where that information is kept today, such as a paper book or a spreadsheet.",
+    ("data", "owner"): "The reply says who owns the information.",
+    ("data", "retention"): "The reply says how long the information is kept.",
+    ("data", "amount"): "The reply gives how much information there is, as a number.",
+    ("integrations", "systems"): ("The reply names another company's product by its name (such as WhatsApp, Stripe or Google Calendar), "
+                                  "or says the app connects to nothing. A description like 'the company we use' is not a name."),
+    ("integrations", "purpose"): "The reply says what another app or service is used for.",
+    ("integrations", "pricing"): "The reply says what another app or service costs, or who pays for it.",
+    ("integrations", "direction"): "The reply says which way information moves between the app and another service.",
+    ("performance", "moment"): "The reply names a moment where the {p} must not wait." + _ONLY_P,
+    ("performance", "number"): ("The reply gives a time in seconds or minutes for the {p}, or says there is no number. "
+                                "Words like 'fast' or 'instant' are not a number." + _ONLY_P),
+    ("reliability", "allowed"): "The reply says when it is OK for the app to be down.",
+    ("reliability", "forbidden"): "The reply says when the app must never be down.",
+    ("reliability", "per_year"): "The reply gives an uptime percent or a total downtime for a year, such as 99.9% or 'a few hours a year'.",
+    ("reliability", "never_lost"): "The reply says which information must never be lost.",
+    ("reliability", "recovery"): "The reply says how fast the app must be back after it goes down.",
+    ("security", "see"): "The reply says what the {p} may see." + _ONLY_P,
+    ("security", "change"): "The reply says what the {p} may change." + _ONLY_P,
+    ("security", "signin"): "The reply says how people sign in, such as with a password or a phone number.",
+    ("security", "sensitive"): "The reply names information that is private or sensitive.",
+    ("security", "trace"): "The reply says it must be possible to see who did what.",
+    ("security", "standards"): "The reply names a law, rule or standard, such as GDPR.",
+    ("scalability", "users_n"): "The reply gives a number for how many users or clients there are.",
+    ("scalability", "volume"): "The reply gives a number of bookings or transactions per day, week or month.",
+    ("scalability", "peak"): "The reply gives a number for the busiest time.",
+    ("failures", "worst"): "The reply says in plain words what the worst failure would be." + _NO_GUESS,
+    ("failures", "never"): "The reply says something must never happen, using words like 'never', 'must not' or 'can't'.",
+    ("failures", "when_down"): "The reply says what people will do while the app is down.",
+    ("constraints", "budget"): "The reply gives an amount of money for building the app.",
+    ("constraints", "deadline"): "The reply gives a date or time by which the app must be ready.",
+    ("constraints", "maintainer"): "The reply says who will look after the app once it is live, or that nobody on their side can.",
+    ("constraints", "technology"): ("The reply names a technology they want or must avoid (a language, cloud or platform), or says they "
+                                    "don't care. A phone or a tablet is not a technology choice."),
+    ("constraints", "running_costs"): "The reply says whether they will pay a monthly fee for outside services, or how much.",
+    ("risks", "assumption"): "The reply says something the founder is not sure is true, and that the app fails if it is not true." + _NO_GUESS,
+    ("risks", "notice"): "The reply says how the founder would see that this is happening.",
+    ("done", "measure"): "The reply names something they will count or check after launch to see if the app works. Answer no if nothing is said about after launch.",
+    ("done", "target"): "The reply gives a target value for that thing, such as a number.",
+    ("done", "by_when"): "The reply says by when that target should be reached, or answers inside a time the question set.",
+    ("glossary", "terms"): "The reply puts a word in quotes, says 'we call it ...', or explains a word. Ordinary words like 'booking' or 'tablet' do not count.",
+    ("glossary", "meaning"): "The reply says what a special word means.",
+}
+assert set(STATEMENTS_V2) == {(a, c.key) for a, cs in TREES.items() for c in cs}, "v2 wording must cover every component"
+
+# Blunt asked-area gate (A2): what each area is about, in plain words.
+AREA_ABOUT = {
+    "goal": "the problem the app solves, or who has that problem",
+    "users": "who will use the app",
+    "flows": "the steps of using the app, from start to end",
+    "data": "what information the app keeps",
+    "integrations": "other apps or services the app connects to",
+    "performance": "how fast the app must be",
+    "reliability": "when the app may be down, and for how long",
+    "security": "who may see or change what, or which information is private",
+    "scalability": "how many users, clients or bookings the app must handle",
+    "failures": "what goes wrong when the app fails, and what must never happen",
+    "constraints": "budget, deadline, who looks after the app, or technology",
+    "risks": "an assumption that could make the whole app a mistake",
+    "done": "how the founder will know, after launch, that the app works",
+    "glossary": "what special words used in the business mean",
+}
+assert list(AREA_ABOUT) == AREA_KEYS_V2
+
+
+def statements_v2(area: str, personas: Iterable[str] = DEFAULT_PERSONAS) -> dict[str, str]:
+    """trees-v2: literal component statements + the asked-area gate + skips + mentioned."""
+    personas = list(personas)
+    out = {f"about__{area}": f"The reply is about {AREA_ABOUT[area]}. Answer yes only if that is what the reply talks about."}
+    for c in TREES[area]:
+        text = STATEMENTS_V2[(area, c.key)]
+        if c.per_persona:
+            for p in personas: out[_key(f"{area}.{slug(p)}.{c.key}", "comp")] = text.replace("{p}", p)
+        else: out[_key(f"{area}.{c.key}", "comp")] = text
+    base = statements(area, personas)
+    out.update({k: v for k, v in base.items() if not k.startswith("comp__")})
+    return out
+
+
+def effective_fills(area: str, answers: Mapping[str, object]) -> tuple[set[str], set[str], set[str]]:
+    """(filled, skipped, mentioned) after the asked-area gate: when the call carries
+    about__<area> and it is no, nothing in the asked area counts as filled.
+    Without a gate key (trees-v1) this is plain parse()."""
+    filled, skipped, mentioned = parse(answers)
+    gate = answers.get(f"about__{area}")
+    if gate is not None:
+        try: open_ = float(gate) >= THRESHOLD
+        except (TypeError, ValueError): open_ = str(gate).lower() in ("yes", "true")
+        if not open_: filled = {c for c in filled if not c.startswith(area + ".")}
+    return filled, skipped, mentioned
