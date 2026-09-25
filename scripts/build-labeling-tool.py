@@ -43,14 +43,15 @@ def unlabeled(row) -> bool:
     return (not w and not hv) or (w == "neither" and not hv)
 
 
-def build(rows, *, title, subtitle, export_name) -> tuple[str, str]:
+def build(rows, *, title, subtitle, export_name, manual_intent=False) -> tuple[str, str]:
     buf = io.StringIO(); w = csv.DictWriter(buf, fieldnames=COLUMNS, lineterminator="\r\n", extrasaction="ignore")
     w.writeheader(); w.writerows(rows)
     data = buf.getvalue().encode()
     digest = hashlib.sha256(data + TAXONOMY_VERSION.encode()).hexdigest()[:12]
     store = f"labeling-tool-v2:{digest}"
     tax = taxonomy_json().replace("</", "<\\/")
-    html = TEMPLATE.read_text()
+    template = ROOT / "scripts" / "templates" / "manual-intent-labeling-tool.html" if manual_intent else TEMPLATE
+    html = template.read_text()
     esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     for k, v in (("__CSV_B64__", base64.b64encode(data).decode()), ("__TAXONOMY_JSON__", tax), ("__STORE_KEY__", store),
                  ("__TITLE__", esc(title)), ("__SUBTITLE__", esc(subtitle)), ("__EXPORT_NAME__", export_name.replace("'", "")),
@@ -66,6 +67,7 @@ def main(argv=None):
     p.add_argument("--key"); p.add_argument("--key-out"); p.add_argument("--slot")
     p.add_argument("--only-unlabeled", action="store_true"); p.add_argument("--clear-labels", action="store_true")
     p.add_argument("--title", default="A/B Labeling"); p.add_argument("--subtitle")
+    p.add_argument("--manual-intent", action="store_true", help="blind intent-only labeling without A/B; label clicks auto-advance")
     a = p.parse_args(argv)
     rows = list(csv.DictReader(open(a.input, encoding="utf-8-sig", newline="")))
     missing = [c for c in COLUMNS if rows and c not in rows[0]]
@@ -74,8 +76,9 @@ def main(argv=None):
     if a.only_unlabeled: rows = [r for r in rows if unlabeled(r)]
     if a.clear_labels: rows = [{**r, **{c: "" for c in LABEL_COLS}} for r in rows]
     if not rows: raise SystemExit("no rows selected")
+    if a.manual_intent and any(r["slot"] != "intent" for r in rows): raise SystemExit("--manual-intent needs intent-only rows; use --slot intent")
     out = Path(a.output); out.parent.mkdir(parents=True, exist_ok=True); stem = out.stem
-    html, store = build(rows, title=a.title, subtitle=a.subtitle or stem, export_name=f"{stem}-labeled.csv")
+    html, store = build(rows, title=a.title, subtitle=a.subtitle or stem, export_name=f"{stem}-labeled.csv", manual_intent=a.manual_intent)
     out.write_text(html)
     if a.key:
         key = {k["case_id"]: k for k in json.load(open(a.key))}

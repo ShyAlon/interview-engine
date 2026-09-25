@@ -70,3 +70,21 @@ def test_only_unlabeled_clear_labels_and_key_subset(tmp_path):
     assert [r["case_id"] for r in data] == ["u1", "n1"] and all(not r["winner"] for r in data)
     assert [k["case_id"] for k in json.loads((tmp_path / "t-key.json").read_text())] == ["u1", "n1"]
     assert "baseline" not in out.read_text()  # key never embedded
+
+
+def test_manual_intent_tool_hides_comparison_keeps_storage_key(tmp_path):
+    inp = _write(tmp_path, [_row("c1"), _row("c2")])
+    old = tmp_path / "old.html"; new = tmp_path / "new.html"
+    assert bt.main([str(inp), "-o", str(old)]) == 0
+    assert bt.main([str(inp), "-o", str(new), "--manual-intent", "--slot", "intent"]) == 0
+    a, b = old.read_text(), new.read_text()
+    key = lambda h: re.search(r"const STORE='([^']+)'", h).group(1)
+    assert key(a) == key(b)  # labels already saved in this browser survive the UI swap
+    assert "System A" not in b and "System B" not in b and 'id="choices"' not in b
+    assert "advanceTimer=setTimeout" in b and "L.winner='neither'" in b
+    assert base64.b64decode(_embedded(a, "csvdata")) == base64.b64decode(_embedded(b, "csvdata"))
+    assert bt.main([str(inp), "-o", str(tmp_path / "bad.html"), "--manual-intent"]) == 0
+    import pytest
+    with pytest.raises(SystemExit):
+        bt.main([str(_write(tmp_path, [_row("c1"), _row("s1", slot="scope")], "mix.csv")),
+                 "-o", str(tmp_path / "bad2.html"), "--manual-intent"])
