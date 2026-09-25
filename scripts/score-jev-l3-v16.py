@@ -24,11 +24,16 @@ def read_replay(path,variant):
             if cid in out or r['replay']['variant_id']!=variant or r['jev']['status']!='ok':raise ValueError('duplicate, wrong variant or failed replay: '+cid)
             verdict=r['jev']['verdict'];label=verdict['intent']
             if label not in LABELS:raise ValueError('unknown label: '+cid)
-            if variant=='intent-v1.6':
+            if variant in ('intent-v1.6','intent-v1.7'):
                 source=verdict.get('control'),verdict.get('addressing')
                 if source[0] not in ('none','proceed','skip','enough') or source[1] not in ('addressed','not-addressed'):
-                    raise ValueError('missing v1.6 source judgments: '+cid)
-                expected=source[0] if source[0]!='none' else ('answer' if source[1]=='addressed' else 'non-answer')
+                    raise ValueError('missing '+variant+' source judgments: '+cid)
+                if variant=='intent-v1.7':
+                    expected=(source[0] if source[0] in ('enough','skip') else
+                              'answer' if source[1]=='addressed' else
+                              'proceed' if source[0]=='proceed' else 'non-answer')
+                else:
+                    expected=source[0] if source[0]!='none' else ('answer' if source[1]=='addressed' else 'non-answer')
                 if label!=expected:raise ValueError('final label contradicts source judgments: '+cid)
             out[cid]=label
     return out
@@ -75,7 +80,8 @@ def truth_sets(real_csv,cat_csv,review_csv,audit_csv):
         raise ValueError('not the 12-case cat probe')
     return real,{r['case_id']:['non-answer'] for r in cats},synthetic,skipped,changed
 
-def analyze(real_csv,real_replay,cat_csv,cat_replay,review_csv,audit_csv,swap_csv,swap_replay):
+def analyze(real_csv,real_replay,cat_csv,cat_replay,review_csv,audit_csv,swap_csv,swap_replay,variant='intent-v1.6'):
+    if variant not in ('intent-v1.6','intent-v1.7'):raise ValueError('unsupported variant: '+variant)
     real,cats,swaps,skipped,changed=truth_sets(real_csv,cat_csv,review_csv,audit_csv)
     # The replay input for swaps is a replay-ready CSV built from the audit.
     with open(swap_csv,encoding='utf-8-sig',newline='') as f:swaprows=list(csv.DictReader(f))
@@ -83,14 +89,14 @@ def analyze(real_csv,real_replay,cat_csv,cat_replay,review_csv,audit_csv,swap_cs
         expected_swaps={r['case_id'] for r in csv.DictReader(f) if r['group']=='synthetic-wrong-area'}
     if {r['case_id'] for r in swaprows}!=expected_swaps:
         raise ValueError('swap CSV does not match audit')
-    rp=read_replay(real_replay,'intent-v1.6')
+    rp=read_replay(real_replay,variant)
     if set(rp)!=set(real)|set(skipped):raise ValueError('real replay IDs mismatch reviewed truth')
-    swap_preds=read_replay(swap_replay,'intent-v1.6')
+    swap_preds=read_replay(swap_replay,variant)
     if set(swap_preds)!=expected_swaps:raise ValueError('swap replay IDs mismatch audit')
-    return {'interpretation':'Research-only opt-in v1.6; addressing reviews revise real truth; synthetic scores separate',
+    return {'interpretation':f'Research-only opt-in {variant.removeprefix("intent-")}; addressing reviews revise real truth; synthetic scores separate',
             'boundary_ids_unscored':skipped,'real_truth_changed':changed,
             'real':v15.score(real,{k:v for k,v in rp.items() if k in real}),
-            'synthetic_cat':v15.score(cats,read_replay(cat_replay,'intent-v1.6')),
+            'synthetic_cat':v15.score(cats,read_replay(cat_replay,variant)),
             'synthetic_wrong_area':v15.score(swaps,{k:v for k,v in swap_preds.items() if k in swaps})}
 
 def main():

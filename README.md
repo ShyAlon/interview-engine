@@ -160,8 +160,8 @@ dropped.
 
 Production still defaults to intent-v1 (v1.3 five-label criteria) and
 relevance-v1. Explicit opt-in replay variants intent-v1.4, intent-v1.5,
-intent-v1.6, and relevance-trees-v1..v5 are **research only**. The new
-`proceed` and `non-answer` outputs from intent-v1.5/v1.6 have no production
+intent-v1.6, intent-v1.7, and relevance-trees-v1..v5 are **research only**. The new
+`proceed` and `non-answer` outputs from intent-v1.5/v1.6/v1.7 have no production
 graph behavior yet. Replaying a rubric does not enable it at runtime.
 
 JEV-L2 is the 195-case real question/reply label set. For the September 25
@@ -175,6 +175,16 @@ replay; two boundary verdicts remain unscored. Cat probes are synthetic and
 are reported separately from real cases. The strict merged/v1.5/v1.6 reports
 have a different scoring contract from the historical `score-rubric-variants.py`
 answer/delegate compatibility score.
+
+The separate opt-in intent-v1.7 request tests question-target addressing and
+partial-answer precedence after v1.6. Its offline scorer is
+`scripts/score-jev-l3-v17.py`; pass the filtered 185-case real CSV, matching
+v1.7 real replay, 12 cat cases/replay, reviewed JEV-L3 CSV and audit, and six
+swap cases/replay, in that order. It rejects missing/duplicate/wrong-variant
+replay IDs. The two reviewed boundary cases remain unscored (183 real scored),
+and real versus synthetic scores remain separate. Run Jev calls on Shy's Mac;
+a dry run here only checks request construction. Keep the v1.6 and v1.7 replay
+files separately.
 
 Research scripts remain under `scripts/` with their original CLI paths so
 past runs can be reproduced. Input datasets under `benchmarks/` are versioned;

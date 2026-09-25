@@ -184,6 +184,61 @@ _V16_QUESTIONS={
 }
 
 
+# v1.7 is a separate opt-in research request; v1.6 stays frozen for replay.
+# Asking about the question's sought information, not just shared topic words,
+# separates a useful partial answer from a same-domain dodge. Control judgments
+# remain independently visible in replay records.
+_V17_CONTROL = {
+    "none": "No explicit handoff, move-on, or interview-closing response.",
+    "proceed": ("Founder declines to settle the asked detail and hands the decision to the interviewer, "
+                "builder, or qualified expert, or explicitly says they cannot specify it now. "
+                "A preference or constraint may accompany this handoff. Do not mark a rule about what "
+                "the application itself does as a handoff. An acknowledgment of a closing statement "
+                "is not proceed."),
+    "skip": "Founder asks to leave the current question or topic and continue the interview.",
+    "enough": ("Founder asks to end the interview, or accepts the interviewer's explicit statement "
+               "that the interview is closing. Do not infer enough from a bare acknowledgment "
+               "to an ordinary question."),
+}
+_V17_ADDRESS = {
+    "addressed": ("The reply explicitly or implicitly settles at least one thing the question is actually "
+                  "asking for: a sought fact, choice, preference, constraint, or relevant partial answer. "
+                  "A reasonable implication or limited answer counts even if another requested part is "
+                  "unknown. Merely calling an unspecified answer well defined does not state that answer. "
+                  "Do not demand a complete technical specification or exact wording."),
+    "not-addressed": ("The reply does not settle any part of what the question actually asks for. "
+                      "Facts about the same product or general domain are not enough when they concern "
+                      "a different decision. A related aspiration is not a substitute for the requested "
+                      "method, evidence, sequence, or choice. Do not infer unstated details."),
+}
+
+def finalize_intent_v17(answers: Mapping[str, ClassificationAnswer]) -> dict[str, ClassificationAnswer]:
+    """Close/skip first; a partial answer beats proceed on an unsettled remainder."""
+    control=answers["control"];addressed=answers["addressing"]
+    c=str(control.value);a=str(addressed.value)
+    if c not in _V17_CONTROL or a not in _V17_ADDRESS:raise ValueError('invalid v1.7 source judgment')
+    if c in ('enough','skip'): label,confidence=c,control.confidence
+    elif a=='addressed': label,confidence='answer',addressed.confidence
+    elif c=='proceed': label,confidence='proceed',control.confidence
+    else: label,confidence='non-answer',addressed.confidence
+    return {**answers,'intent':ClassificationAnswer(label,confidence)}
+
+_V17_QUESTIONS={
+    "control": ChoiceQuestion(
+        "Independently identify an explicit founder control move, using the exact question and closing context. "
+        "A handoff to someone qualified, a refusal to pick an implementation detail, or an explicit "
+        "'I cannot say' can be proceed. An acknowledgment after the interviewer announces closure "
+        "accepts the end; an acknowledgment during an active question does not. Do not infer skip "
+        "from a reply that simply misses the question. Choose none without an explicit move.",_V17_CONTROL),
+    "addressing": ChoiceQuestion(
+        "Independently compare the reply with what this exact question seeks, ignoring control moves. "
+        "Would the reply's stated or reasonably implied facts actually settle any requested part? "
+        "Count a partial answer despite uncertainty about a different part. Reject same-domain "
+        "information that misses the specific requested decision, method, evidence or sequence. "
+        "Do not invent facts or demand expert detail from a nontechnical founder.",_V17_ADDRESS),
+}
+
+
 
 _OFFTOPIC_RULE = (
     " Rule for off-topic or pasted text: if the reply does not engage with the question (generic or canned text, "
@@ -250,6 +305,9 @@ INTENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("intent-v1.6", INTENT_KEY, "Research only: independent question-addressing and control judgments combined by code.",
                   _V16_QUESTIONS, finalize_intent_v16,
                   version="categorization-request-v1.6", production_ok=False),
+    RubricVariant("intent-v1.7", INTENT_KEY, "Research only: question-target addressing, explicit control, and partial-answer precedence.",
+                  _V17_QUESTIONS, finalize_intent_v17,
+                  version="categorization-request-v1.7", production_ok=False),
     RubricVariant("intent-v1.2", INTENT_KEY, "Frozen: v1.2, the 6-label text with dismiss (2e03444).",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1_2), version=V1_2_RUBRIC_VERSION),
     RubricVariant("intent-v1.1", INTENT_KEY, "Frozen: the labeled v1 text plus defer (710d6c4).",
