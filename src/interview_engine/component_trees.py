@@ -469,6 +469,30 @@ def statements_v4(area: str, personas: Iterable[str] = DEFAULT_PERSONAS, *, doma
     return out
 
 
+# v5 keeps flows and all other v4 statements frozen. Narrow the two remaining
+# high-volume cross-area leaks (done and users) without requiring full answers.
+# A thin, real after-launch measure or one named user role still counts.
+STATEMENTS_V5 = {**STATEMENTS_V4,
+    ("done", "measure"): "The reply itself says a result to check after launch to tell whether the app works. Answer no if the reply only names today's price or count, lists roles or activities, or says a risk that might happen. The question's after-launch wording does not make a reply into a success measure.",
+    ("done", "target"): "The reply itself gives a target value for an after-launch success result. A price or deposit, a current count, or a number with no stated success result is not a target. Do not borrow the question's time frame.",
+}
+AREA_GATE_EXCLUSIONS_V5 = {
+    "done": "A current price or count, a list of roles or activities, or a risk that might happen is not a success measurement after launch. Answer yes to a thin reply that itself states even one result to check after launch.",
+    "users": "A workflow naming actors, today's pain, an adoption risk, or a capacity count is not a description of user roles by itself. One named user role or description of how that role uses the app does count; do not demand a complete list.",
+}
+
+
+def statements_v5(area: str, personas: Iterable[str] = DEFAULT_PERSONAS, *, domain: str = "salon") -> dict[str, str]:
+    """trees-v5: v4 with targeted done and users exclusions only."""
+    out = statements_v4(area, personas, domain=domain)
+    if area in AREA_GATE_EXCLUSIONS_V5:
+        out[f"about__{area}"] += " " + AREA_GATE_EXCLUSIONS_V5[area]
+    if area == "done":
+        for key in ("measure", "target"):
+            out[_key(f"done.{key}", "comp")] = STATEMENTS_V5[("done", key)]
+    return out
+
+
 def effective_fills(area: str, answers: Mapping[str, object]) -> tuple[set[str], set[str], set[str]]:
     """(filled, skipped, mentioned) after the asked-area gate: when the call carries
     about__<area> and it is no, nothing in the asked area counts as filled.

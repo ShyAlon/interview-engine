@@ -168,3 +168,20 @@ def test_trees_v4_targeted_delta():
     assert "price or deposit" in ct.statements_v4("done")["comp__done__target"]
     ctx = {"target": "flows", "personas": list(ct.DEFAULT_PERSONAS)}
     assert set(v4.build(ctx)) == set(v3.build(ctx))
+
+
+def test_trees_v5_targeted_delta():
+    v4 = COMPONENT_VARIANTS["relevance-trees-v4"]
+    v5 = COMPONENT_VARIANTS["relevance-trees-v5"]
+    assert not v5.production_ok
+    with pytest.raises(ValueError): get_variant("relevance-trees-v5")
+    for area in AREA_KEYS_V2:
+        a = ct.statements_v4(area); b = ct.statements_v5(area)
+        assert set(a) == set(b)
+        changed = {k for k in a if a[k] != b[k]}
+        expected = {"done": {"about__done", "comp__done__measure", "comp__done__target"},
+                    "users": {"about__users"}}.get(area, set())
+        assert changed == expected, (area, changed)
+        assert set(v4.build({"target": area})) == set(v5.build({"target": area}))
+    assert "One named user role" in ct.statements_v5("users")["about__users"]
+    assert "thin reply" in ct.statements_v5("done")["about__done"]
