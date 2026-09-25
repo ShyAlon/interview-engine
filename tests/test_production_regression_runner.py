@@ -13,6 +13,7 @@ def test_replay_validation_rejects_missing_duplicate_non_ok_and_changed_input(tm
     def write(*records):p.write_text(''.join(json.dumps(x)+'\n' for x in records))
     def record(cid, status='ok', ref=None):
         return {'slot':'intent','input_ref':ref or dict(c1='sha256:abc',c2='sha256:def')[cid],
+                'input':{'rubric_version':'categorization-request-v1.4'},
                 'replay':{'case_id':cid,'variant_id':'intent-v1.4','repeat':1},'jev':{'status':status}}
     write(record('c1'),record('c2'))
     assert len(r.records(p,rows,'intent-v1.4','intent'))==2

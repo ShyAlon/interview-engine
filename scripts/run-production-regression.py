@@ -45,6 +45,8 @@ def records(path,cases,variant,slot):
             if cid in seen:fail(f'duplicate replay ID {cid}: {path}')
             if r['replay']['variant_id']!=variant or r['slot']!=slot or r['jev']['status']!='ok':fail(f'variant/slot/status mismatch {cid}: {path}')
             if r['input_ref']!=expected.get(cid,{}).get('input_ref'):fail(f'input ref mismatch {cid}: {path}')
+            if r['input'].get('rubric_version')!=(INTENT_VARIANTS[variant] if slot=='intent' else COMPONENT_VARIANTS[variant]).rubric_version:
+                fail(f'rubric version mismatch {cid}: {path}')
             if r['replay'].get('repeat')!=1:fail(f'unexpected repeat {cid}: {path}')
             seen[cid]=r
     if set(seen)!=set(expected):fail(f'ID mismatch for {path}: {len(set(expected)-set(seen))} missing, {len(set(seen)-set(expected))} extra')
