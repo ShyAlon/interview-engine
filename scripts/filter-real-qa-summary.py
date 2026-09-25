@@ -10,19 +10,29 @@ retains the same adjudication columns/case IDs so replay and scoring use it.
 --dry-run counts only; it never writes files.
 """
 from __future__ import annotations
-import argparse,csv,sys
+import argparse,csv,re,sys
 from pathlib import Path
 
 TOKEN='EXCLUDE_SUMMARY'
 CLARIFY='CLARIFY'
+# Exact free-text notes from the 195-row JEV-L2 export. Do not use a broad
+# "exclude"/"clarification" substring: that would silently drop other cases.
+SUMMARY_NOTES={
+    'exclude from the corpus', 'another blob to exclude',
+    'a blob to exclude from the corpus', 'blob to exclude', 'exclude',
+}
+CLARIFY_NOTES={
+    "it's actually asking for clarification. maybe we need an entirely new case for that.",
+    'another clarification question',
+}
 
 
 def filter_rows(rows):
     kept=[];excluded=[];clarifications=[]
     for r in rows:
-        note=(r.get('review_notes') or '').upper()
-        if TOKEN in note:excluded.append(r)
-        elif CLARIFY in note:clarifications.append(r)
+        note=(r.get('review_notes') or '').strip()
+        if re.search(r"\bEXCLUDE_SUMMARY\b", note) or note.casefold() in SUMMARY_NOTES:excluded.append(r)
+        elif re.search(r"\bCLARIFY\b", note) or note.casefold() in CLARIFY_NOTES:clarifications.append(r)
         else:kept.append(r)
     return kept,excluded,clarifications
 
@@ -41,7 +51,7 @@ def main(argv=None):
     if len(ids)!=len(set(ids)):p.error('duplicate case IDs: cannot score this export safely')
     kept,excluded,clarifications=filter_rows(rows)
     labeled=sum(bool((r.get('human_verdict') or '').strip()) for r in kept)
-    print(f'1. Original {len(rows)} cases; excluded {len(excluded)} with note token {TOKEN}; set aside {len(clarifications)} with note token {CLARIFY}.')
+    print(f'1. Original {len(rows)} cases; excluded {len(excluded)} with {TOKEN} or known exclusion notes; set aside {len(clarifications)} with {CLARIFY} or known clarification notes.')
     print(f'2. Retained {len(kept)} cases; {labeled} with human verdict; {len(kept)-labeled} still unlabelled.')
     print(f'3. Paired v1.3/v1.4 replay: {2*len(kept)} Jev calls. Scorer should report {labeled} usable ground-truth rows if all verdicts parse.')
     if not kept:print('4. No cases remain; output not written.');return 2

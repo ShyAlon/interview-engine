@@ -25,3 +25,11 @@ def test_future_extractor_summary_marker_not_generic_length():
     e=importlib.util.module_from_spec(spec);spec.loader.exec_module(e)
     assert e.SUMMARY_QUESTION.search('Please summarize all requirements and confirm this recap.')
     assert not e.SUMMARY_QUESTION.search('Why is your phone booking process slow? '*50)
+
+
+def test_exact_free_text_notes_only():
+    notes=[*mod.SUMMARY_NOTES,*mod.CLARIFY_NOTES,'Need to clarify the exclusion rationale', '']
+    rows=[{'case_id':str(i),'review_notes':n} for i,n in enumerate(notes)]
+    kept,excluded,clarifications=mod.filter_rows(rows)
+    assert len(excluded)==5 and len(clarifications)==2
+    assert [r['case_id'] for r in kept]==['7','8']
