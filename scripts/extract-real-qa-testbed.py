@@ -32,6 +32,10 @@ CUES={
  'defer': r'\b(?:come back to (?:you|this|that)|get back to (?:you|this)|check with (?:my|our)|find out (?:and|then)|answer (?:this|that) later)\b',
  'enough': r'\b(?:no more questions|end the interview|done with the interview|stop (?:the )?questions|write (?:the spec|it) up|wrap (?:it|this|the interview) up)\b',
 }
+# Explicit summary/review prompts are not single-question intent cases. A
+# length alone is not evidence: long ordinary questions remain eligible and
+# can be removed after review with filter-real-qa-summary.py.
+SUMMARY_QUESTION=re.compile(r"\b(?:summari[sz]e|summary of|review (?:everything|all (?:the|your) (?:answers|requirements))|recap of|here(?:'| i)s (?:what|a summary) (?:we|i) (?:heard|covered))\b",re.I)
 QA=re.compile(r'(?:^|\n)Question:\s*(.*?)\n(?:Founder answer|Answer):\s*(.*)\Z',re.S|re.I)
 
 
@@ -116,6 +120,8 @@ def extract(roots):
             stats['unreadable']+=1;print(f'warning: skipped {path}: {type(e).__name__}: {e}',file=sys.stderr);continue
         for q,a,n in items:
             stats['observed_pairs']+=1
+            if SUMMARY_QUESTION.search(q):
+                stats['excluded_summary']+=1;continue
             req=intent_request(q,a)
             pkg=input_package(req)
             # Identity is the exact request state; duplicates across old exports,
@@ -138,7 +144,7 @@ def main(argv=None):
     roots=a.roots or [ROOT/'out',ROOT/'runs']
     entries,stats,files=extract(roots)
     print(f'1. Scanned {files} files under {", ".join(map(str,roots))}; observed {stats["observed_pairs"]} Q/A pairs; {stats["duplicate_pairs"]} duplicate occurrences.')
-    print(f'2. Unique: {len(entries)}; control-phrase candidates: {stats["candidate"]}; ordinary controls: {stats["ordinary"]}; unreadable files: {stats["unreadable"]}.')
+    print(f'2. Unique: {len(entries)}; control-phrase candidates: {stats["candidate"]}; ordinary controls: {stats["ordinary"]}; summary question occurrences excluded: {stats["excluded_summary"]}; unreadable files: {stats["unreadable"]}.')
     print('3. Flags are retrieval hints in a SEPARATE manifest, never labels; the adjudication CSV has no flags or model verdicts.')
     if not entries:print('4. No Q/A pairs found. Supply an artifact root with checkpoints, transcript JSON, enriched shadows, or real adjudication CSV.');return 2
     if a.dry_run:print('4. Dry run: no files written.');return 0
