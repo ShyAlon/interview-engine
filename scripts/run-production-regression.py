@@ -122,6 +122,9 @@ def main(argv=None):
         replay=dest/f'replay-{variant}.jsonl'
         if a.resume and dest.exists() and any(dest.iterdir()):
             if not replay.is_file() or not (dest/'SUMMARY.txt').is_file():fail('partial replay leg: '+str(dest))
+            summary=(dest/'SUMMARY.txt').read_text()
+            if len(summary.splitlines())!=1 or f'errors=0' not in summary or f'n={sum(r["slot"]==slot for r in rows):3d}' not in summary:
+                fail('replay summary missing or mismatched: '+str(dest))
             got=records(replay,rows,variant,slot)
             print(f'REUSED {name}: {len(got)} validated records')
         else:
