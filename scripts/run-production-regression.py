@@ -63,8 +63,8 @@ def main(argv=None):
     a=p.parse_args(argv)
     if a.intent_variant not in INTENT_VARIANTS or a.tree_variant not in COMPONENT_VARIANTS:fail('unknown candidate variant')
     if a.workers<1:fail('workers must be >=1')
-    if a.intent_variant not in ('intent-v1.4','intent-v1.5','intent-v1.6','intent-v1.7'):
-        fail('this gate requires a candidate with supported truth/scoring contract (v1.4-v1.7)')
+    if a.intent_variant not in ('intent-v1','intent-v1.4'):
+        fail('production gate supports only five-label intent-v1 or intent-v1.4; research v1.5-v1.7 needs a separately approved truth/label crosswalk')
     head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     commit=subprocess.check_output(['git','rev-parse','--verify',a.candidate_commit+'^{commit}'],cwd=ROOT,text=True).strip()
     if head!=commit:fail(f'candidate commit {commit} is not checked out (HEAD {head})')
@@ -91,18 +91,22 @@ def main(argv=None):
     legacy_real={r['case_id']:json.loads(r['human_verdict'])['intent'] for r in real}
     review=load_script('score-jev-l3-v16');rtruth,_,_,boundary,_=review.truth_sets(paths['real-csv'],paths['cat-csv'],paths['review-csv'],paths['audit-csv'])
     if len(rtruth)!=183 or len(boundary)!=2:fail('real truth overlay must have 183 scored and two boundary cases')
-    modern=a.intent_variant in ('intent-v1.5','intent-v1.6','intent-v1.7')
-    if not modern and any(not set(labels)<= {'answer','delegate','defer','skip','enough'} for labels in legacy_real.values()):
+    if any(not set(labels)<= {'answer','delegate','defer','skip','enough'} for labels in legacy_real.values()):
         fail('legacy real truth has out-of-taxonomy labels')
     manifest={'candidate_commit':commit,'intent_variant':a.intent_variant,'tree_variant':a.tree_variant,
               'scope':'full-four-pools' if a.full_four_pools else 'lean',
               'runner_sha256':sha(ROOT/'scripts/run-production-regression.py'),
               'sources':{str(x):sha(x) for x in [*paths.values(),*(v[0] for v in pool_meta.values())]},
               'runs':{},'production_approval':'NOT GRANTED; quality bars and operator review required'}
-    for name,source,rows,slot,variant in [
+    jobs=[
         *((f'pool-v{n}-intent',v[2],v[1],'intent',a.intent_variant) for n,v in pool_meta.items()),
         ('pool-v4-trees',pool_meta[4][2],pool_meta[4][1],'coverage',a.tree_variant),
-        ('jev-l2-real',paths['real-csv'],real,'intent',a.intent_variant)]:
+        ('jev-l2-real',paths['real-csv'],real,'intent',a.intent_variant)]
+    # Paired baselines on the exact same commit and case IDs. A candidate may
+    # itself be the baseline; the existing replay is then reused, not rerun.
+    if a.intent_variant!='intent-v1':jobs.append(('baseline-pool-v4-intent',pool_meta[4][2],pool_meta[4][1],'intent','intent-v1'))
+    if a.intent_variant!='intent-v1.4':jobs.append(('baseline-jev-l2-real',paths['real-csv'],real,'intent','intent-v1.4'))
+    for name,source,rows,slot,variant in jobs:
         dest=out/name
         if a.dry_run:
             cases=[{'slot':r['slot'],'state':r['input_state'],'context':json.loads(r['input_context'] or '{}'),
@@ -118,20 +122,23 @@ def main(argv=None):
         replay=dest/f'replay-{variant}.jsonl';got=records(replay,rows,variant,slot)
         manifest['runs'][name]={'n':len(got),'replay_sha256':sha(replay)}
         if slot=='intent':
-            truth=({r['case_id']:json.loads(r['human_verdict'])['intent'] for r in rows} if name!='jev-l2-real'
-                   else rtruth if modern else legacy_real)
+            is_real=name.endswith('jev-l2-real')
+            is_modern=variant in ('intent-v1.5','intent-v1.6','intent-v1.7')
+            truth=({r['case_id']:json.loads(r['human_verdict'])['intent'] for r in rows} if not is_real
+                   else rtruth if is_modern else legacy_real)
             scored={c:r for c,r in got.items() if c in truth}
-            if name=='jev-l2-real' and len(scored)!=(183 if modern else 185):fail('unexpected scored real count')
+            if is_real and len(scored)!=(183 if is_modern else 185):fail('unexpected scored real count')
             strict=load_script('_jev_strict_scoring')
-            labels=('answer','proceed','skip','enough','non-answer') if modern else ('answer','delegate','defer','skip','enough')
+            labels=('answer','proceed','skip','enough','non-answer') if is_modern else ('answer','delegate','defer','skip','enough')
             from interview_engine.intent_taxonomy import compatible
             preds={c:r['jev']['verdict']['intent'] for c,r in scored.items()}
             if any(v not in labels for v in preds.values()):fail('unexpected intent label in '+name)
             # Keep raw strict metrics AND legacy answer/delegate compatibility visible.
             metrics=strict.label_stats(truth,preds,labels)
             manifest['runs'][name]['strict']={k:metrics[k] for k in ('n','correct','accuracy','macro_f1','per_label')}
-            manifest['runs'][name]['compatible_correct']=sum(compatible(preds[c],truth[c]) for c in truth) if not modern else None
-            if name=='jev-l2-real':manifest['runs'][name]['truth_contract']='reviewed L3 overlay; two boundary rows excluded' if modern else 'original L2 five-label truth; L3 addressing overlay incompatible with v1.4 taxonomy and not applied'
+            manifest['runs'][name]['compatible_correct']=sum(compatible(preds[c],truth[c]) for c in truth) if not is_modern else None
+            if is_real:manifest['runs'][name]['truth_contract']='reviewed L3 overlay; two boundary rows excluded' if is_modern else 'original L2 five-label truth; L3 addressing overlay incompatible with v1.4 taxonomy and not applied'
+
         else:
             scorer=load_script('score-component-bench');cov={r['case_id']:r for r in rows if r['slot']=='coverage'}
             s,fy,fn,models,extra=scorer.score(cov,list(got.values()))
@@ -146,6 +153,15 @@ def main(argv=None):
                 bars[key]={'n':n,'numerator':k,'bar':bar,'pass':passed}
             manifest['runs'][name]['component_bars']=bars
     if a.dry_run:return 0
+    def compare(candidate,baseline):
+        a=manifest['runs'][candidate]['strict'];b=manifest['runs'][baseline]['strict']
+        if a['n']!=b['n']:fail('relative bar compared different denominators')
+        return {'candidate':candidate,'baseline':baseline,'n':a['n'],
+                'accuracy':{'candidate':a['accuracy'],'baseline':b['accuracy'],'pass':a['correct']>=b['correct']},
+                'macro_f1':{'candidate':a['macro_f1'],'baseline':b['macro_f1'],'pass':a['macro_f1']+1e-12>=b['macro_f1']}}
+    manifest['relative_bars']={
+        'pool-v4-intent':compare('pool-v4-intent','pool-v4-intent' if a.intent_variant=='intent-v1' else 'baseline-pool-v4-intent'),
+        'jev-l2-real':compare('jev-l2-real','jev-l2-real' if a.intent_variant=='intent-v1.4' else 'baseline-jev-l2-real')}
     if a.check:
         original=json.loads((out/'manifest.json').read_text())
         if original!=manifest:
@@ -154,7 +170,10 @@ def main(argv=None):
     for name,v in manifest['runs'].items():
         if 'strict' in v:print(f'{name}: {v["strict"]["correct"]}/{v["strict"]["n"]} strict'+(f'; compatible {v["compatible_correct"]}/{v["strict"]["n"]}' if v['compatible_correct'] is not None else ''))
         else:print(f'{name}: '+', '.join(f'{k}={"PASS" if x["pass"] else "FAIL"} ({x["numerator"]}/{x["n"]})' for k,x in v['component_bars'].items()))
+    for name,bar in manifest['relative_bars'].items():
+        print(name+' relative bar: '+', '.join(f'{key}={"PASS" if bar[key]["pass"] else "FAIL"} ({bar[key]["candidate"]:.4f} vs {bar[key]["baseline"]:.4f})' for key in ('accuracy','macro_f1')))
     if not all(x['pass'] for x in manifest['runs']['pool-v4-trees']['component_bars'].values()):fail('component bars FAIL; report remains at '+str(out/'manifest.json'))
+    if not all(bar[key]['pass'] for bar in manifest['relative_bars'].values() for key in ('accuracy','macro_f1')):fail('approved relative bars FAIL; report remains at '+str(out/'manifest.json'))
     print('Complete evidence at',out/'manifest.json','; production approval is NOT granted')
     return 0
 if __name__=='__main__':
