@@ -39,3 +39,13 @@ def test_default_matrix_is_lean_and_full_flag_extends_it():
     trees=sum(row['slot']=='coverage' for row in b.build_rows(v4))
     assert (n[4],trees,n[4]+trees+185)==(1147,935,2267)
     assert sum(n.values())+trees+185==4687
+
+def test_pool_v4_mixed_slot_truth_filters_intent_only():
+    s=importlib.util.spec_from_file_location('bench',ROOT/'scripts/build-intent-benchmark.py')
+    b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
+    rows=b.build_rows(json.loads((ROOT/'benchmarks/intent-pool-v4.json').read_text()))
+    truth={row['case_id']:json.loads(row['human_verdict'])['intent'] for row in rows if row['slot']=='intent'}
+    assert len(rows)==2082 and len(truth)==1147
+    assert all(row['case_id'] not in truth for row in rows if row['slot']=='coverage')
+    source=(ROOT/'scripts/run-production-regression.py').read_text()
+    assert "for r in rows if r['slot']=='intent'} if not is_real" in source

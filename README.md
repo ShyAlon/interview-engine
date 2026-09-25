@@ -249,7 +249,10 @@ remapped. Research-only v1.5-v1.7 are not accepted by this production gate: thei
 crosswalk before any five-label v1.4 relative comparison. Their separate
 research scorers use the reviewed L3 overlay (183 scored real rows).
 `--check` recomputes the manifest from an existing completed output
-directory without Jev calls. A missing, partial,
+directory without Jev calls. If a run was interrupted, `--resume` validates
+each complete replay leg against exact case IDs, input refs, variant and rubric
+version before reusing it; partial existing legs block rather than rerun or
+overwrite. Resume requires the same clean candidate checkout and input files. A missing, partial,
 mixed, or stale replay blocks the gate. The approved relative bars require
 accuracy and macro-F1 to match or beat current production v1.3 on
 pool-v4 intent and v1.4 on the JEV-L2 real five-label truth. Paired baseline replays are run at the exact candidate

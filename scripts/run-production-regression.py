@@ -10,7 +10,8 @@ Usage: .venv/bin/python scripts/run-production-regression.py \
 
 The candidate commit must be checked out with a clean tree. Modes: --dry-run
 builds all requests but makes no Jev calls; --check only validates existing
-replays in OUT without running Jev. A new full run uses fresh OUT. It covers
+replays in OUT without running Jev. --resume validates complete existing legs
+and runs only missing legs; it never silently accepts a partial existing leg. A new full run uses fresh OUT. It covers
 pool-v4 intent, pool-v4 component-tree coverage, and JEV-L2 real by default
 (2,267 Jev calls). --full-four-pools additionally includes intent pools
 v1-v3 (4,687 calls total), for the one-time pre-flip audit.
@@ -57,7 +58,7 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     for key in ('candidate-commit','intent-variant','tree-variant','real-csv','review-csv','audit-csv','cat-csv','swaps-csv','out'):
         p.add_argument('--'+key,required=True)
-    mode=p.add_mutually_exclusive_group();mode.add_argument('--dry-run',action='store_true');mode.add_argument('--check',action='store_true')
+    mode=p.add_mutually_exclusive_group();mode.add_argument('--dry-run',action='store_true');mode.add_argument('--check',action='store_true');mode.add_argument('--resume',action='store_true',help='validate and reuse only fully complete replay legs in existing OUT')
     p.add_argument('--workers',type=int,default=4)
     p.add_argument('--full-four-pools',action='store_true',help='one-time pre-flip run: add pools v1-v3 to the lean default')
     a=p.parse_args(argv)
@@ -73,7 +74,9 @@ def main(argv=None):
     for name,path in paths.items():
         if not path.is_file():fail(f'missing {name}: {path}')
     out=Path(a.out).expanduser().resolve()
-    if not a.check and out.exists() and any(out.iterdir()):fail('output directory must be fresh/empty: '+str(out))
+    if not (a.check or a.resume) and out.exists() and any(out.iterdir()):fail('output directory must be fresh/empty: '+str(out))
+    if a.resume and not out.is_dir():fail('resume requires existing output: '+str(out))
+    if a.resume and (out/'manifest.json').exists():fail('resume refuses a finalized manifest; use --check: '+str(out))
     if a.check and not out.is_dir():fail('missing existing regression output: '+str(out))
     if a.check and not (out/'manifest.json').is_file():fail('missing completed regression manifest: '+str(out))
     builder=load_script('build-intent-benchmark');replayer=load_script('replay-jev-rubric-variants')
@@ -81,7 +84,7 @@ def main(argv=None):
     for n in ((1,2,3,4) if a.full_four_pools else (4,)):
         src=ROOT/f'benchmarks/intent-pool-v{n}.json';pool=json.loads(src.read_text())
         rows=builder.build_rows(pool);csvpath=out/f'pool-v{n}.csv'
-        if a.check:
+        if a.check or (a.resume and csvpath.exists()):
             if not csvpath.is_file() or csvpath.read_text()!=builder.to_csv(rows):fail('generated benchmark mismatch: '+str(csvpath))
         elif not a.dry_run:
             out.mkdir(parents=True,exist_ok=True);csvpath.write_text(builder.to_csv(rows))
@@ -116,15 +119,21 @@ def main(argv=None):
                 if c['slot']==slot:replayer.build_request(c,variant_obj)
             print(f'DRY {name}: {sum(r["slot"]==slot for r in rows)} requests built')
             continue
-        if not a.check:
-            run('replay-jev-rubric-variants',source,'--intent-variants',variant if slot=='intent' else 'none',
-                '--relevance-variants',variant if slot=='coverage' else 'none','--workers',a.workers,'-o',dest)
-        replay=dest/f'replay-{variant}.jsonl';got=records(replay,rows,variant,slot)
+        replay=dest/f'replay-{variant}.jsonl'
+        if a.resume and dest.exists() and any(dest.iterdir()):
+            if not replay.is_file() or not (dest/'SUMMARY.txt').is_file():fail('partial replay leg: '+str(dest))
+            got=records(replay,rows,variant,slot)
+            print(f'REUSED {name}: {len(got)} validated records')
+        else:
+            if not a.check:
+                run('replay-jev-rubric-variants',source,'--intent-variants',variant if slot=='intent' else 'none',
+                    '--relevance-variants',variant if slot=='coverage' else 'none','--workers',a.workers,'-o',dest)
+            got=records(replay,rows,variant,slot)
         manifest['runs'][name]={'n':len(got),'replay_sha256':sha(replay)}
         if slot=='intent':
             is_real=name.endswith('jev-l2-real')
             is_modern=variant in ('intent-v1.5','intent-v1.6','intent-v1.7')
-            truth=({r['case_id']:json.loads(r['human_verdict'])['intent'] for r in rows} if not is_real
+            truth=({r['case_id']:json.loads(r['human_verdict'])['intent'] for r in rows if r['slot']=='intent'} if not is_real
                    else rtruth if is_modern else legacy_real)
             scored={c:r for c,r in got.items() if c in truth}
             if is_real and len(scored)!=(183 if is_modern else 185):fail('unexpected scored real count')
