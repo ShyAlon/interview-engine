@@ -93,7 +93,8 @@ def test_every_v2_variant_has_its_own_rubric_version_and_ref():
 
 def test_choice_variants_keep_the_canonical_label_sets():
     for v in INTENT_VARIANTS.values():
-        if v.finalize is None and v.id not in ("intent-v1-133", "intent-v1.1", "intent-v1.2"): assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
+        if v.finalize is None and v.id not in ("intent-v1-133", "intent-v1.1", "intent-v1.2", "intent-v1.5"): assert set(v.questions["intent"].criteria) == set(INTENT_LABELS)
+    assert set(INTENT_VARIANTS["intent-v1.5"].questions["intent"].criteria) == {"answer", "proceed", "skip", "enough", "non-answer"}
     for v in RELEVANCE_VARIANTS.values():
         if v.finalize is None: assert set(v.questions["relevance"].criteria) == set(V1_REL)
 

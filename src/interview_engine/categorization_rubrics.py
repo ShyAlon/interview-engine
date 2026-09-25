@@ -115,6 +115,40 @@ _INTENT_V1_4 = {**_INTENT_V1,
 }
 _INTENT_EXAMPLES = dict(INTENT_EXAMPLES)
 
+# Research-only v1.5 taxonomy. Do not modify canonical v1.3 labels: the
+# production graph still acts on distinct defer/delegate and does not yet
+# implement proceed/non-answer. Off-topic responses are non-answer here even
+# when they state true facts about the product.
+_INTENT_V1_5 = {
+    "answer": ("Founder addresses the specific question asked with a product fact, rule, preference or example. "
+               "A short answer that directly settles the choice counts, including 'agnostic' when no other wish is expressed. "
+               "A reply about the product but a different subject is NOT answer."),
+    "proceed": ("Founder addresses the question by saying they cannot or will not choose the detail now, "
+                "lack the expertise, or want the interviewer/builder to decide. Continue without re-asking; "
+                "the builder fills the gap. Examples: 'I don't know which encryption standard'; "
+                "'You choose the framework'; 'That is implementation, just make it accessible'. "
+                "Not proceed: unrelated facts that miss the question; a direct choice; an explicit move-on request."),
+    "skip": ("Founder wants to leave this question or topic and continue the interview. "
+             "Examples: 'Move on'; 'Let's focus on the first release, not five-year growth.' "
+             "Not skip: 'I don't know' about the asked detail without asking to move on; "
+             "ending the whole interview."),
+    "enough": ("Founder ends the whole interview, not just the current topic. "
+               "Use the question's closing context: 'No' in response to 'Anything else to add?' "
+               "means enough. Not enough: 'I think you have enough to move on' about one question."),
+    "non-answer": ("Founder does not address the specific question, and does not make an explicit proceed, skip, "
+                   "or enough move. The reply may be true product information, but about another subject. "
+                   "Example: asked about refund timing, replies only about office decor. Re-ask the question. "
+                   "Not non-answer: 'I don't know' about this question (proceed); a direct but brief choice (answer)."),
+}
+_INTENT_V1_5_INSTRUCTIONS = ("Classify this founder reply against the exact question and its conversational "
+    "closing context. Use exactly one of five labels. Priority: explicit whole-interview end = enough; "
+    "explicit move on from this question = skip; addressed detail handed to the builder or unknown to "
+    "founder = proceed; relevant substantive information = answer; unrelated reply without a control "
+    "move = non-answer. Do not count shared product vocabulary as answering a different question. "
+    "A closing 'No' to 'Anything else?' ends the interview. A topic-only move-on does not.")
+assert tuple(_INTENT_V1_5) == ("answer", "proceed", "skip", "enough", "non-answer")
+
+
 _OFFTOPIC_RULE = (
     " Rule for off-topic or pasted text: if the reply does not engage with the question (generic or canned text, "
     "text about a different topic, or a request unrelated to the question) and contains no explicit control phrase, "
@@ -174,6 +208,9 @@ INTENT_VARIANTS: dict[str, RubricVariant] = {v.id: v for v in (
     RubricVariant("intent-v1.4", INTENT_KEY, "Replay-only until Shy rules: v1.3 plus enough/skip examples (r2 markup, 2026-09-24) to separate 'no more questions at all' (enough) from 'done with this one' (skip).",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1_4), version="categorization-request-v1.4",
                   production_ok=False),
+    RubricVariant("intent-v1.5", INTENT_KEY, "Research only: question-conditioned five-class taxonomy; new proceed and non-answer behavior needs graph wiring before production.",
+                  _intent_choice(_INTENT_V1_5_INSTRUCTIONS, _INTENT_V1_5),
+                  version="categorization-request-v1.5", production_ok=False),
     RubricVariant("intent-v1.2", INTENT_KEY, "Frozen: v1.2, the 6-label text with dismiss (2e03444).",
                   _intent_choice("Classify the founder's control intent", _INTENT_V1_2), version=V1_2_RUBRIC_VERSION),
     RubricVariant("intent-v1.1", INTENT_KEY, "Frozen: the labeled v1 text plus defer (710d6c4).",
