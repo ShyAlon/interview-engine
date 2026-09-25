@@ -164,6 +164,18 @@ intent-v1.6, intent-v1.7, and relevance-trees-v1..v5 are **research only**. The 
 `proceed` and `non-answer` outputs from intent-v1.5/v1.6/v1.7 have no production
 graph behavior yet. Replaying a rubric does not enable it at runtime.
 
+Research result (September 25): intent-v1.6 is the best of the tested
+v1.5-v1.7 research candidates on the reviewed real set (167/183, 91.3%,
+macro-F1 .834); this is **not** a production promotion. Intent-v1.7 is a
+retained failed experiment (153/183, 83.6%, macro-F1 .712; 22 false
+non-answer flags among scored real cases vs 11 in v1.6). Both exclude two
+JEV-L3 boundary rows; v1.7 also missed one of six wrong-area swaps. Keep
+these rubrics and their reports for reproducibility, but stop tuning the
+single-call intent label for non-answer for now. A separate question-specific
+coverage/component experiment, if approved, needs its own reviewed truth and
+re-ask policy. Neither confidence thresholds nor synthetic scores authorize
+an automatic re-ask or a default change.
+
 JEV-L2 is the 195-case real question/reply label set. For the September 25
 run, eight reviewer-marked summaries and two clarification requests were
 split out after export, leaving 185 five-label cases. The original export,
@@ -190,3 +202,43 @@ Research scripts remain under `scripts/` with their original CLI paths so
 past runs can be reproduced. Input datasets under `benchmarks/` are versioned;
 generated runs belong under ignored `runs/` or `out/`. Do not infer
 production readiness from synthetic pass rates or historical variant names.
+
+Before any production default flip, use the full pinned regression runner below.
+
+### Pre-promotion regression gate
+
+Run this on Shy's Mac from a **clean checkout of the exact candidate commit**,
+with working Jev credentials and the preserved real/review inputs. This is
+not a CI smoke test: it makes roughly 4,502 Jev calls for four synthetic
+intent pools (560 + 769 + 1,091 + 1,147), pool-v4 component coverage (935),
+and JEV-L2 real (185). The command refuses to run if HEAD differs from the
+candidate, the worktree is dirty, an input is missing, or the output folder
+contains older results. It does not promote any variant.
+
+```bash
+.venv/bin/python scripts/run-production-regression.py \
+  --candidate-commit "$(git rev-parse HEAD)" \
+  --intent-variant intent-v1.4 --tree-variant relevance-trees-v5 \
+  --real-csv runs/JEV-L2-filtered.csv \
+  --review-csv ~/Downloads/JEV-L3-reviewed.csv \
+  --audit-csv runs/JEV-L3-audit.csv \
+  --cat-csv runs/JEV-L2-cat-probe.csv \
+  --swaps-csv runs/JEV-L3-swaps.csv \
+  --out runs/regression-COMMIT --dry-run
+# Remove --dry-run, use a fresh output directory, and run on Shy's Mac.
+```
+
+The six component-tree bars are checked as actual failures. The runner
+recomputes all four pool CSVs from versioned definitions, validates exact
+replay IDs, source input hashes, variant IDs and `ok` status, scores every
+pool and the reviewed real set, and writes `manifest.json` with the commit,
+source/replay hashes and metrics. The reviewed JEV-L3 boundary cases are
+excluded from real scoring. `--check` recomputes the manifest from an
+existing completed output directory without Jev calls. A missing, partial,
+mixed, or stale replay blocks the gate. A green technical run still is not a
+production decision: no numerical approval bars have been set for the four
+intent pools or JEV-L2 real set, and real non-answer precision/re-ask risk
+needs review. Existing trees bars apply to pool-v4 only. Pool-v3/v4 are
+marked DRAFT; their provenance and Shy's approval must be settled before a
+production promotion. Both the intent and tree candidates are opt-in here;
+the script does not turn them on at runtime.
