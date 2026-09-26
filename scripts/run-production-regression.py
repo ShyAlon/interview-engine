@@ -10,8 +10,11 @@ Usage: .venv/bin/python scripts/run-production-regression.py \
 
 The candidate commit must be checked out with a clean tree. Modes: --dry-run
 builds all requests but makes no Jev calls; --check only validates existing
-replays in OUT without running Jev. --resume validates complete existing legs
-and runs only missing legs; it never silently accepts a partial existing leg. A new full run uses fresh OUT. It covers
+replays in OUT without running Jev. --resume prints a per-leg REUSE/SPEND plan
+first and validates every reusable leg (summary and records) BEFORE any Jev
+call; it never silently accepts a partial existing leg, and it refuses to
+spend on missing legs unless --allow-spend is passed - a wrong OUT directory
+must never turn a re-score into an unnoticed re-spend. A new full run uses fresh OUT. It covers
 pool-v4 intent, pool-v4 component-tree coverage, and JEV-L2 real by default
 (2,267 Jev calls). --full-four-pools additionally includes intent pools
 v1-v3 (4,687 calls total), for the one-time pre-flip audit.
@@ -59,11 +62,31 @@ def records(path,cases,variant,slot):
     if set(seen)!=set(expected):fail(f'ID mismatch for {path}: {len(set(expected)-set(seen))} missing, {len(set(seen)-set(expected))} extra')
     return seen
 
+def validated_replay(dest,rows,variant,slot):
+    '''Full reuse checks for one leg: replay file, single-line clean SUMMARY, validated records.'''
+    dest=Path(dest);replay=dest/f'replay-{variant}.jsonl'
+    if not replay.is_file() or not (dest/'SUMMARY.txt').is_file():fail('partial replay leg: '+str(dest))
+    summary=(dest/'SUMMARY.txt').read_text()
+    if len(summary.splitlines())!=1 or 'errors=0' not in summary or f'n={sum(r["slot"]==slot for r in rows):3d}' not in summary:
+        fail('replay summary missing or mismatched: '+str(dest))
+    return records(replay,rows,variant,slot)
+
+def resume_plan(jobs,out):
+    '''Classify --resume legs. Every reusable leg is fully validated here, before any Jev spend.'''
+    reusable,spend=[],[]
+    for name,source,rows,slot,variant in jobs:
+        dest=Path(out)/name;n=sum(r['slot']==slot for r in rows)
+        if dest.exists() and any(dest.iterdir()):
+            validated_replay(dest,rows,variant,slot);reusable.append((name,n))
+        else:spend.append((name,n))
+    return reusable,spend
+
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     for key in ('candidate-commit','intent-variant','tree-variant','real-csv','review-csv','audit-csv','cat-csv','swaps-csv','out'):
         p.add_argument('--'+key,required=True)
     mode=p.add_mutually_exclusive_group();mode.add_argument('--dry-run',action='store_true');mode.add_argument('--check',action='store_true');mode.add_argument('--resume',action='store_true',help='validate and reuse only fully complete replay legs in existing OUT')
+    p.add_argument('--allow-spend',action='store_true',help='with --resume: permit Jev calls for legs that are not fully reusable (plan prints the cost first)')
     p.add_argument('--workers',type=int,default=4)
     p.add_argument('--full-four-pools',action='store_true',help='one-time pre-flip run: add pools v1-v3 to the lean default')
     a=p.parse_args(argv)
@@ -114,6 +137,14 @@ def main(argv=None):
     # itself be the baseline; the existing replay is then reused, not rerun.
     if a.intent_variant!='intent-v1':jobs.append(('baseline-pool-v4-intent',pool_meta[4][2],pool_meta[4][1],'intent','intent-v1'))
     if a.intent_variant!='intent-v1.4':jobs.append(('baseline-jev-l2-real',paths['real-csv'],real,'intent','intent-v1.4'))
+    if a.resume:
+        reusable,spend=resume_plan(jobs,out)
+        for name,n in reusable:print(f'plan: {name}: REUSE ({n} validated records)',flush=True)
+        for name,n in spend:print(f'plan: {name}: SPEND {n} Jev calls',flush=True)
+        if spend and not a.allow_spend:
+            hint='' if reusable else ' No complete legs found - check that OUT is the directory the leg subdirectories were copied into.'
+            fail('--resume would spend {} Jev calls ({}). Pass --allow-spend to proceed.{}'.format(
+                sum(n for _,n in spend),', '.join(f'{name}={n}' for name,n in spend),hint))
     for idx,(name,source,rows,slot,variant) in enumerate(jobs,1):
         dest=out/name
         started=time.monotonic()
@@ -128,11 +159,7 @@ def main(argv=None):
             continue
         replay=dest/f'replay-{variant}.jsonl'
         if a.resume and dest.exists() and any(dest.iterdir()):
-            if not replay.is_file() or not (dest/'SUMMARY.txt').is_file():fail('partial replay leg: '+str(dest))
-            summary=(dest/'SUMMARY.txt').read_text()
-            if len(summary.splitlines())!=1 or f'errors=0' not in summary or f'n={sum(r["slot"]==slot for r in rows):3d}' not in summary:
-                fail('replay summary missing or mismatched: '+str(dest))
-            got=records(replay,rows,variant,slot)
+            got=validated_replay(dest,rows,variant,slot)
             progress(idx,len(jobs),name,'reused',f'{len(got)} validated records')
         else:
             if not a.check:

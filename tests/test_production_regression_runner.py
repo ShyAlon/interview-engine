@@ -49,3 +49,34 @@ def test_pool_v4_mixed_slot_truth_filters_intent_only():
     assert all(row['case_id'] not in truth for row in rows if row['slot']=='coverage')
     source=(ROOT/'scripts/run-production-regression.py').read_text()
     assert "for r in rows if r['slot']=='intent'} if not is_real" in source
+
+def _write_leg(dest, rows, variant, slot):
+    dest.mkdir(parents=True,exist_ok=True)
+    def record(cid):
+        return {'slot':slot,'input_ref':dict((r['case_id'],r['input_ref']) for r in rows)[cid],
+                'input':{'rubric_version':r.INTENT_VARIANTS[variant].rubric_version},
+                'replay':{'case_id':cid,'variant_id':variant,'repeat':1},'jev':{'status':'ok'}}
+    ids=[row['case_id'] for row in rows if row['slot']==slot]
+    (dest/f'replay-{variant}.jsonl').write_text(''.join(json.dumps(record(cid))+'\n' for cid in ids))
+    (dest/'SUMMARY.txt').write_text(f'{variant:28s} r1  n={len(ids):3d}  errors=0  tokens=0  latency=0.0s  labels={{}}\n')
+
+def test_resume_plan_reuses_validated_legs_and_lists_spend(tmp_path):
+    rows=[{'case_id':'c1','slot':'intent','input_ref':'sha256:abc'},
+          {'case_id':'c2','slot':'intent','input_ref':'sha256:def'}]
+    jobs=[('leg-done','src',rows,'intent','intent-v1.4'),('leg-missing','src',rows,'intent','intent-v1.4')]
+    _write_leg(tmp_path/'leg-done',rows,'intent-v1.4','intent')
+    reusable,spend=r.resume_plan(jobs,tmp_path)
+    assert reusable==[('leg-done',2)] and spend==[('leg-missing',2)]
+    # a partial existing leg (replay without SUMMARY) blocks before any spend
+    (tmp_path/'leg-missing').mkdir();(tmp_path/'leg-missing'/'replay-intent-v1.4.jsonl').write_text('')
+    with pytest.raises(ValueError,match='partial replay leg'):r.resume_plan(jobs,tmp_path)
+    # a stale SUMMARY (wrong n) also blocks
+    _write_leg(tmp_path/'leg-missing',rows,'intent-v1.4','intent')
+    (tmp_path/'leg-missing'/'SUMMARY.txt').write_text('intent-v1.4 r1  n=999  errors=0\n')
+    with pytest.raises(ValueError,match='summary missing or mismatched'):r.resume_plan(jobs,tmp_path)
+
+def test_resume_spend_requires_allow_spend_flag():
+    source=(ROOT/'scripts/run-production-regression.py').read_text()
+    assert "'--allow-spend'" in source
+    assert 'resume_plan(jobs,out)' in source
+    assert 'if spend and not a.allow_spend:' in source

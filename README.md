@@ -258,10 +258,17 @@ remapped. Research-only v1.5-v1.7 are not accepted by this production gate: thei
 crosswalk before any five-label v1.4 relative comparison. Their separate
 research scorers use the reviewed L3 overlay (183 scored real rows).
 `--check` recomputes the manifest from an existing completed output
-directory without Jev calls. If a run was interrupted, `--resume` validates
-each complete replay leg against exact case IDs, input refs, variant and rubric
-version before reusing it; partial existing legs block rather than rerun or
-overwrite. Resume requires the same clean candidate checkout and input files.
+directory without Jev calls. If a run was interrupted, `--resume` first prints
+a per-leg REUSE/SPEND plan and validates every complete replay leg against
+exact case IDs, input refs, variant and rubric version BEFORE any Jev call;
+partial existing legs block rather than rerun or overwrite, and legs that
+would be re-run (Jev spend) block unless `--allow-spend` is passed - a wrong
+`--out` directory must never turn a re-score into an unnoticed re-spend.
+Resume requires the same clean candidate checkout and input files. When a
+replay leg itself dies mid-flight (for example on a transient provider 5xx),
+`scripts/replay-jev-rubric-variants.py --resume-partial` completes that leg's
+partial file, calling only the missing cases; the replay script also retries a
+failing case twice (15s, 45s) before counting it as an error.
 The runner now logs numbered, timestamped leg starts and completions, and
 prints completed-case progress every 100 replay rows (plus the last row).
 When an ordered result is slow, it prints a waiting heartbeat every 30 seconds,
