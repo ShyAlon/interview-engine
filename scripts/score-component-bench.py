@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / "src"))
-from interview_engine.component_trees import effective_fills, parse  # noqa: E402
+from interview_engine.component_trees import effective_fills, label_from_answers, parse  # noqa: E402
 
 GATES = [  # (id, text, bar)
     ("dodged_recall", "Derived dodged recall", .90),
@@ -48,7 +48,10 @@ def score(rows, recs):
         row = rows[cid]; hv = json.loads(row["human_verdict"]); ctx = json.loads(row["input_context"])
         v = rec["jev"]["verdict"]; models[f"{rec['jev'].get('provider')}/{rec['jev'].get('model')}"] += 1
         filled, skipped, mentioned = effective_fills(ctx["target"], v)  # after the asked-area gate, when present
-        pred = str(v.get("relevance")); truth = hv["relevance"]
+        # The derivation rule owns the label: re-derive from the stored component
+        # answers so replays stay valid evidence across rule changes (2026-09-26).
+        pred = label_from_answers(ctx["target"], v, open_components=ctx.get("open"), personas=ctx.get("personas"))
+        truth = hv["relevance"]
         if ctx.get("open"):  # follow-up question: no bar
             extra["followup_n"] += 1; extra["followup_ok"] += pred == truth; continue
         area = ctx["target"]; comps = hv["components"]

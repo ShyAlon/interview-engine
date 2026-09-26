@@ -451,11 +451,10 @@ def _trees_build(context: Mapping[str, object]) -> dict[str, "Question"]:
 
 
 def finalize_trees(answers: Mapping[str, ClassificationAnswer], context: Mapping[str, object]) -> dict[str, ClassificationAnswer]:
-    from .component_trees import DEFAULT_PERSONAS, derive_relevance, parse
+    from .component_trees import DEFAULT_PERSONAS, label_from_answers
     area = str(context.get("target") or "")
-    personas = list(context.get("personas") or DEFAULT_PERSONAS)
-    filled, skipped, _ = parse({k: a.value for k, a in answers.items()})
-    label = derive_relevance(area, filled, skipped, open_components=context.get("open") or None, personas=personas)
+    label = label_from_answers(area, {k: a.value for k, a in answers.items()}, open_components=context.get("open") or None,
+                               personas=list(context.get("personas") or DEFAULT_PERSONAS))
     out = dict(answers)
     out[RELEVANCE_KEY] = ClassificationAnswer(label, None, {})
     return out
@@ -506,11 +505,10 @@ def _trees_v2_build(context: Mapping[str, object]) -> dict[str, "Question"]:
 
 
 def finalize_trees_v2(answers: Mapping[str, ClassificationAnswer], context: Mapping[str, object]) -> dict[str, ClassificationAnswer]:
-    from .component_trees import DEFAULT_PERSONAS, derive_relevance, effective_fills
+    from .component_trees import DEFAULT_PERSONAS, label_from_answers
     area = str(context.get("target") or "")
-    filled, skipped, _ = effective_fills(area, {k: a.value for k, a in answers.items()})
-    label = derive_relevance(area, filled, skipped, open_components=context.get("open") or None,
-                             personas=list(context.get("personas") or DEFAULT_PERSONAS))
+    label = label_from_answers(area, {k: a.value for k, a in answers.items()}, open_components=context.get("open") or None,
+                               personas=list(context.get("personas") or DEFAULT_PERSONAS))
     out = dict(answers)
     out[RELEVANCE_KEY] = ClassificationAnswer(label, None, {})
     return out

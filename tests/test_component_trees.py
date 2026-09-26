@@ -34,7 +34,11 @@ def test_derive_relevance():
     assert d("goal", {"goal.problem"}) == "partial"
     assert d("goal", {"goal.problem", "goal.who"}) == "addressed"
     assert d("goal", {"users.personas"}) == "dodged"  # cross-area never fills
-    assert d("risks", set()) == "dodged" and d("risks", {"risks.notice"}) == "addressed"  # all-optional: never partial
+    assert d("risks", set()) == "dodged"  # off-topic: nothing closed, not mentioned
+    assert d("risks", {"risks.notice"}) == "partial"  # one-component answer is thin (Shy 2026-09-26)
+    assert d("risks", {"risks.notice", "risks.assumption"}) == "addressed"
+    assert d("risks", set(), mentioned=["risks"]) == "partial"  # on-topic but no fill: partial, not dodged
+    assert d("goal", set(), mentioned=["users"]) == "dodged"  # mentioned only another area
     assert d("scalability", set(), {"scalability"}) == "addressed"  # area skip closes the subtree
     perf = {"performance.client.moment", "performance.client.number", "performance.groomer.moment", "performance.groomer.number"}
     assert d("performance", perf) == "partial"
@@ -85,8 +89,12 @@ def test_pool_v4_truth(bench):
     assert len(cov) == 935  # pinned Jev call count for relevance-trees-v1
     t = {r["review_notes"].split(" | ")[0]: json.loads(r["human_verdict"])["relevance"] for r in cov}
     assert t["ANS-01 x Q-goal"] == "addressed" and t["ANS-P4 x Q-goal"] == "partial"
-    assert t["ANS-PERF-P x Q-performance"] == "dodged" and t["ANS-SCALE-P x Q-scalability"] == "dodged"
-    assert t["ANS-08 x Q-constraints"] == "addressed" and t["ANS-P8 x Q-risks"] == "addressed"
+    # Shy's 2026-09-26 ruling on the 12 recomputed cells: thin on-topic replies are partial
+    assert t["ANS-PERF-P x Q-performance"] == "partial" and t["ANS-SCALE-P x Q-scalability"] == "partial"
+    assert t["ANS-SEC-P x Q-security"] == "partial"
+    assert t["ANS-P5 x Q-data"] == "partial" and t["MIX-03 x Q-constraints"] == "partial"
+    assert t["ANS-05 x Q-integrations"] == "partial" and t["ANS-SEC x Q-security"] == "partial"
+    assert t["ANS-08 x Q-constraints"] == "addressed" and t["ANS-P8 x Q-risks"] == "partial"
     assert t["NA-03 x Q-scalability"] == "addressed" and t["NA-01 x Q-performance"] == "partial"
     assert t["ANS-02 x Q-performance"] == "dodged"
     assert t["ANS-REL x F-reliability.per_year"] == "dodged" and t["ANS-SCALE x F-scalability.volume"] == "addressed"
@@ -101,6 +109,10 @@ def test_perfect_replay_passes_every_gate(bench, tmp_path):
         hv = json.loads(r["human_verdict"]); ctx = json.loads(r["input_context"])
         v = {f"comp__{c.replace('.', '__')}": float(t) for c, t in hv["components"].items()}
         for n in ct.na_nodes(ctx["target"], ctx["personas"]): v[f"na__{n.replace('.', '__')}"] = float(n in hv["skipped"])
+        # perfect model also answers the asked-area gate perfectly: on-topic iff
+        # mentioned, filled or skipped - thin on-topic replies derive partial (2026-09-26)
+        v[f"about__{ctx['target']}"] = float(ctx["target"] in hv.get("mentioned", [])
+                                             or any(hv["components"].values()) or bool(hv["skipped"]))
         v["relevance"] = hv["relevance"]
         recs.append({"slot": "coverage", "replay": {"case_id": r["case_id"]},
                      "jev": {"status": "ok", "provider": "fake", "model": "perfect", "verdict": v}})
@@ -124,6 +136,8 @@ def test_trees_v2_gate_and_wording():
     assert v.apply(ans, ctx)["relevance"].value == "dodged"  # gate closed: the name-drop does not count
     ans["about__users"] = ClassificationAnswer(0.9)
     assert v.apply(ans, ctx)["relevance"].value == "partial"
+    ans["comp__users__personas"] = ClassificationAnswer(0.0)  # gate says on-topic, nothing filled
+    assert v.apply(ans, ctx)["relevance"].value == "partial"  # thin on-topic reply: partial + clarification probe (Shy 2026-09-26), not dodged
     f, _, _ = ct.effective_fills("users", {"comp__users__personas": 1.0})  # no gate key (v1) = plain parse
     assert f == {"users.personas"}
 

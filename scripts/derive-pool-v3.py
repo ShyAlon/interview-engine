@@ -58,7 +58,7 @@ def derive(v2: dict) -> dict:
     ids = {r["id"] for r in pool["responses"]}
     pool["responses"].extend(p for p in PROTOTYPES if p["id"] not in ids)
     pool["coverage_taxonomy"] = "coverage-v2"
-    pool["status"] = "pool-v3 DRAFT (derived from pool-v2 + nfrs-split delta). Queued behind bench-2."
+    pool["status"] = "pool-v3 FINAL (derived from pool-v2 + nfrs-split delta). Derived truth approved by Shy 2026-09-26."
     pool["history"] = list(pool.get("history", [])) + ["2026-09-24: v3 - nfrs split into performance, reliability, security, scalability (usability shelved). 8 prototypes, ANS-06/ANS-P3 re-mapped; Shy's pool-v3 markup."]
     return pool
 

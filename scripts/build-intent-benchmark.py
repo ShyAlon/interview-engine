@@ -58,7 +58,7 @@ def component_truth(pool, resp, q):
     deleg = set(resp.get("delegated", {}).get(area, []))
     skipped = [n for n in resp.get("skipped", []) if n == area or n.startswith(area + ".")]
     open_ = [q["targets"]] if q.get("targets") else None
-    rel = derive_relevance(area, filled, skipped, deleg, open_components=open_, personas=personas)
+    rel = derive_relevance(area, filled, skipped, deleg, open_components=open_, mentioned=resp.get("areas", []), personas=personas)
     return ({"relevance": rel, "components": {c: c in filled for c in component_ids(area, personas)},
              "delegated": sorted(deleg), "skipped": skipped, "mentioned": list(resp.get("areas", []))},
             {"target": area, "personas": personas, **({"open": open_} if open_ else {})})

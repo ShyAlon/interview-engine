@@ -8,7 +8,8 @@ own area(s) (component_trees, TREES_VERSION), plus four founder-skip rows
 (NA-01..04) and ten follow-up questions. Labels: agent draft 2026-09-24, Shy's
 markup applied (tree becomes truth; risks and constraints all-optional;
 flows.exceptions, data.source, integrations.pricing, security.signin,
-security.sensitive optional; "fast"/"small" stay dodged; keep all NA rows).
+security.sensitive optional; plain-word "fast"/"small" replies are partial
+with one clarification probe (2026-09-26); keep all NA rows).
 Pure function of the input pool.
 """
 from __future__ import annotations
@@ -52,7 +53,8 @@ FILLED = {
     "ANS-SEC": {"security": ["client.see", "groomer.see", f"{D}.change", "sensitive"]},
     "ANS-SEC-P": {"security": ["sensitive"]},
     "ANS-SCALE": {"scalability": ["users_n", "volume", "peak"]},
-    # ANS-P3, ANS-C2, ANS-PERF-P, ANS-SCALE-P: fill nothing ("fast"/"small" stay dodged, Shy 2026-09-24)
+    # ANS-P3, ANS-C2, ANS-PERF-P, ANS-SCALE-P: fill nothing (plain-word replies score partial
+    # with one clarification probe, Shy 2026-09-26; ANS-P3/C2 are off-topic and stay dodged)
 }
 DELEGATED = {"MIX-02": {"integrations": ["systems"]}}
 NA_ROWS = [
@@ -72,7 +74,7 @@ def _full(area, short):
 
 def derive(pool3):
     pool = copy.deepcopy(pool3)
-    pool["status"] = "pool-v4 DRAFT: component truth (agent draft + Shy's markup, 2026-09-24). For Shy's edit."
+    pool["status"] = "pool-v4 FINAL: component truth (agent draft + Shy's markup 2026-09-24; derivation rule and 12 recomputed cells approved 2026-09-26)."
     pool["component_trees"] = TREES_VERSION
     pool["personas"] = list(DEFAULT_PERSONAS)
     pool["history"] = pool.get("history", []) + ["2026-09-24: v4 - component truth per response (trees), NA-01..04 founder-skip rows, ten follow-up questions."]

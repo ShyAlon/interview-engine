@@ -1,5 +1,5 @@
 {
-  "status": "pool-v3 DRAFT (derived from pool-v2 + nfrs-split delta). Queued behind bench-2.",
+  "status": "pool-v3 FINAL (derived from pool-v2 + nfrs-split delta). Derived truth approved by Shy 2026-09-26.",
   "product": "Fictional product for the whole pool: a booking app for a small dog-grooming salon (two groomers, one front-desk person, about 60 regular clients). One product keeps answers coherent across questions. A second product can be added later to check that nothing depends on this one.",
   "taxonomy": "categorization-request-v1.3",
   "questions": [

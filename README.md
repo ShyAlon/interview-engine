@@ -164,6 +164,15 @@ intent-v1.6, intent-v1.7, and relevance-trees-v1..v5 are **research only**. The 
 `proceed` and `non-answer` outputs from intent-v1.5/v1.6/v1.7 have no production
 graph behavior yet. Replaying a rubric does not enable it at runtime.
 
+Research result (September 26): the pool-v4 derived truth changed on six
+cells under Shy's ruling above (ANS-P5/P8/MIX-03 addressed->partial;
+ANS-SEC-P/PERF-P/SCALE-P dodged->partial; nothing else moves). Re-scoring
+the frozen trees-v5 replay under the new rule: partials 24/24 and addressed
+13/13 pass; dodged recall drops to 422/508 (0.831, bar .90) because the
+asked-area gate's false-yes rows now derive partial instead of dodged, and
+wrong-question stays at 151/169 (0.893, bar .90). Gate calibration is the
+next trees variant's work; production defaults are unchanged.
+
 Research result (September 25): intent-v1.6 is the best of the tested
 v1.5-v1.7 research candidates on the reviewed real set (167/183, 91.3%,
 macro-F1 .834); this is **not** a production promotion. Intent-v1.7 is a
@@ -264,7 +273,13 @@ pool-v4 intent and v1.4 on the JEV-L2 real five-label truth. Paired baseline rep
 commit, with the same IDs and truth. For intent-v1.4, the real bar is a
 self-baseline check; its absolute quality and any re-ask risk still need
 review. A passing gate is necessary evidence, **not** production approval. Existing
-trees bars apply to pool-v4 only. Pool-v3/v4 are marked DRAFT; their
-provenance and Shy's approval must be settled before a production promotion.
+trees bars apply to pool-v4 only. Pool-v3/v4 are FINAL: Shy approved the
+derived truth on 2026-09-26 after ruling on the 12 recomputed relevance
+cells (thin on-topic replies are partial - the clarification mechanism
+follows up; a one-component answer never auto-derives addressed; dodged is
+only for truly off-topic replies). Truth and replay labels both derive from
+`component_trees.derive_relevance`; the scorer re-derives a replay's labels
+from its stored component answers, so replays stay valid evidence across
+rule changes.
 Both the intent and tree candidates are opt-in here;
 the script does not turn them on at runtime.

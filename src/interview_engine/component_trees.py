@@ -2,11 +2,16 @@
 
 One comprehensive, fixed superset tree per area of the 14-area v2 split
 (coverage_taxonomy.AREAS_V2). Jev answers one yes/no statement per component
-of the ASKED area in the same single coverage call; code derives relevance:
-  none of the open required components filled = dodged, some = partial,
-  all = addressed.
-All-optional areas (risks, constraints): any component filled = addressed,
-none = dodged, never partial.
+of the ASKED area in the same single coverage call; code derives relevance
+(Shy 2026-09-26): partial is the working state whenever the reply is on-topic
+but thin - the interviewer asks a clarifying follow-up instead.
+  dodged    = the reply has nothing to do with the asked area (no component
+              filled, delegated or skip-closed, and the area not mentioned).
+  addressed = every open required component closed AND at least two components
+              closed in total (a one-component answer is thin -> partial).
+  partial   = anything else on-topic.
+Follow-up questions (one open target) stay binary: target closed = addressed,
+else dodged - the follow-up IS the clarification probe.
 
 Skipping (not applicable) is founder-only and hierarchical: a founder can rule
 out a whole area, a persona's branch in an area, or one component. Skipping a
@@ -204,20 +209,28 @@ def closed_by_skip(cid: str, skipped: Iterable[str]) -> bool:
 
 
 def derive_relevance(area: str, filled: Iterable[str], skipped: Iterable[str] = (), delegated: Iterable[str] = (),
-                     open_components: Iterable[str] | None = None, personas: Iterable[str] = DEFAULT_PERSONAS) -> str:
+                     open_components: Iterable[str] | None = None, mentioned: Iterable[str] | None = None,
+                     personas: Iterable[str] = DEFAULT_PERSONAS) -> str:
     """Relevance of ONE reply to a question on ``area``. Only this reply's fills count.
 
     open_components: required components still open when the question was asked
-    (default: all of them). A follow-up question passes just its target.
+    (default: all of them). A follow-up question passes just its target and
+    stays binary (the follow-up IS the clarification probe, Shy 2026-09-26).
+    ``mentioned``: the reply's own areas; an on-topic reply with no fill is
+    partial, not dodged.
     """
-    filled = {c for c in filled if c.startswith(area + ".")}; skipped = set(skipped); delegated = set(delegated)
-    if area in ALL_OPTIONAL_AREAS:
-        return "addressed" if filled or area in skipped or any(d.startswith(area + ".") for d in delegated) else "dodged"
+    filled = {c for c in filled if c.startswith(area + ".")}; skipped = set(skipped)
+    delegated = {d for d in delegated if d.startswith(area + ".")}
+    closed = {c for c in component_ids(area, personas)
+              if c in filled or c in delegated or closed_by_skip(c, skipped)}
     req = component_ids(area, personas, required_only=True)
     open_ = req if open_components is None else list(open_components)
-    hit = [c for c in open_ if c in filled or c in delegated or closed_by_skip(c, skipped)]
-    if not hit: return "dodged"
-    return "addressed" if len(hit) == len(open_) else "partial"
+    hit = [c for c in open_ if c in closed]
+    if open_components is not None:  # follow-up: binary
+        return "addressed" if len(hit) == len(open_) else "dodged"
+    if not closed and (mentioned is None or area not in mentioned):
+        return "dodged"
+    return "addressed" if len(hit) == len(open_) and len(closed) >= 2 else "partial"
 
 
 def review_list(area_state: Mapping[str, Mapping[str, object]], personas: Iterable[str] = DEFAULT_PERSONAS) -> list[str]:
@@ -236,9 +249,10 @@ def review_list(area_state: Mapping[str, Mapping[str, object]], personas: Iterab
     return lines
 
 
-# Interview design (Shy 2026-09-24, for step 5 wiring - NOT WIRED): a reply that
-# only uses a plain speed or size word ("fast", "small") stays DODGED in the
-# labels, but the interviewer asks ONE clarifying follow-up, then moves on.
+# Interview design (Shy 2026-09-24, refined 2026-09-26, for step 5 wiring - NOT
+# WIRED): a reply that only uses a plain speed or size word ("fast", "small") is
+# on-topic but thin, so it scores PARTIAL, and the interviewer asks ONE
+# clarifying follow-up, then moves on.
 PLAIN_WORD_PROBES = {
     "performance": "How fast, roughly - a second? A minute?",
     "scalability": "How small, roughly - tens of clients? Hundreds?",
@@ -504,3 +518,24 @@ def effective_fills(area: str, answers: Mapping[str, object]) -> tuple[set[str],
         except (TypeError, ValueError): open_ = str(gate).lower() in ("yes", "true")
         if not open_: filled = {c for c in filled if not c.startswith(area + ".")}
     return filled, skipped, mentioned
+
+
+def label_from_answers(area: str, answers: Mapping[str, object], open_components: Iterable[str] | None = None,
+                       personas: Iterable[str] = DEFAULT_PERSONAS) -> str:
+    """Relevance label for one coverage call, derived from its answers.
+
+    The asked-area gate (about__<area>) is the on-topic signal: when it says the
+    reply is about the asked area, a thin reply with no fills is PARTIAL - the
+    interviewer asks a clarifying follow-up - not dodged (Shy 2026-09-26).
+    Without a gate key (trees-v1) fills alone decide.
+    """
+    filled, skipped, _ = effective_fills(area, answers)
+    gate = answers.get(f"about__{area}")
+    if gate is None:
+        mentioned = None
+    else:
+        try: on_topic = float(gate) >= THRESHOLD
+        except (TypeError, ValueError): on_topic = str(gate).lower() in ("yes", "true")
+        mentioned = [area] if on_topic else []
+    return derive_relevance(area, filled, skipped, open_components=open_components,
+                            mentioned=mentioned, personas=personas)
