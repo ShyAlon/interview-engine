@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib,json,os,time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import asdict,is_dataclass
 from datetime import datetime,timezone
 from pathlib import Path
@@ -81,8 +82,13 @@ class ShadowCategorizer:
             t=time.monotonic()
             try:return fn(request),time.monotonic()-t,None
             except Exception as e:return None,time.monotonic()-t,e
+        # Each worker needs its own copy: the session's pinned model map and
+        # request diagnostics live in ContextVars, not process-wide globals.
+        # Reusing one Context concurrently would raise RuntimeError.
+        base_context, jev_context = copy_context(), copy_context()
         with ThreadPoolExecutor(max_workers=2,thread_name_prefix="categorization-shadow") as pool:
-            base_f=pool.submit(call,self.baseline.classify);jev_f=pool.submit(call,self.jev.classify)
+            base_f=pool.submit(base_context.run,call,self.baseline.classify)
+            jev_f=pool.submit(jev_context.run,call,self.jev.classify)
             base,base_s,base_err=base_f.result();shadow,shadow_s,shadow_err=jev_f.result()
         usage=None
         if self.usage_log:

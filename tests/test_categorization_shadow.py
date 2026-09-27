@@ -72,3 +72,23 @@ def test_adjudication_sample_includes_all_disagreements_and_stratifies_agreement
              row('h3',True,'answer',.99),row('l1',True,'skip',.2)]
     refs={r['input_ref'] for r in adjudication_sample(records,2)}
     assert refs=={'d','h1','h2','l1'}
+
+
+def test_shadow_workers_keep_session_model_route_not_env_fallback(tmp_path,monkeypatch):
+    from interview_engine import model_config,session_models
+    # A local override may be present, but the session map must still win in
+    # the executor worker, including when the usage recorder asks for the route.
+    monkeypatch.setenv('INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK','ollama:phi4')
+    observed=[]
+    class CheckingCat(Cat):
+        def classify(self,request):
+            selected=model_config.for_stage('scope_tiebreak')
+            observed.append((selected.provider,selected.model))
+            return self.result
+    pinned=session_models.resolve('deepseek')
+    with session_models.use(pinned):
+        out=ShadowCategorizer(CheckingCat(result('llm','accepted')),
+                              CheckingCat(result('typesafe','accepted')),
+                              tmp_path/'pinned.jsonl').classify(req())
+    assert out.provider=='llm'
+    assert observed==[('deepseek','deepseek-flash')]*2
