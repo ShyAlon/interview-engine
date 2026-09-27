@@ -24,6 +24,7 @@ import re as _re
 import sys
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 _DOTENV: dict[str, str] | None = None
@@ -140,10 +141,12 @@ def _guard_limits() -> tuple[int, int, int]:
             _num("VMODEL_LLM_MAX_CALLS", _MAX_CALLS))
 
 
+_session_llm_log: ContextVar[str | None] = ContextVar("session_llm_log", default=None)
+
 def _llm_log_sink() -> str | None:
     """VMODEL_LLM_LOG: unset = off (default, zero cost); 'stderr' = console;
     any other value = a file path, one JSON object per line."""
-    return _env("VMODEL_LLM_LOG")
+    return _session_llm_log.get() or _env("VMODEL_LLM_LOG")
 
 
 def _mask_secrets(value: str) -> str:
@@ -270,9 +273,9 @@ def _provider_error_detail(exc) -> dict:
     if isinstance(err, dict):
         for k in ("type", "code", "param", "message"):
             if err.get(k) is not None:
-                out[k] = _mask_secrets(str(err[k]))[:600]
+                out[k] = _mask_secrets(str(err[k]))
     if "message" not in out:
-        out["message"] = _mask_secrets(str(exc))[:600]
+        out["message"] = _mask_secrets(str(exc))
     return out
 
 
@@ -331,9 +334,11 @@ def _run_with_deadline(fn, timeout_s: int, stage: str):
     build_chat_model) - the socket dies, the thread unwinds, and the caller
     gets an informative error instead of a hang."""
     import concurrent.futures
+    import contextvars
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(fn)
+    context = contextvars.copy_context()
+    future = pool.submit(context.run, fn)
     try:
         return future.result(timeout=timeout_s)
     except concurrent.futures.TimeoutError:
@@ -400,6 +405,10 @@ def for_stage(stage: str) -> StageModel:
     if stage not in _STAGE_DEFAULTS:
         raise KeyError(f"unknown stage {stage!r}; add it explicitly - silent fallback models are how budgets leak")
     cfg = _STAGE_DEFAULTS[stage]
+    from .session_models import selected
+    pinned = selected(stage)
+    if pinned:
+        return StageModel(*pinned, temperature=cfg.temperature, max_tokens=cfg.max_tokens)
     # Concept of Operations is part of interview understanding, not its own
     # model tier. It MUST follow the shared distillation route. The first live
     # run exposed why: all configured stages used phi4, while a new CONOPS key

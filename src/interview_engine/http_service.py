@@ -57,14 +57,27 @@ class SessionRegistry:
         with self._lock:
             session=EngineSession(session_id=str(uuid4()),task_id=request.task_id,sequence=1,
                 status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
-            self._sessions[session.session_id]=session
+            # Reject unavailable routes before recording a session or paying for a call.
+            if self._program_factory is default_program_factory:
+                from . import session_models
+                try:session_models.validate(session_models.resolve(request.model_route))
+                except UserFacingError:
+                    log.warning("model.route.preflight.reject task=%s route=%s",request.task_id,request.model_route,exc_info=True)
+                    raise
+                log.info("model.route.preflight.accept task=%s route=%s",request.task_id,request.model_route)
             started=self._event(session,EventType.RUN_STARTED)
-            if self._program_factory is not None:
-                session.program=self._program_factory(session.session_id,request)
-                pending=session.program.advance()
-                if pending is not None:
-                    session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+            try:
+                if self._program_factory is not None:
+                    session.program=self._program_factory(session.session_id,request)
+                    log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
+                    pending=session.program.advance()
+                    if pending is not None:
+                        session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+            except Exception:
+                log.exception("model.route.start.failed session=%s task=%s selected=%s",session.session_id,request.task_id,request.model_route)
+                raise
             self._save(session)
+            self._sessions[session.session_id]=session
             return session,started
 
     def get(self, session_id: str) -> EngineSession:
@@ -120,7 +133,8 @@ class SessionRegistry:
         path.parent.mkdir(parents=True,exist_ok=True)
         payload={"session_id":session.session_id,"task_id":session.task_id,"phase_id":session.phase_id,"sequence":session.sequence,
             "status":int(session.status),"next_step":int(session.next_step),"open_input":session.open_input.model_dump(mode="json") if session.open_input else None,
-            "responses":[response.model_dump(mode="json") for response in session.responses.values()],"request":session.request.model_dump(mode="json") if session.request else None}
+            "responses":[response.model_dump(mode="json") for response in session.responses.values()],"request":session.request.model_dump(mode="json") if session.request else None,
+            "model_map":getattr(session.program,"model_map",None)}
         temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(payload));temporary.replace(path)
 
     def _load(self,session_id:str)->EngineSession|None:
@@ -131,9 +145,19 @@ class SessionRegistry:
             status=ProcessStatus(payload["status"]),next_step=NextStep(payload["next_step"]),
             open_input=InputRequest.model_validate(payload["open_input"]) if payload["open_input"] else None,request=request)
         session.responses={response.input_id:response for response in (InputResponse.model_validate(item) for item in payload["responses"])}
+        if self._program_factory is default_program_factory:
+            from . import session_models
+            pinned=payload.get("model_map")
+            if not pinned:
+                raise UserFacingError("legacy session has no pinned model route.","It predates per-session routing.","Start a new session.")
+            try:session_models.validate(pinned,request.model_route)
+            except UserFacingError:
+                log.warning("model.route.restore.reject session=%s route=%s stages=%s",session_id,request.model_route,json.dumps(pinned),exc_info=True)
+                raise
         if self._program_factory is not None:
             session.program=self._program_factory(session.session_id,request)
             session.program.open_input=session.open_input
+            log.info("model.route.restored session=%s task=%s route=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
         return session
 
     @staticmethod
@@ -172,6 +196,9 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
     def snapshot(session_id:str):
         try:return sessions.get(session_id).snapshot()
         except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        except UserFacingError as exc:
+            log.warning("model.route.snapshot.reject session=%s reason=%s",session_id,exc.render(),exc_info=True)
+            raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
 
     @app.post("/v1/sessions/{session_id}/inputs/{input_id}",response_model=SubmitInputResponse,dependencies=[Depends(authenticate)])
     def submit(session_id:str,input_id:UUID,response:InputResponse):
@@ -183,7 +210,7 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             status=409 if failure.code in (ProtocolErrorCode.STALE_INPUT,ProtocolErrorCode.DUPLICATE_RESPONSE) else 422
             raise HTTPException(status,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
         except UserFacingError as exc:
-            log.warning("interview input needs action session=%s input=%s error=%s",session_id,input_id,exc.render().replace("\n"," | "))
+            log.warning("interview input needs action session=%s input=%s error=%s",session_id,input_id,exc.render().replace("\n"," | "),exc_info=True)
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
         except Exception as exc:
             log.exception("interview input advance failed session=%s input=%s",session_id,input_id)
@@ -196,7 +223,14 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
 
 def default_program_factory(session_id,request):
     from .application import InterviewApplication
-    return InterviewApplication(session_id,request.task_id,request.idea)
+    path=artifacts_root()/session_id/'interview'/'http-session.json'
+    pinned=None
+    if path.exists():
+        payload=json.loads(path.read_text());pinned=payload.get('model_map')
+        if not pinned:raise UserFacingError('legacy session has no pinned model route.','It predates per-session routing.','Keep its existing artifacts; start a new session rather than resuming under a different model.')
+    program=InterviewApplication(session_id,request.task_id,request.idea,model_route=request.model_route,pinned_models=pinned)
+    log.info("model.route.effective session=%s task=%s selected=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(program.model_map))
+    return program
 
 from vmodel_contracts.runtime import artifacts_root
 app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
