@@ -24,6 +24,7 @@ import re as _re
 import sys
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 _DOTENV: dict[str, str] | None = None
@@ -140,10 +141,12 @@ def _guard_limits() -> tuple[int, int, int]:
             _num("VMODEL_LLM_MAX_CALLS", _MAX_CALLS))
 
 
+_session_llm_log: ContextVar[str | None] = ContextVar("session_llm_log", default=None)
+
 def _llm_log_sink() -> str | None:
     """VMODEL_LLM_LOG: unset = off (default, zero cost); 'stderr' = console;
     any other value = a file path, one JSON object per line."""
-    return _env("VMODEL_LLM_LOG")
+    return _session_llm_log.get() or _env("VMODEL_LLM_LOG")
 
 
 def _mask_secrets(value: str) -> str:
