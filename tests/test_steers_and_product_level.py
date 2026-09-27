@@ -192,9 +192,12 @@ def test_saturation_terminates_without_model_cooperation(monkeypatch):
         content="The application should use free resources (like supabase) wherever possible. "
                 "There are no timeline constraints. Expect maybe 10000 users.")]},
         {"configurable": {"thread_id": "sat1"}})
-    assert "[INTERVIEW COMPLETE]" in r["messages"][-1].content
+    assert "[INTERVIEW COMPLETE]" not in r["messages"][-1].content
+    assert r["pending_closing"]
     assert probing.calls == 2                      # no third drilling call
-    assert r.get("intent_model") is not None       # distillation ran
+    r = g.invoke({"messages": [HumanMessage(content="Nothing else.")]},
+                 {"configurable": {"thread_id": "sat1"}})
+    assert r.get("intent_model") is not None       # distillation follows final answer
 
 
 def test_cloud_infrastructure_drilling_is_suppressed():
@@ -471,3 +474,17 @@ def test_business_impact_answer_can_close_nfr_after_engineering_default(monkeypa
     }, cfg)
     result = graph.invoke({"messages": [HumanMessage(content="Waiting while a customer is at the desk would disrupt service.")]}, cfg)
     assert result["coverage"]["nfrs"] == "covered"
+
+
+def test_semantic_repeat_guard_reframes_related_words_not_new_needs():
+    from interview_engine.coverage import semantic_repeat_question
+    prior = [{"area": "flows", "question": "Which interactive features will children use?"}]
+    seen = []
+    def same_fact(candidate):
+        seen.append(candidate)
+        return "design elements" in candidate or "interactive features" in candidate
+    output = semantic_repeat_question("What design elements will children use?", prior, "flows", same_fact)
+    assert output != "What design elements will children use?"
+    assert seen[0] == "What design elements will children use?"
+    assert semantic_repeat_question("What should happen when the device is offline?", prior,
+                                    "failures", same_fact) == "What should happen when the device is offline?"
