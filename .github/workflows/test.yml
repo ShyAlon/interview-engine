@@ -1,12 +1,26 @@
 name: test
-on: [push, pull_request]
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+
+concurrency:
+  group: test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
       # vmodel-contracts is private: clone it over SSH with a read-only deploy key
       # (secret VMODEL_CONTRACTS_DEPLOY_KEY; public half on vmodel-contracts, 2026-09-24).
       - name: deploy key for vmodel-contracts
@@ -17,5 +31,4 @@ jobs:
           ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
           git config --global url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/ShyAlon/vmodel-contracts"
           git config --global --add url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/shyalon/vmodel-contracts"
-      - run: pip install -e .[dev]
-      - run: python -m pytest -q  # puts the repo root on sys.path (tests import tests.*)
+      - run: ./scripts/test-local.sh  # uses python -m pytest from the repo root
