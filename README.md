@@ -155,3 +155,7 @@ then recover any matching inputs by their existing hash without rewriting the so
 
 Unrecoverable hashes remain explicit legacy rows. They are never guessed or silently
 dropped.
+
+### Local CI test
+
+Run `./scripts/test-local.sh` from any directory. It creates a reusable `.venv`, installs the development dependencies and runs the same tests as the PR workflow using Python 3.12. Install Python 3.12 first, and make sure your Git authentication can read private `ShyAlon/vmodel-contracts` where it is a dependency.
