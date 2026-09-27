@@ -12,11 +12,11 @@ def test_interviewer_prompt_keeps_behavioral_obligations():
     prompt = INTERVIEWER_SYSTEM.lower()
     obligations = (
         "one short, concrete", "next target", "load-bearing answer is vague",
-        "actors, flows, rules", "never implementation choices",
-        "numeric latency/throughput/uptime", "business impact",
-        "stakeholder classes", "data/privacy", "failure/recovery", "security",
-        "press once", "record an assumption", '"skip"', '"enough"',
-        '"you decide"', '"move on"', "complete=true", "never invent facts",
+        "actors, flows, rules", "not a solution, design, implementation plan",
+        "no numeric targets", "business impact",
+        "stakeholders", "data/privacy", "failure/recovery", "security",
+        "press once", "record an assumption", "'skip'", "'enough'",
+        "'you decide'", "'move on'", "complete=true", "never invent facts",
     )
     for obligation in obligations:
         assert obligation in prompt, obligation
@@ -38,3 +38,11 @@ def test_interviewer_prompt_has_a_hard_runtime_budget():
     prompt = assembled()
     assert len(prompt) <= 3_200
     assert len(prompt.split()) <= 450
+
+
+def test_need_not_solution_or_metric_and_no_disguised_how():
+    p = INTERVIEWER_SYSTEM.lower()
+    assert "caching is one possible solution" in p
+    assert "what' questions that ask how in disguise" in p
+    assert "downstream gates" in p
+    assert "short or tentative" in p

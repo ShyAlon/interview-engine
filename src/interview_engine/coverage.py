@@ -325,6 +325,21 @@ def same_question_substance(left: str, right: str) -> bool:
     return len(a & b) / len(a | b) >= .45
 
 
+def semantic_repeat_question(question: str, prior_questions: list[dict], target: str | None, same_fact) -> str:
+    """Model-backed check of whether a question repeats supplied information.
+
+    The callback sees the current candidate and decides SAME/NEW from the
+    transcript; lexical overlap alone is insufficient. Prefer a new target
+    question, then a broad open gap if the target fallback also repeats.
+    """
+    if not prior_questions or not same_fact(question):
+        return question
+    alternative = _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
+    if alternative != question and not same_fact(alternative):
+        return alternative
+    return _LAST_RESORT_QUESTION
+
+
 def unique_question(question: str, prior_questions: list[dict], target: str | None) -> str:
     """Never expose a repeated probe. Reframe once to the actual current gap."""
     prior = [str(x.get("question", "")) for x in prior_questions]

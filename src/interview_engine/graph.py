@@ -26,7 +26,7 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 from . import model_config, scope_gate
 from .coverage import AREAS as _AREAS
 from .coverage import (COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
-                         founder_steer, guard_question, initial_coverage, next_area, nfr_quantified, unique_question, same_question_substance, engineering_default, DELEGATED,
+                         founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
@@ -50,9 +50,10 @@ class InterviewState(TypedDict, total=False):
     question_history: list[dict]  # code-owned emitted questions: {area, question}
     repeat_strikes: int       # cumulative repeated-non-answer detections (repeat_guard)
     deferred_questions: list[dict]  # founder-postponed questions: open, not decided, not delegated
-    intent_guard_area: str    # area where the intent re-ask guard last fired ('' when it did not)
+    intent_guard_area: str    # legacy checkpoint field (cleared by Jev intent authority)
     drilled_areas: list[str]  # areas that already got their one partial-answer follow-up (drill)
     turn_count: int
+    pending_closing: bool  # a final open question was asked; wait for the founder
 
 
 MAX_TURNS = 60  # hard stop: 30-60 min target; a runaway interview is a cost leak
@@ -146,7 +147,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # 2026-09-23 merge (agreed by Shy): Jev owns scope, including
             # rejections; baseline is the fallback on Jev status/schema errors.
             # INTERVIEW_ENGINE_JEV_AUTHORITY=none restores observe-only shadow.
-            authority_raw = (model_config._env("INTERVIEW_ENGINE_JEV_AUTHORITY") or "scope").strip().lower()
+            authority_raw = (model_config._env("INTERVIEW_ENGINE_JEV_AUTHORITY") or "scope,intent").strip().lower()
             authoritative = () if authority_raw in {"", "none", "0", "off", "false"} else tuple(
                 x.strip() for x in authority_raw.split(",") if x.strip())
             categorizer = ShadowCategorizer(categorizer, shadow_provider, shadow_path, usage_log, session_id=session_id, schema_id=schema_id, schema_version=schema_version,
@@ -189,8 +190,6 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
         classified_control = None
-        guard_fired = None
-        guard_area = ""
 
         # Repeated non-answer guard (2026-09-23 smoke): the same substantive
         # answer pasted at consecutive questions is a dodge, not an answer.
@@ -236,27 +235,21 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if categorizer.active("intent"):
                 intent_result = categorizer.classify(intent_request(prior_question, founder_answer))
                 classified_control = classified_intent(intent_result.answers)
-                # Re-ask guard (2026-09-23 merge): the baseline owns intent, but
-                # when it closes the area (skip) while Jev reads the
-                # same reply as an answer, re-ask once instead of closing. A
-                # second disagreement on the same area honors the baseline.
-                jev_seen = getattr(categorizer, "last_jev", {}).get("intent")
-                jev_intent = str(jev_seen.answers["intent"].value) if (
-                    jev_seen is not None and "intent" in getattr(jev_seen, "answers", {})) else None
-                guard_area = state.get("coverage_target") or next_area(coverage) or ""
-                from .categorization import guarded_intent
-                classified_control, guard_fired = guarded_intent(
-                    classified_control, jev_intent, bool(guard_area) and state.get("intent_guard_area") == guard_area)
-                if guard_fired:
-                    if progress is not None:
-                        progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _time.time(), 0.0,
-                            f"intent guard: baseline '{guard_fired}' vs Jev 'answer' - re-asking once instead of closing"))
+                # Jev is authoritative for intent when valid; the shadow
+                # categorizer falls back to baseline on Jev status/schema errors.
+                # Do not let a baseline/answer disagreement override Jev's
+                # defer or skip steering after that decision.
+                if classified_control in ("skip", "defer"):
+                    area = state.get("coverage_target") or next_area(coverage_before)
+                    if area and area in coverage_before:
+                        # The steer is about the current question, not an
+                        # answer that can silently close the same area.
+                        coverage[area] = coverage_before[area]
 
         # Founder steers are terminal (2026-09-12 transcript: 'No. You do it.'
         # got rephrased and re-asked twice). 'delegate' parks the sub-topic and
         # records the delegation for the intent model; 'skip' moves on (below).
         # Neither may be rephrased and re-asked.
-        guard_area_out = guard_area if guard_fired else ""
         steer = (classified_control if categorizer.active("intent") else
                  (founder_steer(getattr(last, "content", "")) if last is not None and getattr(last, "type", "") == "human" else None))
         deferred_questions = [dict(d) for d in (state.get("deferred_questions") or [])]
@@ -322,6 +315,15 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 coverage[target] = "skipped"
                 skipped_area = target
 
+        if state.get("pending_closing") and getattr(last, "type", "") == "human":
+            # Classify and record the final reply first. A postponement remains
+            # an open question in the distillation instead of disappearing.
+            return {"messages": [AIMessage(content="Thank you.\n\n[INTERVIEW COMPLETE]")],
+                    "coverage": coverage, "pending_closing": False,
+                    "deferred_questions": deferred_questions, "delegated_decisions": delegated,
+                    "parked_topics": parked_topics, "turn_count": turn,
+                    "repeat_strikes": repeat_strikes}
+
         target = next_area(coverage)
         # Partial-answer drill: one specific follow-up on the area the partial
         # reply just turned thin, then move on. Never on a repeat, a guard
@@ -330,7 +332,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         drilled_areas = list(state.get("drilled_areas") or [])
         drill_area = None
         prev_target = state.get("coverage_target") or ""
-        if (drill_enabled() and prev_target and relevance_label == "partial" and not repeated and not guard_fired
+        if (drill_enabled() and prev_target and relevance_label == "partial" and not repeated
                 and control is None and coverage_before.get(prev_target) == "uncovered"
                 and coverage.get(prev_target) == THIN and prev_target not in drilled_areas
                 and len(drilled_areas) < MAX_DRILLS and turn <= DRILL_LAST_TURN):
@@ -377,10 +379,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             history = state["messages"]
             parked_block = ("\n\nPARKED SUB-TOPICS (founder deferred; never ask these again): "
                             + ", ".join(parked_topics)) if parked_topics else ""
-            guard_block = ("\n\nAMBIGUOUS LAST REPLY: it may close this area or may be an answer. Ask once, briefly, "
-                           "whether the founder wants to answer it or move on.") if guard_fired else ""
             follow_block = drill_block(drill_area) if drill_area else ""
-            system = (INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage, drill_area) + parked_block + guard_block
+            system = (INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage, drill_area) + parked_block
                       + follow_block + "\n\n" + STRUCTURED_TURN_FORMAT)
             _t0 = _time.time()
             request_messages = [SystemMessage(content=system), *history,
@@ -393,8 +393,14 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         # Tolerant parse (fences/prose-wrapped JSON); on failure ONE retry with
         # feedback, then graceful degrade (run-4: the 14B ignored the format).
         import time as _t
-        # terminal plain-text marker (older checkpoints / models): no parse, no retry
+        # Terminal plain-text marker (older checkpoints / models). A final
+        # open question cannot carry the marker on the same turn.
         if "[INTERVIEW COMPLETE]" in resp.content:
+            before_marker = resp.content.split("[INTERVIEW COMPLETE]", 1)[0].strip()
+            if before_marker.endswith("?"):
+                return {"messages": [AIMessage(content=before_marker)], "coverage": coverage,
+                        "coverage_target": target or "", "turn_count": turn,
+                        "pending_closing": True, "repeat_strikes": repeat_strikes}
             return {"messages": [AIMessage(content=resp.content)], "coverage": coverage,
                     "coverage_target": target or "", "turn_count": turn,
                     "repeat_strikes": repeat_strikes}
@@ -454,23 +460,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # skipped the NEXT area as well.)
             if skipped_area:
                 coverage[skipped_area] = SKIPPED
-            # Quantified-NFR guard (run-5): the model may not close "quantified
-            # NFRs" while the founder's own words contain no numbers - unless the
-            # founder explicitly said there are none (demo mode). Coded guardrail,
-            # not prompt discipline.
-            if coverage.get("nfrs") == COVERED and (parsed.get("covered") or []) and "nfrs" in (parsed.get("covered") or []):
-                founder_text = "\n".join(getattr(m, "content", "") for m in history
-                                          if getattr(m, "type", "") == "human")
-                has_engineering_default = any(
-                    "engineering-owned provisional default" in d.get("statement", "")
-                    for d in delegated)
-                if not nfr_quantified(founder_text) and not has_engineering_default:
-                    coverage["nfrs"] = THIN
-                    if progress is not None:
-                        progress.emit(ProgressEvent(
-                            "interview_turn", "Coverage", "completed", _t.time(), 0.0,
-                            "NFRs claimed covered with no numbers given - holding thin; "
-                            "say 'no numbers for the demo' to close it honestly"))
+            # The founder owns the perceived quality need, not a numeric
+            # threshold. Metrics are derived at the downstream verification gate.
             next_target = drill_area or next_area(coverage)
             candidate = parsed["question"].strip()
             owned = engineering_default(candidate)
@@ -487,7 +478,31 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 if topic not in parked_topics:
                     parked_topics.append(topic)
             question = guard_question(candidate, parked_topics, next_target)
-            question = unique_question(question, list(state.get("question_history") or []), next_target)
+            history_questions = list(state.get("question_history") or [])
+            question = unique_question(question, history_questions, next_target)
+            # Lexical matching misses semantic re-asks ('features' versus
+            # 'design elements'). Ask the probing model whether the proposed
+            # question requests a fact the founder already supplied. This is
+            # deliberately stricter than merely deriving a useful new ask.
+            if history_questions and next_target is not None:
+                from .coverage import semantic_repeat_question
+                previous = [q.get("question", "") for q in history_questions]
+                founder_facts = [getattr(m, "content", "") for m in history if getattr(m, "type", "") == "human"]
+                def _same_fact(candidate):
+                    prompt = ("Reply ONLY SAME or NEW. SAME iff the candidate asks for a fact already "
+                              "provided in the founder's answers or asks the same information as a prior "
+                              "question. A related but genuinely new product need is NEW.\n"
+                              f"Prior questions: {previous!r}\nFounder answers: {founder_facts!r}\n"
+                              f"Candidate: {candidate!r}")
+                    _start = _t.time()
+                    verdict = model_config.invoke_checked(categorization_model, [SystemMessage(content=prompt)], "probing")
+                    usage_log.record("probing", model_config.for_stage("probing").provider,
+                                     model_config.for_stage("probing").model,
+                                     (getattr(verdict, "usage_metadata", None) or {}), duration_s=_t.time() - _start)
+                    label = verdict.content.strip().upper()
+                    # An unparseable adjudication is not proof of a repeat.
+                    return label == "SAME"
+                question = semantic_repeat_question(question, history_questions, next_target, _same_fact)
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
             # self-grading cannot jump 0/11 -> done.
@@ -501,7 +516,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 open_areas = sum(1 for v in coverage.values() if v in ("uncovered", "thin"))
                 progress.emit(ProgressEvent("interview_turn", "Coverage", "completed", _t.time(), 0.0,
                                             f"model tried to close with {open_areas} areas open - continuing"))
-        if complete:
+        pending_closing = complete and question.strip().endswith("?")
+        if complete and not pending_closing:
             question += "\n\n[INTERVIEW COMPLETE]"
         if progress is not None:
             import time as _t
@@ -513,8 +529,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         return {"messages": [AIMessage(content=question)], "coverage": coverage,
                 "coverage_target": emitted_target or "", "parked_topics": parked_topics,
                 "delegated_decisions": delegated, "question_history": history_log,
-                "deferred_questions": deferred_questions, "intent_guard_area": guard_area_out,
-                "drilled_areas": drilled_areas, "repeat_strikes": repeat_strikes, "turn_count": turn}
+                "deferred_questions": deferred_questions, "intent_guard_area": "",
+                "drilled_areas": drilled_areas, "repeat_strikes": repeat_strikes, "turn_count": turn,
+                "pending_closing": pending_closing}
 
     def route_interview(state: InterviewState) -> str:
         last = state["messages"][-1]

@@ -23,11 +23,11 @@ AREAS = [
     ("flows", "operational scenarios", "at least one concrete trigger-to-outcome scenario with actors, ordered steps, and exceptions"),
     ("data", "data model & sources", "what data, where it lives, who owns it"),
     ("integrations", "integrations", "named systems/APIs, not categories"),
-    ("nfrs", "quality needs", "founder-visible business impact; engineering maps it to measurable targets"),
+    ("nfrs", "quality needs", "the founder-visible experience and business impact of quality failures; metrics come later"),
     ("failures", "failure modes", "what breaks, what degrades, what must never happen"),
     ("constraints", "constraints", "budget, deadlines, team - and asked OPENLY: 'any technology constraints - language/ecosystem, cloud affinity?' ('agnostic' closes it too)"),
     ("risks", "risks", "what assumption kills the product if wrong"),
-    ("done", "done criteria", "how the founder will know it works"),
+    ("done", "done criteria", "what outcome would make the first useful version ready; measurable tests come later"),
     ("glossary", "glossary", "the founder's domain terms pinned to their meanings"),
 ]
 AREA_KEYS = [k for k, _, _ in AREAS]

@@ -128,3 +128,20 @@ def test_v1_2_answer_covers_off_topic_product_info_and_examples_agree():
     assert "move on" in INTENT_EXAMPLES["skip"].lower() and "rather not get into that" in INTENT_EXAMPLES["skip"].lower()
     assert "dismiss" not in INTENT_EXAMPLES and "dismiss" not in json.dumps(INTENT_EXAMPLES)
     assert TAXONOMY_VERSION == "categorization-request-v1.3"
+
+
+def test_jev_intent_steers_skip_and_defer_with_schema_fallback(tmp_path):
+    req = ClassificationRequest("intent", "Question: q\nFounder answer: Continue", {
+        "intent": ChoiceQuestion("classify", dict(INTENT_LABELS))})
+    base = ProviderResult({"intent": ClassificationAnswer("answer", .99)}, "llm", "m")
+    for label in ("skip", "defer"):
+        jev = ProviderResult({"intent": ClassificationAnswer(label, .96)}, "typesafe", "jev")
+        cat = ShadowCategorizer(Cat(base), Cat(jev), tmp_path / f"{label}.jsonl",
+                                authoritative=("scope", "intent"))
+        assert classified_intent(cat.classify(req).answers) == label
+        assert json.loads((tmp_path / f"{label}.jsonl").read_text())["authority"] == "jev"
+    malformed = ProviderResult({"intent": ClassificationAnswer("unknown", .99)}, "typesafe", "jev")
+    cat = ShadowCategorizer(Cat(base), Cat(malformed), tmp_path / "invalid.jsonl",
+                            authoritative=("scope", "intent"))
+    assert classified_intent(cat.classify(req).answers) == "answer"
+    assert json.loads((tmp_path / "invalid.jsonl").read_text())["jev_fallback_count"] == 1

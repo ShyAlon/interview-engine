@@ -38,6 +38,8 @@ def fake_models(monkeypatch, probing):
 
     def _build(stage, **kwargs):
         if stage == "probing":
+            if kwargs.get("schema") is None:
+                return FakeModel(["NEW"] * 200)  # separate semantic-repeat adjudicator
             return probing
         if stage == "scope_tiebreak":
             return FakeModel(['{"is_web_app": true, "archetype": "saas_crud"}'])
@@ -110,10 +112,26 @@ def test_complete_appends_marker_and_stops(monkeypatch):
     probing = FakeModel([structured("Got it all.", covered=[k for k, _, _ in AREAS], complete=True)])
     fake_models(monkeypatch, probing)
     g = build_graph(UsageLog("t1"))
-    # "5000" keeps the NFR guard honest: closing "quality needs" needs numbers
+    # A closing summary (not a question) may still end immediately.
     r = start(g, text="a saas web app for surf schools, booking, logins, 5000 users", thread="c2")
-    assert any("[INTERVIEW COMPLETE]" in getattr(m, "content", "") for m in r["messages"])
-    assert "intent_model" in r  # same invoke flowed through distillation
+    assert "[INTERVIEW COMPLETE]" in r["messages"][-1].content
+    assert "intent_model" in r  # a closing summary needs no answer
+
+
+def test_final_question_waits_for_founder_and_includes_answer(monkeypatch):
+    probing = FakeModel([structured("What important product fact have we not captured yet?",
+                                  covered=[k for k, _, _ in AREAS], complete=True)])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("closing-answer"))
+    r = start(g, text="a web app with 5000 users", thread="closing-answer")
+    assert r["pending_closing"] is True
+    assert "[INTERVIEW COMPLETE]" not in r["messages"][-1].content
+    assert "intent_model" not in r
+    r = g.invoke({"messages": [HumanMessage(content="It must work offline in the field.")]},
+                 {"configurable": {"thread_id": "closing-answer"}})
+    assert "[INTERVIEW COMPLETE]" in r["messages"][-1].content
+    assert any(getattr(m, "content", "") == "It must work offline in the field." for m in r["messages"])
+    assert "intent_model" in r
 
 
 def test_enough_ends_without_model_call(monkeypatch):

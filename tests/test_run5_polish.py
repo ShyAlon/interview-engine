@@ -95,8 +95,7 @@ def test_nfr_quantified_requires_numbers_or_explicit_waiver():
     assert not nfr_quantified("strict security, simple UI")
 
 
-def test_model_cannot_close_nfrs_without_numbers(monkeypatch):
-    from interview_engine.coverage import initial_coverage, next_area
+def test_model_can_close_founder_quality_need_without_numbers(monkeypatch):
     turn = json.dumps({"question": "q", "covered": ["nfrs"], "thin": [], "skipped": [], "complete": False})
     probing = FakeModel([turn, turn])
     distills = [json.dumps(NEEDS), json.dumps(SCOPE), "[]"]
@@ -110,7 +109,7 @@ def test_model_cannot_close_nfrs_without_numbers(monkeypatch):
     idea = "a saas web app for surf schools with booking and logins"
     r = g.invoke({"messages": [HumanMessage(content=idea)],
                   "submission": {"free_text": idea, "founder_id": "t", "submission_id": "nfr1"}}, cfg)
-    assert r["coverage"]["nfrs"] == "thin", "claimed NFR closure without numbers must not stick"
+    assert r["coverage"]["nfrs"] == "covered", "quality needs need not have numeric targets"
 
 
 # --- 3d: contradiction flag ---
