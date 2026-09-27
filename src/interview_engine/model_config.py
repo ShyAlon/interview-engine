@@ -331,9 +331,11 @@ def _run_with_deadline(fn, timeout_s: int, stage: str):
     build_chat_model) - the socket dies, the thread unwinds, and the caller
     gets an informative error instead of a hang."""
     import concurrent.futures
+    import contextvars
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(fn)
+    context = contextvars.copy_context()
+    future = pool.submit(context.run, fn)
     try:
         return future.result(timeout=timeout_s)
     except concurrent.futures.TimeoutError:
@@ -400,6 +402,10 @@ def for_stage(stage: str) -> StageModel:
     if stage not in _STAGE_DEFAULTS:
         raise KeyError(f"unknown stage {stage!r}; add it explicitly - silent fallback models are how budgets leak")
     cfg = _STAGE_DEFAULTS[stage]
+    from .session_models import selected
+    pinned = selected(stage)
+    if pinned:
+        return StageModel(*pinned, temperature=cfg.temperature, max_tokens=cfg.max_tokens)
     # Concept of Operations is part of interview understanding, not its own
     # model tier. It MUST follow the shared distillation route. The first live
     # run exposed why: all configured stages used phi4, while a new CONOPS key
