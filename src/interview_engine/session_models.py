@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from typing import Mapping
 from .errors import UserFacingError
 
-CATALOG = {"deepseek": ("deepseek", "deepseek-chat"), "ollama": ("ollama", "qwen2.5-coder:14b")}
+CATALOG = {"deepseek": ("deepseek", "deepseek-flash"), "ollama": ("ollama", "qwen2.5-coder:14b")}
 STAGES = ("probing", "distillation", "phrasing", "scope_tiebreak", "expert_opinion", "conops")
 _active: ContextVar[Mapping[str,tuple[str,str]] | None] = ContextVar("session_model_map", default=None)
 
@@ -30,6 +30,16 @@ def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None)->
         if not isinstance(pair,(tuple,list)) or len(pair)!=2 or (pair[0] not in CATALOG or pair[0] != CATALOG[pair[0]][0] or not isinstance(pair[1],str) or not pair[1].strip()):
             raise UserFacingError(f"session model for {stage} is missing or unsupported.","The pinned route is incomplete.","Start a new session with an available model route.")
         provider,model=pair
+        if provider != "ollama" and stage==STAGES[0]:
+            # A valid API route with no price must fail before its first paid call.
+            # Check the effective table (including VMODEL_PRICE_TABLE overrides),
+            # not a duplicate model list that can drift from contracts.
+            from vmodel_contracts import price_for
+            try:price_for(model,provider)
+            except (KeyError,ValueError) as exc:
+                raise UserFacingError(f"No price for selected model {provider}/{model}.",
+                    "The shared vmodel-contracts price table has no entry for this paid route.",
+                    "Choose a supported model or update VMODEL_PRICE_TABLE with verified prices before starting.") from exc
         model_config._preflight(model_config.StageModel(provider,model),stage)
         if provider=="ollama" and stage==STAGES[0]:
             import httpx

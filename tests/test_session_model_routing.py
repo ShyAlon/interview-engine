@@ -14,14 +14,24 @@ def test_selected_route_overrides_shared_config_and_is_isolated(monkeypatch):
         assert model_config.for_stage('probing').provider=='ollama'
         assert model_config.for_stage('conops').model=='qwen2.5-coder:14b'
     with session_models.use(session_models.resolve('deepseek')):
-        assert model_config.for_stage('probing').model=='deepseek-chat'
-        assert model_config.for_stage('conops').model=='deepseek-chat'
+        assert model_config.for_stage('probing').model=='deepseek-flash'
+        assert model_config.for_stage('conops').model=='deepseek-flash'
     assert model_config.for_stage('probing').model=='deepseek-flash'  # legacy CLI still sees env
 
 @pytest.mark.parametrize('route',('unknown','local',''))
 def test_unsupported_route_rejected_without_fallback(route):
     with pytest.raises(Exception,match='unsupported interview model route'):
         session_models.resolve(route)
+
+def test_deepseek_route_has_price_before_first_call(monkeypatch):
+    from vmodel_contracts import price_for
+    assert price_for(session_models.CATALOG['deepseek'][1], 'deepseek') == (0.30,1.20)
+    monkeypatch.setattr(model_config,'_env',lambda key:'test-key' if key=='DEEPSEEK_API_KEY' else None)
+    models=session_models.resolve('deepseek')
+    models['probing']=('deepseek','not-in-price-table')
+    for stage in session_models.STAGES[1:]:models[stage]=models['probing']
+    with pytest.raises(Exception,match='No price for selected model'):
+        session_models.validate(models)
 
 def test_deepseek_requires_key(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:None)
@@ -55,10 +65,10 @@ def test_pinned_map_written_and_restored_after_environment_change(monkeypatch,tm
     registry=SessionRegistry(factory,state_dir=tmp_path)
     session,_=registry.start(StartSessionRequest(task_id='t',idea='idea',model_route='deepseek'))
     saved=json.loads((tmp_path/session.session_id/'interview'/'http-session.json').read_text())
-    assert saved['model_map']['probing']==['deepseek','deepseek-chat']
+    assert saved['model_map']['probing']==['deepseek','deepseek-flash']
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else 'test-key' if key=='DEEPSEEK_API_KEY' else None)
     restored=SessionRegistry(factory,state_dir=tmp_path).get(session.session_id)
-    assert restored.program.model_map['probing']==['deepseek','deepseek-chat']
+    assert restored.program.model_map['probing']==['deepseek','deepseek-flash']
 
 def test_ollama_preflight_missing_model(monkeypatch):
     class Response:
@@ -78,4 +88,4 @@ def test_ollama_preflight_inaccessible(monkeypatch):
 def test_worker_thread_inherits_pinned_route(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:'deepseek:deepseek-flash' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)
     with session_models.use(session_models.resolve('deepseek')):
-        assert model_config._run_with_deadline(lambda:model_config.for_stage('probing').model,2,'probing')=='deepseek-chat'
+        assert model_config._run_with_deadline(lambda:model_config.for_stage('probing').model,2,'probing')=='deepseek-flash'
