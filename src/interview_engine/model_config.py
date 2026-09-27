@@ -273,9 +273,9 @@ def _provider_error_detail(exc) -> dict:
     if isinstance(err, dict):
         for k in ("type", "code", "param", "message"):
             if err.get(k) is not None:
-                out[k] = _mask_secrets(str(err[k]))[:600]
+                out[k] = _mask_secrets(str(err[k]))
     if "message" not in out:
-        out["message"] = _mask_secrets(str(exc))[:600]
+        out["message"] = _mask_secrets(str(exc))
     return out
 
 

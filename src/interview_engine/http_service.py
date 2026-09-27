@@ -210,7 +210,7 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             status=409 if failure.code in (ProtocolErrorCode.STALE_INPUT,ProtocolErrorCode.DUPLICATE_RESPONSE) else 422
             raise HTTPException(status,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
         except UserFacingError as exc:
-            log.warning("interview input needs action session=%s input=%s error=%s",session_id,input_id,exc.render().replace("\n"," | "))
+            log.warning("interview input needs action session=%s input=%s error=%s",session_id,input_id,exc.render().replace("\n"," | "),exc_info=True)
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
         except Exception as exc:
             log.exception("interview input advance failed session=%s input=%s",session_id,input_id)
