@@ -18,11 +18,13 @@ def resolve(route:str)->dict[str,tuple[str,str]]:
         pair=("ollama", _env("DELIVERY_OLLAMA_MODEL") or pair[1])
     return {stage:pair for stage in STAGES}
 
-def validate(models:Mapping[str,tuple[str,str]])->None:
+def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None)->None:
     from . import model_config
     routes={tuple(pair) for pair in models.values() if isinstance(pair,(tuple,list)) and len(pair)==2}
     if len(routes)!=1:
         raise UserFacingError("session stages do not share one effective route.","The pinned route is inconsistent.","Start a new session.")
+    if selected_route and (selected_route not in CATALOG or next(iter(routes))[0]!=selected_route):
+        raise UserFacingError("pinned model does not match the selected route.","The session route is inconsistent.","Start a new session.")
     for stage in STAGES:
         pair=models.get(stage)
         if not isinstance(pair,(tuple,list)) or len(pair)!=2 or (pair[0] not in CATALOG or pair[0] != CATALOG[pair[0]][0] or not isinstance(pair[1],str) or not pair[1].strip()):
