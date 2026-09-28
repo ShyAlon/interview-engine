@@ -1,4 +1,4 @@
-"""Pin the session model map resolved from shared stage env at HTTP start."""
+"""Resolve and pin an explicit per-session model; legacy env only seeds new sessions."""
 from __future__ import annotations
 from contextvars import ContextVar
 from contextlib import contextmanager
@@ -9,41 +9,36 @@ CATALOG = {"deepseek": ("deepseek", "deepseek-flash"), "ollama": ("ollama", "qwe
 STAGES = ("probing", "distillation", "phrasing", "scope_tiebreak", "expert_opinion", "conops")
 _active: ContextVar[Mapping[str,tuple[str,str]] | None] = ContextVar("session_model_map", default=None)
 
-def resolve(route:str)->dict[str,tuple[str,str]]:
-    """Resolve stage env first, catalog second, then pin it forever.
-
-    Real process environment wins over .env via model_config._env. If a stage
-    key is absent, DELIVERY_OLLAMA_MODEL (Ollama only) precedes catalog. The
-    selected dropdown route must match every configured stage provider.
-    """
+def resolve(route:str,initial_model:str|None=None)->dict[str,tuple[str,str]]:
+    """An explicit session route ignores legacy stage model defaults."""
     if route not in CATALOG:
         raise UserFacingError(f"unsupported interview model route {route!r}.","Only DeepSeek and Ollama are available.","Choose a supported model route.")
     from .model_config import _env
-    fallback=CATALOG[route]
-    if route=="ollama":
-        fallback=("ollama",_env("DELIVERY_OLLAMA_MODEL") or fallback[1])
-    models={}
+    provider, model = CATALOG[route]
+    if route == "ollama":
+        model = _env("DELIVERY_OLLAMA_MODEL") or model
+    if initial_model:
+        if ':' in initial_model or not initial_model.strip():
+            raise UserFacingError("invalid initial model", "Model defaults must be bare model names.", "Choose a valid model.")
+        model=initial_model
+    return {stage:(provider,model) for stage in STAGES}
+
+
+def initial_default()->tuple[str,str|None]:
+    """Legacy model keys provide only the initial UI default, never an override."""
+    from .model_config import _env
     chosen={}
     for stage in STAGES:
         key=f"INTERVIEW_ENGINE_MODEL_{'DISTILLATION' if stage=='conops' else stage.upper()}"
         raw=_env(key)
-        if raw is not None:
-            provider,sep,model=raw.strip().partition(":")
-            provider,model=provider.strip(),model.strip()
-            if not sep or not provider or not model:
-                raise UserFacingError(f"{key}={raw!r} is not provider:model.","The shared model configuration is invalid.","Fix the named .env entry before starting.")
-            if provider != route:
-                raise UserFacingError(f"selected route {route!r} conflicts with {key}={raw!r}.","The dropdown and shared .env choose different providers.","Choose the matching provider or edit the named .env setting before starting.")
-            models[stage]=(provider,model)
-            chosen[key]=raw
-        else:
-            models[stage]=fallback
-    distinct=set(models.values())
-    if len(distinct)!=1:
-        configuration=", ".join(f"{key}={value}" for key,value in sorted(chosen.items()))
-        absent=", ".join(f"INTERVIEW_ENGINE_MODEL_{stage.upper()}" for stage in STAGES[:-1] if f"INTERVIEW_ENGINE_MODEL_{stage.upper()}" not in chosen)
-        raise UserFacingError(f"interview stage models disagree: {configuration}; absent keys: {absent or 'none'}; fallback: {fallback[0]}:{fallback[1]}.","One HTTP session requires one provider and model across all stages.","Set the named stage keys to the same model or remove all stage overrides to use the catalog fallback.")
-    return models
+        if raw:
+            provider,sep,model=raw.strip().partition(':')
+            if not sep or provider not in CATALOG or not model.strip():
+                raise UserFacingError(f"{key}={raw!r} is not a supported provider:model.","The legacy new-session default is invalid.","Fix the named key or select a route explicitly.")
+            chosen[key]=(provider.strip(),model.strip())
+    if len(set(chosen.values()))>1:
+        raise UserFacingError(f"legacy stage model defaults disagree: {chosen!r}","New-session default is ambiguous.","Select a route explicitly or correct the stage keys.")
+    return next(iter(chosen.values())) if chosen else ('ollama',None)
 
 def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None)->None:
     from . import model_config

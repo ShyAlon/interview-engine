@@ -23,10 +23,10 @@ from . import session_models, model_config
 
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
-    def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None):
+    def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None):
         self.session_id,self.task_id=session_id,task_id
         self.model_route=model_route
-        self.model_map=pinned_models if pinned_models is not None else session_models.resolve(model_route) if model_route else None
+        self.model_map=pinned_models if pinned_models is not None else session_models.resolve(model_route,initial_model) if model_route else None
         if self.model_map is not None:session_models.validate(self.model_map,model_route)
         self.outdir=artifacts_root(artifact_root)/session_id/'interview';self.outdir.mkdir(parents=True,exist_ok=True)
         from .evidence import EvidenceLake
@@ -35,10 +35,12 @@ class InterviewApplication:
         db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
         saver=SqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
+        self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
         with self._runtime_context():
             self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug',
                 session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
+        self.checkpointer=saver
         self.cfg={'configurable':{'thread_id':session_id}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
         self.state={'messages':[HumanMessage(content=idea)],'submission':submission.model_dump(mode='json')}

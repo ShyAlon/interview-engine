@@ -36,6 +36,7 @@ class UsageLog:
 
     def __init__(self, session_id: str, sink: Sink | None = None):
         self.session_id = session_id
+        self.route_version = 0
         self.records: list[StageTokenUsage] = []
         self.durations: list[float | None] = []
         self.sink = sink
@@ -45,6 +46,7 @@ class UsageLog:
         pin, pout = price_for(model, provider)
         rec = StageTokenUsage(
             session_id=self.session_id,
+            route_version=self.route_version,
             stage=stage,
             provider=provider,
             model=model,
@@ -64,7 +66,8 @@ class UsageLog:
                          usd_per_mtok: float, duration_s: float | None = None) -> StageTokenUsage:
         """Record usage priced from an explicitly identified estimated rate."""
         rec = StageTokenUsage(
-            session_id=self.session_id, stage=stage, provider=provider, model=model,
+            session_id=self.session_id,
+            route_version=self.route_version, stage=stage, provider=provider, model=model,
             prompt_tokens=int(usage.get("input_tokens", 0) or 0),
             completion_tokens=int(usage.get("output_tokens", 0) or 0), cached_tokens=0,
             price_per_mtok_prompt_usd=usd_per_mtok,
@@ -81,7 +84,8 @@ class UsageLog:
         Null price is deliberate and distinguishable from a genuinely free call.
         """
         rec = StageTokenUsage(
-            session_id=self.session_id, stage=stage, provider=provider, model=model,
+            session_id=self.session_id,
+            route_version=self.route_version, stage=stage, provider=provider, model=model,
             prompt_tokens=int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
             completion_tokens=int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
             cached_tokens=int(usage.get("cached_tokens", 0) or 0),
