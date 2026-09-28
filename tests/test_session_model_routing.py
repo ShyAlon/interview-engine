@@ -132,3 +132,37 @@ def test_env_has_priority_over_delivery_ollama_model(monkeypatch):
 def test_catalog_fallback_when_shared_stage_env_absent(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:None)
     assert set(session_models.resolve('ollama').values())=={('ollama','qwen2.5-coder:14b')}
+
+
+def test_partial_shared_env_inherits_phi4_for_unset_expert_opinion(monkeypatch):
+    configured={'PROBING','DISTILLATION','PHRASING','SCOPE_TIEBREAK'}
+    monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') and key.split('INTERVIEW_ENGINE_MODEL_')[1] in configured else None)
+    models=session_models.resolve('ollama')
+    assert set(models.values())=={('ollama','phi4')}
+    assert models['expert_opinion']==('ollama','phi4')
+    assert models['conops']==('ollama','phi4')
+    with session_models.use(models):
+        assert model_config.for_stage('expert_opinion').model=='phi4'
+
+
+def test_divergent_configured_values_name_both_keys(monkeypatch):
+    settings={'INTERVIEW_ENGINE_MODEL_PROBING':'ollama:phi4','INTERVIEW_ENGINE_MODEL_EXPERT_OPINION':'ollama:qwen2.5-coder:14b'}
+    monkeypatch.setattr(model_config,'_env',lambda key:settings.get(key))
+    with pytest.raises(Exception) as caught:session_models.resolve('ollama')
+    assert all(key in str(caught.value) for key in settings)
+
+
+def test_route_preview_partial_phi4_env_and_named_divergence(monkeypatch):
+    settings={key:'ollama:phi4' for key in ('INTERVIEW_ENGINE_MODEL_PROBING','INTERVIEW_ENGINE_MODEL_DISTILLATION','INTERVIEW_ENGINE_MODEL_PHRASING','INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK')}
+    monkeypatch.setattr(model_config,'_env',lambda key:settings.get(key))
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    client=TestClient(create_app(service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
+    response=client.get('/v1/model-routes/ollama')
+    assert response.status_code==200
+    assert set(tuple(pair) for pair in response.json()['model_map'].values())=={('ollama','phi4')}
+    settings['INTERVIEW_ENGINE_MODEL_EXPERT_OPINION']='ollama:qwen2.5-coder:14b'
+    response=client.get('/v1/model-routes/ollama')
+    assert response.status_code==422
+    detail=str(response.json())
+    assert 'INTERVIEW_ENGINE_MODEL_EXPERT_OPINION' in detail
+    assert 'INTERVIEW_ENGINE_MODEL_PROBING' in detail

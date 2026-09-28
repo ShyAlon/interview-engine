@@ -13,8 +13,9 @@ def resolve(route:str)->dict[str,tuple[str,str]]:
     """Resolve stage env first, catalog second, then pin it forever.
 
     Real process environment wins over .env via model_config._env. If a stage
-    key is absent, DELIVERY_OLLAMA_MODEL (Ollama only) precedes catalog. The
-    selected dropdown route must match every configured stage provider.
+    key is absent, other configured stages provide the one shared model. If
+    all stage keys are absent, DELIVERY_OLLAMA_MODEL (Ollama only) precedes
+    catalog. The selected dropdown route must match every configured stage provider.
     """
     if route not in CATALOG:
         raise UserFacingError(f"unsupported interview model route {route!r}.","Only DeepSeek and Ollama are available.","Choose a supported model route.")
@@ -36,13 +37,19 @@ def resolve(route:str)->dict[str,tuple[str,str]]:
                 raise UserFacingError(f"selected route {route!r} conflicts with {key}={raw!r}.","The dropdown and shared .env choose different providers.","Choose the matching provider or edit the named .env setting before starting.")
             models[stage]=(provider,model)
             chosen[key]=raw
-        else:
-            models[stage]=fallback
+    # An incomplete .env is intentional: one uniquely configured model fills
+    # the missing stages. Divergent configured values are rejected by name.
+    configured=set(models.values())
+    if len(configured)==1:
+        inherited=next(iter(configured))
+        for stage in STAGES:
+            models.setdefault(stage,inherited)
+    elif not configured:
+        models={stage:fallback for stage in STAGES}
     distinct=set(models.values())
     if len(distinct)!=1:
         configuration=", ".join(f"{key}={value}" for key,value in sorted(chosen.items()))
-        absent=", ".join(f"INTERVIEW_ENGINE_MODEL_{stage.upper()}" for stage in STAGES[:-1] if f"INTERVIEW_ENGINE_MODEL_{stage.upper()}" not in chosen)
-        raise UserFacingError(f"interview stage models disagree: {configuration}; absent keys: {absent or 'none'}; fallback: {fallback[0]}:{fallback[1]}.","One HTTP session requires one provider and model across all stages.","Set the named stage keys to the same model or remove all stage overrides to use the catalog fallback.")
+        raise UserFacingError(f"interview stage models disagree: {configuration}.","Configured stage keys disagree on provider or model.","Set the named stage keys to the same model before starting.")
     return models
 
 def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None)->None:
