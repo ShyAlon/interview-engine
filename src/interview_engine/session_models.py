@@ -73,8 +73,11 @@ def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None, *
                 found={entry.get("id") for entry in response.json().get("data",[]) if isinstance(entry,dict)}
             except (httpx.HTTPError,ValueError,KeyError) as exc:
                 raise UserFacingError(f"Ollama preflight could not list models at {endpoint}: {exc}","The selected local route cannot be verified.","Start Ollama and retry.") from exc
-            if model not in found:
-                raise UserFacingError(f"Ollama model {model!r} is unavailable at {endpoint}; available: {sorted(found)}","The selected local model is not installed.",f"Pull {model} or choose DeepSeek, then retry.")
+            # Ollama resolves an untagged name to :latest. Its models endpoint
+            # may still list only the canonical tagged ID.
+            available_id=model if ":" in model else f"{model}:latest"
+            if model not in found and available_id not in found:
+                raise UserFacingError(f"Ollama model {model!r} is unavailable at {endpoint}; available: {sorted(found)}","The selected local model is not installed.",f"Pull {model} or choose an installed model, then retry.")
 
 @contextmanager
 def use(models:Mapping[str,tuple[str,str]]):
