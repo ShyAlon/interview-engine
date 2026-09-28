@@ -214,7 +214,7 @@ class SessionRegistry:
             pinned=payload.get("model_map")
             if not pinned:
                 raise UserFacingError("legacy session has no pinned model route.","It predates per-session routing.","Start a new session.")
-            try:session_models.validate(pinned)
+            try:session_models.validate(pinned,preflight=False)
             except UserFacingError:
                 log.warning("model.route.restore.reject session=%s route=%s stages=%s",session_id,request.model_route,json.dumps(pinned),exc_info=True)
                 raise

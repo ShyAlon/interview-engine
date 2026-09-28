@@ -27,7 +27,7 @@ class InterviewApplication:
         self.session_id,self.task_id=session_id,task_id
         self.model_route=model_route
         self.model_map=pinned_models if pinned_models is not None else session_models.resolve(model_route,initial_model) if model_route else None
-        if self.model_map is not None:session_models.validate(self.model_map,model_route)
+        if self.model_map is not None:session_models.validate(self.model_map,model_route,preflight=pinned_models is None)
         self.outdir=artifacts_root(artifact_root)/session_id/'interview';self.outdir.mkdir(parents=True,exist_ok=True)
         from .evidence import EvidenceLake
         self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
