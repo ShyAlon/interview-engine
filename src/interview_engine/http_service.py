@@ -181,6 +181,17 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             raise HTTPException(401,"invalid interview engine service token")
 
 
+    @app.get("/v1/model-routes/{route}",dependencies=[Depends(authenticate)])
+    def preview_model_route(route:str):
+        """Read-only HTTP route preview from the same resolver used at Start."""
+        from . import session_models
+        try:
+            models=session_models.resolve(route)
+            session_models.validate(models,route)
+        except UserFacingError as exc:
+            raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
+        return {"route":route,"model_map":models}
+
     @app.post("/v1/sessions",response_model=StartSessionResponse,status_code=201,dependencies=[Depends(authenticate)])
     def start(request:StartSessionRequest):
         try:session,event=sessions.start(request)
