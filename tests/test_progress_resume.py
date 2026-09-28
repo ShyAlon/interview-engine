@@ -412,3 +412,38 @@ def test_console_severity_color_is_absent_when_captured_or_no_color(monkeypatch,
     assert "\x1b[" not in capsys.readouterr().err
 
 
+
+def test_legacy_graph_checkpoint_switches_pinned_model_and_resumes(monkeypatch,tmp_path):
+    """Exercise the real durable graph, not just a fake session program."""
+    from interview_engine import session_models
+    from interview_engine.http_service import SessionRegistry,default_program_factory
+    from vmodel_contracts.interactive import StartSessionRequest,ModelRouteSwitchRequest,InputResponse
+    from uuid import uuid4
+    monkeypatch.setenv('VMODEL_ARTIFACTS_DIR',str(tmp_path))
+    monkeypatch.setattr(session_models,'validate',lambda *args,**kwargs:None)
+    seen=[];replies=[
+      '{"question":"What problem does it solve?","covered":[],"thin":[],"skipped":[],"complete":false}',
+      '{"question":"Who uses it first?","covered":[],"thin":[],"skipped":[],"complete":false}']
+    class RoutedModel:
+        def invoke(self,messages):
+            if isinstance(messages,list) and 'Reply ONLY SAME or NEW' in getattr(messages[0],'content',''):
+                return AIMessage(content='NEW')
+            seen.append(session_models.selected('probing'))
+            return AIMessage(content=replies.pop(0))
+    def build(stage,**kwargs):
+        return RoutedModel() if stage=='probing' else FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web app"}'] if stage=='scope_tiebreak' else [json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY)])
+    monkeypatch.setattr(model_config,'build_chat_model',build)
+    registry=SessionRegistry(default_program_factory,state_dir=tmp_path)
+    session,_=registry.start(StartSessionRequest(task_id='legacy-task',idea='App for surf schools',model_route='ollama',initial_model='qwen2.5-coder:14b'))
+    assert session.open_input and seen==[('ollama','qwen2.5-coder:14b')]
+    path=tmp_path/session.session_id/'interview'/'http-session.json'
+    saved=json.loads(path.read_text());saved.pop('route_version');saved.pop('route_history');path.write_text(json.dumps(saved))
+    restarted=SessionRegistry(default_program_factory,state_dir=tmp_path)
+    old=restarted.get(session.session_id)
+    assert old.program.graph.get_state(old.program.cfg).values['messages']
+    request=ModelRouteSwitchRequest(model_route='ollama',model='phi4',actor_id='founder',expected_sequence=old.sequence,
+        expected_input_id=old.open_input.input_id,idempotency_key=uuid4())
+    _,snapshot=restarted.switch_route(session.session_id,request)
+    assert snapshot.model_map['probing']==('ollama','phi4') and snapshot.open_input.input_id==old.open_input.input_id
+    restarted.respond(session.session_id,InputResponse(input_id=old.open_input.input_id,value='Help surfers book lessons',actor_id='founder'))
+    assert ('ollama','phi4') in seen

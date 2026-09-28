@@ -18,8 +18,8 @@ def resolve(route:str,initial_model:str|None=None)->dict[str,tuple[str,str]]:
     if route == "ollama":
         model = _env("DELIVERY_OLLAMA_MODEL") or model
     if initial_model:
-        if ':' in initial_model or not initial_model.strip():
-            raise UserFacingError("invalid initial model", "Model defaults must be bare model names.", "Choose a valid model.")
+        if not initial_model.strip() or initial_model.startswith(('ollama:', 'deepseek:')):
+            raise UserFacingError("invalid initial model", "Use the model name without a provider prefix; Ollama tags such as :14b are valid.", "Choose a valid model.")
         model=initial_model
     return {stage:(provider,model) for stage in STAGES}
 
