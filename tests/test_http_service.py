@@ -193,3 +193,27 @@ def test_route_switch_rejected_while_not_waiting(monkeypatch):
     body={'model_route':'deepseek','expected_sequence':start['sequence'],'expected_input_id':str(uuid4()),'idempotency_key':str(uuid4()),'actor_id':'founder'}
     response=client.post(f'/v1/sessions/{sid}/model-route',json=body)
     assert response.status_code==409 and response.json()['detail']['code']==ProtocolErrorCode.ROUTE_SWITCH_CONFLICT
+
+def test_switched_session_restores_route_input_and_idempotency(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    def factory(sid,request):
+        program=SwitchableProgram(request.model_route)
+        path=tmp_path/sid/'interview'/'http-session.json'
+        if path.exists():
+            stored=__import__('json').loads(path.read_text())
+            program.model_map=stored['model_map']
+        return program
+    first=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(first,service_token=TOKEN))
+    started=client.post('/v1/sessions',json={'task_id':'task','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=started['session_id']
+    body={'model_route':'deepseek','expected_sequence':started['sequence'],'expected_input_id':started['open_input']['input_id'],
+          'idempotency_key':str(uuid4()),'actor_id':'founder'}
+    changed=client.post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert changed.status_code==200
+    second=SessionRegistry(factory,state_dir=tmp_path);restored=second.get(sid)
+    assert restored.snapshot().model_route=='deepseek' and restored.snapshot().route_version==1
+    assert restored.open_input.input_id==__import__('uuid').UUID(started['open_input']['input_id'])
+    retry=authed(create_app(second,service_token=TOKEN)).post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert retry.status_code==200
+    assert retry.json()['accepted_event']['sequence']==changed.json()['accepted_event']['sequence']
+    assert len(retry.json()['snapshot']['route_history'])==1
