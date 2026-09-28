@@ -18,8 +18,8 @@ def resolve(route:str,initial_model:str|None=None)->dict[str,tuple[str,str]]:
     if route == "ollama":
         model = _env("DELIVERY_OLLAMA_MODEL") or model
     if initial_model:
-        if ':' in initial_model or not initial_model.strip():
-            raise UserFacingError("invalid initial model", "Model defaults must be bare model names.", "Choose a valid model.")
+        if not initial_model.strip() or initial_model.startswith(('ollama:', 'deepseek:')):
+            raise UserFacingError("invalid initial model", "Use the model name without a provider prefix; Ollama tags such as :14b are valid.", "Choose a valid model.")
         model=initial_model
     return {stage:(provider,model) for stage in STAGES}
 
@@ -40,7 +40,7 @@ def initial_default()->tuple[str,str|None]:
         raise UserFacingError(f"legacy stage model defaults disagree: {chosen!r}","New-session default is ambiguous.","Select a route explicitly or correct the stage keys.")
     return next(iter(chosen.values())) if chosen else ('ollama',None)
 
-def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None)->None:
+def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None, *, preflight:bool=True)->None:
     from . import model_config
     routes={tuple(pair) for pair in models.values() if isinstance(pair,(tuple,list)) and len(pair)==2}
     if len(routes)!=1:
@@ -52,6 +52,7 @@ def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None)->
         if not isinstance(pair,(tuple,list)) or len(pair)!=2 or (pair[0] not in CATALOG or pair[0] != CATALOG[pair[0]][0] or not isinstance(pair[1],str) or not pair[1].strip()):
             raise UserFacingError(f"session model for {stage} is missing or unsupported.","The pinned route is incomplete.","Start a new session with an available model route.")
         provider,model=pair
+        if not preflight:continue
         if provider != "ollama" and stage==STAGES[0]:
             # A valid API route with no price must fail before its first paid call.
             # Check the effective table (including VMODEL_PRICE_TABLE overrides),

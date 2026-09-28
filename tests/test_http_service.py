@@ -170,7 +170,7 @@ def test_explicit_route_switch_is_typed_idempotent_and_preserves_input(monkeypat
     calls=[];factory=lambda sid,request:SwitchableProgram(request.model_route,calls)
     registry=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(registry,service_token=TOKEN))
     start=client.post('/v1/sessions',json={'task_id':'t','idea':'idea','model_route':'ollama'}).json();state=start['snapshot'];sid=state['session_id']
-    body={'model_route':'deepseek','expected_sequence':state['sequence'],'expected_input_id':state['open_input']['input_id'],'idempotency_key':str(uuid4()),'actor_id':'founder'}
+    body={'model_route':'deepseek','model':'deepseek-flash','expected_sequence':state['sequence'],'expected_input_id':state['open_input']['input_id'],'idempotency_key':str(uuid4()),'actor_id':'founder'}
     route=client.post(f'/v1/sessions/{sid}/model-route',json=body)
     assert route.status_code==200,route.text
     current=route.json()['snapshot'];assert current['model_route']=='deepseek' and current['route_version']==1
@@ -190,7 +190,7 @@ def test_route_switch_rejected_while_not_waiting(monkeypatch):
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
     registry=SessionRegistry();client=authed(create_app(registry,service_token=TOKEN))
     start=client.post('/v1/sessions',json={'task_id':'t','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=start['session_id']
-    body={'model_route':'deepseek','expected_sequence':start['sequence'],'expected_input_id':str(uuid4()),'idempotency_key':str(uuid4()),'actor_id':'founder'}
+    body={'model_route':'deepseek','model':'deepseek-flash','expected_sequence':start['sequence'],'expected_input_id':str(uuid4()),'idempotency_key':str(uuid4()),'actor_id':'founder'}
     response=client.post(f'/v1/sessions/{sid}/model-route',json=body)
     assert response.status_code==409 and response.json()['detail']['code']==ProtocolErrorCode.ROUTE_SWITCH_CONFLICT
 
@@ -206,7 +206,7 @@ def test_switched_session_restores_route_input_and_idempotency(monkeypatch,tmp_p
         return program
     first=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(first,service_token=TOKEN))
     started=client.post('/v1/sessions',json={'task_id':'task','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=started['session_id']
-    body={'model_route':'deepseek','expected_sequence':started['sequence'],'expected_input_id':started['open_input']['input_id'],
+    body={'model_route':'deepseek','model':'deepseek-flash','expected_sequence':started['sequence'],'expected_input_id':started['open_input']['input_id'],
           'idempotency_key':str(uuid4()),'actor_id':'founder'}
     changed=client.post(f'/v1/sessions/{sid}/model-route',json=body)
     assert changed.status_code==200
@@ -217,3 +217,78 @@ def test_switched_session_restores_route_input_and_idempotency(monkeypatch,tmp_p
     assert retry.status_code==200
     assert retry.json()['accepted_event']['sequence']==changed.json()['accepted_event']['sequence']
     assert len(retry.json()['snapshot']['route_history'])==1
+
+
+def test_legacy_qwen_pin_can_switch_to_phi4_same_provider(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    class OldProgram(SwitchableProgram):
+        def __init__(self,route='ollama'):
+            super().__init__(route)
+            self.model_map={stage:('ollama','qwen2.5-coder:14b') for stage in session_models.STAGES}
+        def candidate_for_route(self,route,models):
+            other=SwitchableProgram(route);other.model_map=models;other.pending=self.pending;return other
+    first=SessionRegistry(lambda sid,request:OldProgram(),state_dir=tmp_path);client=authed(create_app(first,service_token=TOKEN))
+    old=client.post('/v1/sessions',json={'task_id':'pre-existing','idea':'idea','model_route':'ollama'}).json()['snapshot']
+    sid=old['session_id'];path=tmp_path/sid/'interview'/'http-session.json'
+    saved=__import__('json').loads(path.read_text());saved.pop('route_version',None);saved.pop('route_history',None);path.write_text(__import__('json').dumps(saved))
+    def factory(sid,request):
+        value=__import__('json').loads((tmp_path/sid/'interview'/'http-session.json').read_text()) if (tmp_path/sid/'interview'/'http-session.json').exists() else {}
+        program=OldProgram()
+        if value.get('model_map'):program.model_map=value['model_map']
+        return program
+    restarted=SessionRegistry(factory,state_dir=tmp_path);other=authed(create_app(restarted,service_token=TOKEN))
+    before=other.get(f'/v1/sessions/{sid}').json()
+    assert before['route_version']==0 and before['model_map']['probing']==['ollama','qwen2.5-coder:14b']
+    response=other.post(f'/v1/sessions/{sid}/model-route',json={'model_route':'ollama','model':'phi4','expected_sequence':before['sequence'],
+      'expected_input_id':before['open_input']['input_id'],'idempotency_key':str(uuid4()),'actor_id':'founder'})
+    assert response.status_code==200,response.text
+    assert response.json()['snapshot']['model_map']['probing']==['ollama','phi4']
+    assert response.json()['snapshot']['open_input']['input_id']==before['open_input']['input_id']
+
+def test_failed_legacy_input_stays_switchable_after_restart(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    class LegacyError(SwitchableProgram):
+        def __init__(self):
+            super().__init__('ollama');self.model_map={stage:('ollama','qwen2.5-coder:14b') for stage in session_models.STAGES}
+        def advance(self,response=None):
+            if response is None:return self.pending
+            raise RuntimeError('qwen returned a template literal')
+        def candidate_for_route(self,route,models):
+            new=SwitchableProgram(route);new.pending=self.pending;new.model_map=models;return new
+    factory=lambda sid,request:LegacyError()
+    registry=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(registry,service_token=TOKEN))
+    before=client.post('/v1/sessions',json={'task_id':'old','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=before['session_id']
+    bad=client.post(f'/v1/sessions/{sid}/inputs/{before["open_input"]["input_id"]}',json={
+      'input_id':before['open_input']['input_id'],'value':'answer','actor_id':'founder'})
+    assert bad.status_code==503
+    restored=SessionRegistry(factory,state_dir=tmp_path);state=authed(create_app(restored,service_token=TOKEN)).get(f'/v1/sessions/{sid}').json()
+    assert state['process_status']==ProcessStatus.WAITING_INPUT and state['open_input']['input_id']==before['open_input']['input_id']
+    switched=restored.switch_route(sid,__import__('vmodel_contracts.interactive',fromlist=['ModelRouteSwitchRequest']).ModelRouteSwitchRequest(
+      model_route='ollama',model='phi4',expected_sequence=state['sequence'],expected_input_id=state['open_input']['input_id'],
+      idempotency_key=uuid4(),actor_id='founder'))
+    assert switched[1].model_map['probing']==('ollama','phi4')
+
+
+def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    from interview_engine.errors import UserFacingError
+    from interview_engine.http_service import default_program_factory
+    from vmodel_contracts.interactive import StartSessionRequest
+    old={stage:["ollama","qwen2.5-coder:14b"] for stage in session_models.STAGES}
+    path=tmp_path/"legacy"/"interview"/"http-session.json";path.parent.mkdir(parents=True);path.write_text(__import__("json").dumps({"model_map":old}))
+    monkeypatch.setattr("interview_engine.http_service.artifacts_root",lambda:tmp_path)
+    monkeypatch.setattr("interview_engine.application.artifacts_root",lambda arg=None:tmp_path)
+    calls=[]
+    def preflight(cfg,stage):
+        calls.append(cfg.model)
+        raise UserFacingError("retired model", "not installed", "choose another model")
+    monkeypatch.setattr("interview_engine.model_config._preflight",preflight)
+    class StubApplication:
+        def __init__(self,*args,**kwargs):
+            session_models.validate(kwargs["pinned_models"],kwargs["model_route"],preflight=False)
+            self.model_map=kwargs["pinned_models"]
+    monkeypatch.setattr("interview_engine.application.InterviewApplication",StubApplication)
+    restored=default_program_factory("legacy",StartSessionRequest(task_id="old",idea="idea",model_route="ollama"))
+    assert restored.model_map==old and calls==[]

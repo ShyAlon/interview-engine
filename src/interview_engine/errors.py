@@ -67,7 +67,7 @@ def translate_llm_error(exc: Exception, stage: str, provider: str, model: str, b
             f"stage '{stage}': provider '{provider}' does not know model '{model}'.",
             "typo in the model override, the model was renamed/retired, or the key's tier has "
             "no access to this model.",
-            "check the *_MODEL_* env override against the provider's model list, and the key's "
+            "check the selected session model against the provider's model list, and the key's "
             "tier/model access in the provider console.",
         )
     if name == "PermissionDeniedError" or "error code: 403" in text:
@@ -79,7 +79,7 @@ def translate_llm_error(exc: Exception, stage: str, provider: str, model: str, b
             f"the key authenticated, but this model or feature may not be enabled on its tier. "
             f"detail: {str(detail.get('message', ''))[:200]}",
             "check the key's tier/model access in the provider console - or route the stage to "
-            "ollama: vmodel-spec-app/scripts/switch-model.sh ollama.",
+            "Ollama at the next stable interview input boundary.",
         )
     if name == "RateLimitError" or "429" in text:
         # 429 is three different failures wearing one status: split them,
@@ -96,7 +96,7 @@ def translate_llm_error(exc: Exception, stage: str, provider: str, model: str, b
                 f"insufficient_quota is billing/credits, not throughput - waiting changes nothing. "
                 f"provider said: {short}",
                 "add a payment method or credits in the provider console - or switch back to local: "
-                "vmodel-spec-app/scripts/switch-model.sh ollama.",
+                "select an available Ollama model in the interview task.",
             )
         if "rate limit reached" in blob or "requests per" in blob or "tokens per" in blob:
             wait = (f"the provider says retry after {detail['retry_after_s']}s. "

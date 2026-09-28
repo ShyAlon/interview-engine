@@ -441,7 +441,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     if cfg.provider == "ollama":
                         next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
                                        "Confirm the server started with OLLAMA_CONTEXT_LENGTH=32768; if it repeats, "
-                                       "route probing to DeepSeek with vmodel-spec-app/scripts/switch-model.sh deepseek.")
+                                       "at the next stable interview input, switch to DeepSeek in the task UI.")
                     else:
                         next_action = ("rerun with the same --session id; the checkpoint preserves prior answers. "
                                        f"If it repeats, check {cfg.provider}'s status and the configured model "
@@ -612,7 +612,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                 f"distillation phase '{label}' produced output that is not valid JSON (an automatic retry did not fix it).",
                                 f"smaller/local models wrap JSON in prose or truncate. Raw output began: {snippet!r}",
                                 "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model: "
-                                "INTERVIEW_ENGINE_MODEL_DISTILLATION=...",
+                                "select another interview model at the next stable input boundary",
                             ) from e
                         if progress is not None:
                             import time as _t
@@ -628,7 +628,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                 f"distillation phase '{label}' produced output that fails validation, and the retry did not fix it.",
                                 f"validation detail: {str(e)[:300]}",
                                 "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model: "
-                                "INTERVIEW_ENGINE_MODEL_DISTILLATION=...",
+                                "select another interview model at the next stable input boundary",
                             ) from e
                         if progress is not None:
                             import time as _t

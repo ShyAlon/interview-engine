@@ -118,6 +118,9 @@ class SessionRegistry:
                 pending=session.program.advance(response) if session.program is not None else None
             except Exception:
                 session.sequence,session.status,session.next_step,session.open_input=prior
+                # The last committed input remains actionable after a failed
+                # model call. Preserve the typed boundary and checkpoint pin.
+                self._save(session)
                 raise
             session.responses[response.input_id]=response;session.open_input=None
             if session.program is not None:
@@ -134,7 +137,7 @@ class SessionRegistry:
             session=self.get(session_id)
             for item in session.route_history:
                 if item.idempotency_key == request.idempotency_key:
-                    if item.to_route != request.model_route or item.actor_id != request.actor_id:
+                    if item.to_route != request.model_route or item.to_model_map["probing"][1] != request.model or item.actor_id != request.actor_id:
                         raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"idempotency key reused with different request")
                     return self._event(session,EventType.ROUTE_CHANGED,route_change=item,sequence=item.session_sequence),session.snapshot()
             if session.status != ProcessStatus.WAITING_INPUT or session.open_input is None or session.next_step != NextStep.WAIT_INPUT:
@@ -145,8 +148,8 @@ class SessionRegistry:
             if program is None or not getattr(program,'model_map',None):
                 raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"session has no trustworthy pinned model")
             from . import session_models
-            target=session_models.resolve(request.model_route)
-            if target == program.model_map:
+            target=session_models.resolve(request.model_route,request.model)
+            if {stage:tuple(pair) for stage,pair in target.items()} == {stage:tuple(pair) for stage,pair in program.model_map.items()}:
                 raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"session already uses this model")
             # The immutable source map may have come from a legacy session. A
             # candidate is built only after target preflight and checkpoint read.
@@ -211,7 +214,7 @@ class SessionRegistry:
             pinned=payload.get("model_map")
             if not pinned:
                 raise UserFacingError("legacy session has no pinned model route.","It predates per-session routing.","Start a new session.")
-            try:session_models.validate(pinned)
+            try:session_models.validate(pinned,preflight=False)
             except UserFacingError:
                 log.warning("model.route.restore.reject session=%s route=%s stages=%s",session_id,request.model_route,json.dumps(pinned),exc_info=True)
                 raise
@@ -257,6 +260,18 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             route,model=session_models.initial_default()
             return {"route":route,"model":model}
         except UserFacingError as exc:raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render()).model_dump(mode="json"))
+
+    @app.get("/v1/model-routes/ollama/models",dependencies=[Depends(authenticate)])
+    def local_model_options():
+        from . import model_config
+        import httpx
+        endpoint=model_config._BASE_URLS["ollama"].rstrip("/")+"/models"
+        try:
+            response=httpx.get(endpoint,timeout=2);response.raise_for_status()
+            models=sorted({entry["id"] for entry in response.json().get("data",[]) if isinstance(entry,dict) and isinstance(entry.get("id"),str) and entry["id"]})
+        except (httpx.HTTPError,ValueError,KeyError) as exc:
+            raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"Ollama models could not be listed: {exc}",retryable=True).model_dump(mode="json"))
+        return {"models":models}
 
     @app.get("/v1/model-routes/{route}",dependencies=[Depends(authenticate)])
     def preview_model_route(route:str,initial_model:str|None=None):
