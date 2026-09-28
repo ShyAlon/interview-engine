@@ -1,5 +1,5 @@
-"""Per-stage model routing. THE model-agnostic layer: swapping providers is a
-config change here, never a refactor. Providers:
+"""Console-stage model defaults and shared model client configuration.
+HTTP interviews pin a session-owned route; .env cannot reroute a live session. Providers:
 
 - ollama    (DEFAULT - local-first, the product owner's standing call:
              "It should all be ollama by default. We'll change it once we go
@@ -9,7 +9,7 @@ config change here, never a refactor. Providers:
 - openai    (opt-in)
 - anthropic (opt-in)
 
-Every stage's override is deliberate (see ARCHITECTURE.md, ADR-0004):
+Console-stage overrides remain for non-HTTP workflows (see ARCHITECTURE.md, ADR-0004):
 - probing / distillation earn the strong model for founder-facing runs -
   they are the moat: INTERVIEW_ENGINE_MODEL_PROBING=deepseek:deepseek-chat etc.
 - phrasing / tiebreaks can drop to a cheaper tier without visible quality loss.
@@ -34,8 +34,8 @@ def _dotenv() -> dict[str, str]:
     """Config files, parsed once per process, most-shared first:
 
     1. <require-root>/.env - the SHARED config one directory up
-       (vmodel-spec-app/scripts/switch-model.sh writes there; one file drives
-       every process). Present only in the sibling-repo layout; absent in a
+       (system keys and endpoints live there; HTTP model routing belongs
+       to each persisted session). Present only in the sibling-repo layout; absent in a
        standalone checkout and nothing changes.
     2. ./.env - repo-local overrides for the rare per-repo deviation.
 
@@ -62,7 +62,7 @@ def _dotenv() -> dict[str, str]:
 def _env(key: str) -> str | None:
     """One setting lookup: the real environment wins, the repo-local .env
     fills the gap. Every external config read goes through here so a .env
-    written by switch-model.sh works for API keys too, not just routing."""
+    from the shared config remains available for API keys and endpoints."""
     return os.environ.get(key) or _dotenv().get(key)
 
 
@@ -123,7 +123,7 @@ def _check_truncated(resp, stage: str, cfg) -> None:
         "the model had more to emit than one call allows - the payload is truncated." + ollama_context,
         "rerun the same command - the checkpoint resumes at this stage. If it repeats, raise "
         f"{_MAX_TOKENS_ENV} only deliberately, or route the stage to another provider with "
-        "vmodel-spec-app/scripts/switch-model.sh.",
+        "the interview task model picker; console runs use explicit CLI settings.",
     )
 
 
@@ -324,7 +324,7 @@ def _guard_killed(stage: str, kind: str, waited: float, limit: int):
         "rerun the same command - the checkpoint resumes at this stage. If it repeats, check "
         "the provider is healthy (for ollama: ollama ps + server logs), raise "
         "VMODEL_LLM_CALL_TIMEOUT_S / VMODEL_LLM_STALL_TIMEOUT_S, or route the stage to another "
-        "provider with vmodel-spec-app/scripts/switch-model.sh.",
+        "provider using the interview task model picker.",
     )
 
 
@@ -431,7 +431,7 @@ def _preflight(cfg: "StageModel", stage: str) -> None:
             f"stage '{cfg.model}' is routed to provider '{cfg.provider}', but {env} is not set.",
             "no API key in the environment.",
             f"export {env}=... - remote providers are opt-in (the default is local Ollama); "
-            f"or route this stage back to local: INTERVIEW_ENGINE_MODEL_{stage.upper()}.=ollama:qwen2.5-coder:14b.",
+            "or select an available local model in the interview task. For console runs, fix the named CLI model setting.",
         )
 
 

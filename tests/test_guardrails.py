@@ -164,7 +164,7 @@ def test_insufficient_quota_is_billing_not_throughput():
     err = translate_llm_error(exc, "probing", "openai", "gpt-x", None)
     r = err.render()
     assert "no usable quota" in r and "billing" in r and "waiting changes nothing" in r
-    assert "switch-model.sh ollama" in r
+    assert "select an available Ollama model in the interview task" in r
 
 
 def test_true_rate_limit_names_throughput_and_retry_after():
