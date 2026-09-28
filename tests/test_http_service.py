@@ -269,3 +269,26 @@ def test_failed_legacy_input_stays_switchable_after_restart(monkeypatch,tmp_path
       model_route='ollama',model='phi4',expected_sequence=state['sequence'],expected_input_id=state['open_input']['input_id'],
       idempotency_key=uuid4(),actor_id='founder'))
     assert switched[1].model_map['probing']==('ollama','phi4')
+
+
+def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    from interview_engine.errors import UserFacingError
+    from interview_engine.http_service import default_program_factory
+    from vmodel_contracts.interactive import StartSessionRequest
+    old={stage:["ollama","qwen2.5-coder:14b"] for stage in session_models.STAGES}
+    path=tmp_path/"legacy"/"interview"/"http-session.json";path.parent.mkdir(parents=True);path.write_text(__import__("json").dumps({"model_map":old}))
+    monkeypatch.setattr("interview_engine.http_service.artifacts_root",lambda:tmp_path)
+    monkeypatch.setattr("interview_engine.application.artifacts_root",lambda arg=None:tmp_path)
+    calls=[]
+    def preflight(cfg,stage):
+        calls.append(cfg.model)
+        raise UserFacingError("retired model", "not installed", "choose another model")
+    monkeypatch.setattr("interview_engine.model_config._preflight",preflight)
+    class StubApplication:
+        def __init__(self,*args,**kwargs):
+            session_models.validate(kwargs["pinned_models"],kwargs["model_route"],preflight=False)
+            self.model_map=kwargs["pinned_models"]
+    monkeypatch.setattr("interview_engine.application.InterviewApplication",StubApplication)
+    restored=default_program_factory("legacy",StartSessionRequest(task_id="old",idea="idea",model_route="ollama"))
+    assert restored.model_map==old and calls==[]
