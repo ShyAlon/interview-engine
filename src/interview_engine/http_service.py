@@ -24,6 +24,7 @@ from vmodel_contracts.interactive import (
     EngineSnapshot, EventType, InputRequest, InputResponse, InteractiveEvent,
     NextStep, ProcessStatus, ProtocolError, ProtocolErrorCode,
     StartSessionRequest, StartSessionResponse, SubmitInputResponse,
+    ModelRouteSwitchRequest, ModelRouteSwitchResponse, RouteChangePayload,
 )
 
 
@@ -39,10 +40,14 @@ class EngineSession:
     responses: dict[UUID, InputResponse] = field(default_factory=dict)
     program: object | None = None
     request: StartSessionRequest | None = None
+    route_version: int = 0
+    route_history: list[RouteChangePayload] = field(default_factory=list)
 
     def snapshot(self) -> EngineSnapshot:
         return EngineSnapshot(session_id=self.session_id,task_id=self.task_id,sequence=self.sequence,
-            process_status=self.status,next_step=self.next_step,open_input=self.open_input)
+            process_status=self.status,next_step=self.next_step,open_input=self.open_input,
+            model_route=getattr(self.program,"model_route",None) or (self.request.model_route if self.request else None),
+            model_map=getattr(self.program,"model_map",None),route_version=self.route_version,route_history=self.route_history)
 
 
 class SessionRegistry:
@@ -60,7 +65,7 @@ class SessionRegistry:
             # Reject unavailable routes before recording a session or paying for a call.
             if self._program_factory is default_program_factory:
                 from . import session_models
-                try:session_models.validate(session_models.resolve(request.model_route))
+                try:session_models.validate(session_models.resolve(request.model_route,request.initial_model))
                 except UserFacingError:
                     log.warning("model.route.preflight.reject task=%s route=%s",request.task_id,request.model_route,exc_info=True)
                     raise
@@ -124,6 +129,60 @@ class SessionRegistry:
             self._save(session)
             return accepted,session.snapshot()
 
+    def switch_route(self, session_id:str, request:ModelRouteSwitchRequest)->tuple[InteractiveEvent,EngineSnapshot]:
+        with self._lock:
+            session=self.get(session_id)
+            for item in session.route_history:
+                if item.idempotency_key == request.idempotency_key:
+                    if item.to_route != request.model_route or item.actor_id != request.actor_id:
+                        raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"idempotency key reused with different request")
+                    return self._event(session,EventType.ROUTE_CHANGED,route_change=item,sequence=item.session_sequence),session.snapshot()
+            if session.status != ProcessStatus.WAITING_INPUT or session.open_input is None or session.next_step != NextStep.WAIT_INPUT:
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"session is not at a stable input boundary")
+            if session.sequence != request.expected_sequence or session.open_input.input_id != request.expected_input_id:
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"input or session sequence changed; refresh and retry")
+            program=session.program
+            if program is None or not getattr(program,'model_map',None):
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"session has no trustworthy pinned model")
+            from . import session_models
+            target=session_models.resolve(request.model_route)
+            if target == program.model_map:
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"session already uses this model")
+            # The immutable source map may have come from a legacy session. A
+            # candidate is built only after target preflight and checkpoint read.
+            session_models.validate(target,request.model_route)
+            if self._program_factory is default_program_factory:
+                from .application import InterviewApplication
+                candidate=InterviewApplication(session.session_id,session.task_id,session.request.idea,
+                    model_route=request.model_route,pinned_models=target)
+                # Read the same durable graph thread; never invoke a model during preflight.
+                checkpoint=candidate.graph.get_state(candidate.cfg)
+                if not checkpoint or not checkpoint.values:
+                    raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"no durable graph checkpoint for the open input")
+                candidate.result=checkpoint.values
+            elif hasattr(program,'candidate_for_route'):
+                candidate=program.candidate_for_route(request.model_route,target)
+            else:
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"program does not support model switching")
+            candidate.open_input=session.open_input
+            candidate.state=None
+            candidate.finished=False
+            version=session.route_version+1
+            if hasattr(candidate,'usage_log'):candidate.usage_log.route_version=version
+            payload=RouteChangePayload(actor_id=request.actor_id,from_route=program.model_route,
+                to_route=request.model_route,from_model_map=program.model_map,to_model_map=target,
+                route_version=version,session_sequence=session.sequence+1,idempotency_key=request.idempotency_key)
+            previous=(session.program,session.route_version,session.sequence)
+            session.program=candidate;session.route_version=version;session.sequence+=1;session.route_history.append(payload)
+            try:self._save(session)
+            except Exception:
+                session.route_history.pop();session.program,session.route_version,session.sequence=previous
+                raise
+            event=self._event(session,EventType.ROUTE_CHANGED,route_change=payload)
+            log.info('model.route.changed session=%s task=%s from=%s to=%s from_map=%s to_map=%s route_version=%s',
+                session.session_id,session.task_id,payload.from_route,payload.to_route,json.dumps(payload.from_model_map),json.dumps(payload.to_model_map),version)
+            return event,session.snapshot()
+
     def _state_path(self,session_id:str)->Path|None:
         return self._state_dir/session_id/'interview'/'http-session.json' if self._state_dir is not None else None
 
@@ -134,7 +193,8 @@ class SessionRegistry:
         payload={"session_id":session.session_id,"task_id":session.task_id,"phase_id":session.phase_id,"sequence":session.sequence,
             "status":int(session.status),"next_step":int(session.next_step),"open_input":session.open_input.model_dump(mode="json") if session.open_input else None,
             "responses":[response.model_dump(mode="json") for response in session.responses.values()],"request":session.request.model_dump(mode="json") if session.request else None,
-            "model_map":getattr(session.program,"model_map",None)}
+            "model_map":getattr(session.program,"model_map",None),"route_version":session.route_version,
+            "route_history":[item.model_dump(mode="json") for item in session.route_history]}
         temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(payload));temporary.replace(path)
 
     def _load(self,session_id:str)->EngineSession|None:
@@ -143,28 +203,37 @@ class SessionRegistry:
         payload=json.loads(path.read_text());request=StartSessionRequest.model_validate(payload["request"])
         session=EngineSession(session_id=payload["session_id"],task_id=payload["task_id"],phase_id=payload["phase_id"],sequence=payload["sequence"],
             status=ProcessStatus(payload["status"]),next_step=NextStep(payload["next_step"]),
-            open_input=InputRequest.model_validate(payload["open_input"]) if payload["open_input"] else None,request=request)
+            open_input=InputRequest.model_validate(payload["open_input"]) if payload["open_input"] else None,request=request,
+            route_version=payload.get("route_version",0),route_history=[RouteChangePayload.model_validate(item) for item in payload.get("route_history",[])])
         session.responses={response.input_id:response for response in (InputResponse.model_validate(item) for item in payload["responses"])}
         if self._program_factory is default_program_factory:
             from . import session_models
             pinned=payload.get("model_map")
             if not pinned:
                 raise UserFacingError("legacy session has no pinned model route.","It predates per-session routing.","Start a new session.")
-            try:session_models.validate(pinned,request.model_route)
+            try:session_models.validate(pinned)
             except UserFacingError:
                 log.warning("model.route.restore.reject session=%s route=%s stages=%s",session_id,request.model_route,json.dumps(pinned),exc_info=True)
                 raise
         if self._program_factory is not None:
-            session.program=self._program_factory(session.session_id,request)
+            current_route=session.route_history[-1].to_route if session.route_history else request.model_route
+            session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
             session.program.open_input=session.open_input
+            if session.open_input is not None and hasattr(session.program,'graph'):
+                checkpoint=session.program.graph.get_state(session.program.cfg)
+                if not checkpoint or not checkpoint.values:
+                    raise UserFacingError("saved session has no graph checkpoint.","The open input cannot be resumed safely.","Inspect the checkpoint and restore from backup.")
+                session.program.result=checkpoint.values
+                session.program.state=None
+            if hasattr(session.program,"usage_log"):session.program.usage_log.route_version=session.route_version
             log.info("model.route.restored session=%s task=%s route=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
         return session
 
     @staticmethod
-    def _event(session: EngineSession,event_type: EventType,*,input_request: InputRequest|None=None)->InteractiveEvent:
+    def _event(session: EngineSession,event_type: EventType,*,input_request: InputRequest|None=None,route_change:RouteChangePayload|None=None,sequence:int|None=None)->InteractiveEvent:
         return InteractiveEvent(event_id=uuid4(),session_id=session.session_id,task_id=session.task_id,
-            phase_id=session.phase_id,sequence=session.sequence,event_type=event_type,
-            process_status=session.status,next_step=session.next_step,input_request=input_request)
+            phase_id=session.phase_id,sequence=sequence if sequence is not None else session.sequence,event_type=event_type,
+            process_status=session.status,next_step=session.next_step,input_request=input_request,route_change=route_change)
 
 
 class ProtocolFailure(Exception):
@@ -181,12 +250,20 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             raise HTTPException(401,"invalid interview engine service token")
 
 
+    @app.get("/v1/model-routes/default",dependencies=[Depends(authenticate)])
+    def default_model_route():
+        from . import session_models
+        try:
+            route,model=session_models.initial_default()
+            return {"route":route,"model":model}
+        except UserFacingError as exc:raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render()).model_dump(mode="json"))
+
     @app.get("/v1/model-routes/{route}",dependencies=[Depends(authenticate)])
-    def preview_model_route(route:str):
+    def preview_model_route(route:str,initial_model:str|None=None):
         """Read-only HTTP route preview from the same resolver used at Start."""
         from . import session_models
         try:
-            models=session_models.resolve(route)
+            models=session_models.resolve(route,initial_model)
             session_models.validate(models,route)
         except UserFacingError as exc:
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
@@ -210,6 +287,18 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
         except UserFacingError as exc:
             log.warning("model.route.snapshot.reject session=%s reason=%s",session_id,exc.render(),exc_info=True)
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
+
+    @app.post("/v1/sessions/{session_id}/model-route",response_model=ModelRouteSwitchResponse,dependencies=[Depends(authenticate)])
+    def switch_model_route(session_id:str,request:ModelRouteSwitchRequest):
+        try:event,state=sessions.switch_route(session_id,request)
+        except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        except ProtocolFailure as failure:
+            log.warning('model.route.switch.reject session=%s reason=%s',session_id,failure.detail)
+            raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+        except UserFacingError as exc:
+            log.warning('model.route.switch.reject session=%s reason=%s',session_id,exc.render())
+            raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render()).model_dump(mode="json"))
+        return ModelRouteSwitchResponse(accepted_event=event,snapshot=state)
 
     @app.post("/v1/sessions/{session_id}/inputs/{input_id}",response_model=SubmitInputResponse,dependencies=[Depends(authenticate)])
     def submit(session_id:str,input_id:UUID,response:InputResponse):
@@ -239,7 +328,7 @@ def default_program_factory(session_id,request):
     if path.exists():
         payload=json.loads(path.read_text());pinned=payload.get('model_map')
         if not pinned:raise UserFacingError('legacy session has no pinned model route.','It predates per-session routing.','Keep its existing artifacts; start a new session rather than resuming under a different model.')
-    program=InterviewApplication(session_id,request.task_id,request.idea,model_route=request.model_route,pinned_models=pinned)
+    program=InterviewApplication(session_id,request.task_id,request.idea,model_route=request.model_route,pinned_models=pinned,initial_model=request.initial_model)
     log.info("model.route.effective session=%s task=%s selected=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(program.model_map))
     return program
 

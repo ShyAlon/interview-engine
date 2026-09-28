@@ -154,3 +154,66 @@ def test_http_input_preserves_separate_typed_rationale():
     response={'protocol_version':1,'input_id':pending['input_id'],'value':'1','rationale':'because it fits','actor_id':'founder'}
     done=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
     assert done.status_code==200 and program.received.rationale=='because it fits'
+
+class SwitchableProgram(FakeProgram):
+    def __init__(self,route='ollama',calls=None):
+        super().__init__();self.model_route=route;self.model_map={stage:(route,'phi4' if route=='ollama' else 'deepseek-flash') for stage in __import__('interview_engine.session_models',fromlist=['STAGES']).STAGES};self.observed=calls if calls is not None else []
+    def candidate_for_route(self,route,models):
+        other=SwitchableProgram(route,self.observed);other.model_map=models;other.pending=self.pending;return other
+    def advance(self,response=None):
+        if response is None:return self.pending
+        self.observed.append(self.model_route);self.finished=True;return None
+
+def test_explicit_route_switch_is_typed_idempotent_and_preserves_input(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    calls=[];factory=lambda sid,request:SwitchableProgram(request.model_route,calls)
+    registry=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(registry,service_token=TOKEN))
+    start=client.post('/v1/sessions',json={'task_id':'t','idea':'idea','model_route':'ollama'}).json();state=start['snapshot'];sid=state['session_id']
+    body={'model_route':'deepseek','expected_sequence':state['sequence'],'expected_input_id':state['open_input']['input_id'],'idempotency_key':str(uuid4()),'actor_id':'founder'}
+    route=client.post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert route.status_code==200,route.text
+    current=route.json()['snapshot'];assert current['model_route']=='deepseek' and current['route_version']==1
+    assert current['open_input']['input_id']==state['open_input']['input_id']
+    assert route.json()['accepted_event']['event_type']==EventType.ROUTE_CHANGED
+    replay=client.post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert replay.status_code==200 and len(replay.json()['snapshot']['route_history'])==1
+    assert client.post(f'/v1/sessions/{sid}/model-route',json={**body,'idempotency_key':str(uuid4())}).status_code==409
+    assert client.post(f'/v1/sessions/{sid}/inputs/{state["open_input"]["input_id"]}',json={'input_id':state['open_input']['input_id'],'value':'answer','actor_id':'founder'}).status_code==200
+    assert calls==['deepseek']
+    saved=__import__('json').loads((tmp_path/sid/'interview'/'http-session.json').read_text())
+    assert saved['route_version']==1 and len(saved['route_history'])==1
+
+
+def test_route_switch_rejected_while_not_waiting(monkeypatch):
+    from interview_engine import session_models
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    registry=SessionRegistry();client=authed(create_app(registry,service_token=TOKEN))
+    start=client.post('/v1/sessions',json={'task_id':'t','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=start['session_id']
+    body={'model_route':'deepseek','expected_sequence':start['sequence'],'expected_input_id':str(uuid4()),'idempotency_key':str(uuid4()),'actor_id':'founder'}
+    response=client.post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert response.status_code==409 and response.json()['detail']['code']==ProtocolErrorCode.ROUTE_SWITCH_CONFLICT
+
+def test_switched_session_restores_route_input_and_idempotency(monkeypatch,tmp_path):
+    from interview_engine import session_models
+    monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
+    def factory(sid,request):
+        program=SwitchableProgram(request.model_route)
+        path=tmp_path/sid/'interview'/'http-session.json'
+        if path.exists():
+            stored=__import__('json').loads(path.read_text())
+            program.model_map=stored['model_map']
+        return program
+    first=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(first,service_token=TOKEN))
+    started=client.post('/v1/sessions',json={'task_id':'task','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=started['session_id']
+    body={'model_route':'deepseek','expected_sequence':started['sequence'],'expected_input_id':started['open_input']['input_id'],
+          'idempotency_key':str(uuid4()),'actor_id':'founder'}
+    changed=client.post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert changed.status_code==200
+    second=SessionRegistry(factory,state_dir=tmp_path);restored=second.get(sid)
+    assert restored.snapshot().model_route=='deepseek' and restored.snapshot().route_version==1
+    assert restored.open_input.input_id==__import__('uuid').UUID(started['open_input']['input_id'])
+    retry=authed(create_app(second,service_token=TOKEN)).post(f'/v1/sessions/{sid}/model-route',json=body)
+    assert retry.status_code==200
+    assert retry.json()['accepted_event']['sequence']==changed.json()['accepted_event']['sequence']
+    assert len(retry.json()['snapshot']['route_history'])==1

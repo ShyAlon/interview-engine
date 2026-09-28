@@ -434,7 +434,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "typesafe-sdk", specifier = "==0.7.0" },
     { name = "uvicorn", specifier = ">=0.29" },
-    { name = "vmodel-contracts", git = "https://github.com/ShyAlon/vmodel-contracts.git?rev=84028d90ecc62de5fe808a36b343240dbe59283b" },
+    { name = "vmodel-contracts", git = "https://github.com/ShyAlon/vmodel-contracts.git?rev=e479e5b4908e1a5d2beb49801309b8eb156822f4" },
 ]
 provides-extras = ["anthropic", "dev"]
 
@@ -1689,7 +1689,7 @@ wheels = [
 [[package]]
 name = "vmodel-contracts"
 version = "0.19.0"
-source = { git = "https://github.com/ShyAlon/vmodel-contracts.git?rev=84028d90ecc62de5fe808a36b343240dbe59283b#84028d90ecc62de5fe808a36b343240dbe59283b" }
+source = { git = "https://github.com/ShyAlon/vmodel-contracts.git?rev=e479e5b4908e1a5d2beb49801309b8eb156822f4#e479e5b4908e1a5d2beb49801309b8eb156822f4" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },

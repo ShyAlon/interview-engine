@@ -409,11 +409,9 @@ def for_stage(stage: str) -> StageModel:
     pinned = selected(stage)
     if pinned:
         return StageModel(*pinned, temperature=cfg.temperature, max_tokens=cfg.max_tokens)
-    # Concept of Operations is part of interview understanding, not its own
-    # model tier. It MUST follow the shared distillation route. The first live
-    # run exposed why: all configured stages used phi4, while a new CONOPS key
-    # silently fell back to qwen. There is deliberately no
-    # INTERVIEW_ENGINE_MODEL_CONOPS setting.
+    # Console-era stage keys remain as CLI defaults only. HTTP sessions use
+    # the pinned map above, so no env key can override a session choice.
+    # ConOps follows distillation in the legacy CLI path.
     route = "distillation" if stage == "conops" else stage
     override = _env(f"INTERVIEW_ENGINE_MODEL_{route.upper()}")
     if override:

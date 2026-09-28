@@ -11,10 +11,9 @@ TOKEN='test-token'
 def test_selected_route_reads_matching_shared_env_and_is_isolated(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)
     with session_models.use(session_models.resolve('ollama')):
-        assert model_config.for_stage('probing').model=='phi4'
-        assert model_config.for_stage('conops').model=='phi4'
-    with pytest.raises(Exception,match='selected route.*conflicts with INTERVIEW_ENGINE_MODEL_PROBING'):
-        session_models.resolve('deepseek')
+        assert model_config.for_stage('probing').model=='qwen2.5-coder:14b'
+        assert model_config.for_stage('conops').model=='qwen2.5-coder:14b'
+    assert set(session_models.resolve('deepseek').values())=={('deepseek','deepseek-flash')}
     assert model_config.for_stage('probing').model=='phi4'  # legacy CLI still sees env
 
 @pytest.mark.parametrize('route',('unknown','local',''))
@@ -93,14 +92,14 @@ def test_worker_thread_inherits_pinned_route(monkeypatch):
 def test_http_ollama_env_pins_phi4_and_usage_route(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)
     models=session_models.resolve('ollama')
-    assert set(models.values())=={('ollama','phi4')}
+    assert set(models.values())=={('ollama','qwen2.5-coder:14b')}
     with session_models.use(models):
         cfg=model_config.for_stage('probing')
-        assert cfg.model=='phi4'
+        assert cfg.model=='qwen2.5-coder:14b'
         from interview_engine.telemetry import UsageLog
         from vmodel_contracts import StageTokenUsage
         recorded=[];UsageLog('test-session',sink=lambda item:recorded.append(item.model_dump(mode='json'))).record('probing',cfg.provider,cfg.model,{'input_tokens':12,'output_tokens':3})
-        assert recorded[0]['provider']=='ollama' and recorded[0]['model']=='phi4'
+        assert recorded[0]['provider']=='ollama' and recorded[0]['model']=='qwen2.5-coder:14b'
 
 
 def test_http_route_preview_and_start_share_env_resolution(monkeypatch):
@@ -109,24 +108,26 @@ def test_http_route_preview_and_start_share_env_resolution(monkeypatch):
     client=TestClient(create_app(service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
     response=client.get('/v1/model-routes/ollama')
     assert response.status_code==200
-    assert set(tuple(pair) for pair in response.json()['model_map'].values())=={('ollama','phi4')}
+    assert set(tuple(pair) for pair in response.json()['model_map'].values())=={('ollama','qwen2.5-coder:14b')}
 
 
-def test_env_and_route_conflict_rejected_with_named_key(monkeypatch):
-    monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key=='INTERVIEW_ENGINE_MODEL_PROBING' else None)
-    with pytest.raises(Exception,match='selected route.*conflicts with INTERVIEW_ENGINE_MODEL_PROBING'):
-        session_models.resolve('deepseek')
+def test_explicit_route_not_blocked_by_legacy_env(monkeypatch):
+    monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)
+    assert set(session_models.resolve('deepseek').values())=={('deepseek','deepseek-flash')}
+    assert session_models.initial_default()==('ollama','phi4')
 
 
-def test_divergent_env_stage_models_rejected(monkeypatch):
-    monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key=='INTERVIEW_ENGINE_MODEL_PROBING' else 'ollama:qwen2.5-coder:14b' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)
-    with pytest.raises(Exception,match='INTERVIEW_ENGINE_MODEL_PROBING=ollama:phi4'):
-        session_models.resolve('ollama')
+def test_divergent_legacy_defaults_diagnosed_only_at_default_lookup(monkeypatch):
+    settings={'INTERVIEW_ENGINE_MODEL_PROBING':'ollama:phi4','INTERVIEW_ENGINE_MODEL_EXPERT_OPINION':'ollama:qwen2.5-coder:14b'}
+    monkeypatch.setattr(model_config,'_env',lambda key:settings.get(key))
+    with pytest.raises(Exception) as caught:session_models.initial_default()
+    assert all(key in str(caught.value) for key in settings)
+    assert set(session_models.resolve('deepseek').values())=={('deepseek','deepseek-flash')}
 
 
 def test_env_has_priority_over_delivery_ollama_model(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else 'qwen2.5-coder:14b' if key=='DELIVERY_OLLAMA_MODEL' else None)
-    assert set(session_models.resolve('ollama').values())=={('ollama','phi4')}
+    assert set(session_models.resolve('ollama').values())=={('ollama','qwen2.5-coder:14b')}
 
 
 def test_catalog_fallback_when_shared_stage_env_absent(monkeypatch):
@@ -138,31 +139,19 @@ def test_partial_shared_env_inherits_phi4_for_unset_expert_opinion(monkeypatch):
     configured={'PROBING','DISTILLATION','PHRASING','SCOPE_TIEBREAK'}
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') and key.split('INTERVIEW_ENGINE_MODEL_')[1] in configured else None)
     models=session_models.resolve('ollama')
-    assert set(models.values())=={('ollama','phi4')}
-    assert models['expert_opinion']==('ollama','phi4')
-    assert models['conops']==('ollama','phi4')
+    assert set(models.values())=={('ollama','qwen2.5-coder:14b')}
+    assert models['expert_opinion']==('ollama','qwen2.5-coder:14b')
+    assert models['conops']==('ollama','qwen2.5-coder:14b')
     with session_models.use(models):
-        assert model_config.for_stage('expert_opinion').model=='phi4'
+        assert model_config.for_stage('expert_opinion').model=='qwen2.5-coder:14b'
 
 
-def test_divergent_configured_values_name_both_keys(monkeypatch):
+def test_route_preview_with_divergent_legacy_defaults_allows_explicit_choice(monkeypatch):
     settings={'INTERVIEW_ENGINE_MODEL_PROBING':'ollama:phi4','INTERVIEW_ENGINE_MODEL_EXPERT_OPINION':'ollama:qwen2.5-coder:14b'}
-    monkeypatch.setattr(model_config,'_env',lambda key:settings.get(key))
-    with pytest.raises(Exception) as caught:session_models.resolve('ollama')
-    assert all(key in str(caught.value) for key in settings)
-
-
-def test_route_preview_partial_phi4_env_and_named_divergence(monkeypatch):
-    settings={key:'ollama:phi4' for key in ('INTERVIEW_ENGINE_MODEL_PROBING','INTERVIEW_ENGINE_MODEL_DISTILLATION','INTERVIEW_ENGINE_MODEL_PHRASING','INTERVIEW_ENGINE_MODEL_SCOPE_TIEBREAK')}
     monkeypatch.setattr(model_config,'_env',lambda key:settings.get(key))
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
     client=TestClient(create_app(service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
-    response=client.get('/v1/model-routes/ollama')
-    assert response.status_code==200
-    assert set(tuple(pair) for pair in response.json()['model_map'].values())=={('ollama','phi4')}
-    settings['INTERVIEW_ENGINE_MODEL_EXPERT_OPINION']='ollama:qwen2.5-coder:14b'
-    response=client.get('/v1/model-routes/ollama')
-    assert response.status_code==422
-    detail=str(response.json())
-    assert 'INTERVIEW_ENGINE_MODEL_EXPERT_OPINION' in detail
-    assert 'INTERVIEW_ENGINE_MODEL_PROBING' in detail
+    assert client.get('/v1/model-routes/ollama').status_code==200
+    default=client.get('/v1/model-routes/default')
+    assert default.status_code==422
+    assert all(key in str(default.json()) for key in settings)
