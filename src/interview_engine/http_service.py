@@ -300,7 +300,10 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
         try:return sessions.get(session_id).snapshot()
         except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
         except UserFacingError as exc:
-            log.warning("model.route.snapshot.reject session=%s reason=%s",session_id,exc.render(),exc_info=True)
+            if exc.what == "legacy session has no pinned model route.":
+                log.info("model.route.snapshot.legacy_unpinned session=%s: preserving historical session without pinned routing",session_id)
+            else:
+                log.warning("model.route.snapshot.reject session=%s reason=%s",session_id,exc.render().replace("\n"," | "))
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
 
     @app.post("/v1/sessions/{session_id}/model-route",response_model=ModelRouteSwitchResponse,dependencies=[Depends(authenticate)])
