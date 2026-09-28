@@ -76,6 +76,26 @@ def test_ollama_preflight_missing_model(monkeypatch):
     with pytest.raises(Exception,match='unavailable'):
         session_models.validate(session_models.resolve('ollama'))
 
+def test_ollama_preflight_accepts_implicit_latest_tag(monkeypatch):
+    class Response:
+        def raise_for_status(self):pass
+        def json(self):return {"data":[{"id":"phi4:latest"}]}
+    monkeypatch.setattr('httpx.get',lambda *args,**kwargs:Response())
+    models=session_models.resolve('ollama',initial_model='phi4')
+    session_models.validate(models,'ollama')
+    assert models['probing']==('ollama','phi4')
+
+
+def test_ollama_preflight_does_not_match_other_tag(monkeypatch):
+    class Response:
+        def raise_for_status(self):pass
+        def json(self):return {"data":[{"id":"phi4:other"}]}
+    monkeypatch.setattr('httpx.get',lambda *args,**kwargs:Response())
+    with pytest.raises(Exception,match="unavailable") as caught:
+        session_models.validate(session_models.resolve('ollama',initial_model='phi4'),'ollama')
+    assert "choose an installed model" in caught.value.render()
+
+
 def test_ollama_preflight_inaccessible(monkeypatch):
     import httpx
     def fail(*args,**kwargs):raise httpx.ConnectError('connection refused')
