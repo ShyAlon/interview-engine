@@ -321,3 +321,20 @@ def test_expected_unpinned_legacy_snapshot_logs_one_info_without_traceback(tmp_p
  lines=[record for record in caplog.records if record.name=='interview_engine.http']
  assert len(lines)==1 and lines[0].levelno==logging.INFO
  assert 'legacy_unpinned' in lines[0].getMessage() and not lines[0].exc_info
+def test_sparse_conops_failure_is_typed_nonretryable_with_way_forward():
+    from interview_engine.errors import UserFacingError
+    class SparseProgram(FakeProgram):
+        def advance(self,response=None):
+            if response is None:return self.pending
+            raise UserFacingError('CONOPS cannot start: the interview lacks stakeholder and scenario evidence.',
+                'validated intent has 0 stakeholder context seeds.',
+                'Start a new interview and answer who uses the product and a real-world workflow.')
+    program=SparseProgram()
+    client=authed(create_app(SessionRegistry(lambda session_id,request:program),service_token=TOKEN))
+    started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json()
+    pending=started['snapshot']['open_input']
+    failed=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",
+                       json={'protocol_version':1,'input_id':pending['input_id'],'value':'finish','actor_id':'founder'})
+    detail=failed.json()['detail']
+    assert failed.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE
+    assert detail['retryable'] is False and 'Start a new interview' in detail['detail']

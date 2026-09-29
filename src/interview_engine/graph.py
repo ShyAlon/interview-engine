@@ -190,6 +190,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         parked_topics = list(state.get("parked_topics") or [])
         turn = state.get("turn_count", 0) + 1
         classified_control = None
+        # Explicit exact stop words outrank the intent classifier. They are
+        # code-owned commands, not another answer for the model to reinterpret.
+        exact_control = (founder_control(getattr(last, "content", ""))
+                         if last is not None and getattr(last, "type", "") == "human" else None)
 
         # Repeated non-answer guard (2026-09-23 smoke): the same substantive
         # answer pasted at consecutive questions is a dodge, not an answer.
@@ -217,6 +221,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         f"(strike {repeat_strikes})"))
 
         if (last is not None and getattr(last, "type", "") == "human" and len(state.get("messages") or []) > 1
+                and exact_control != "enough"
                 and (categorizer.active("coverage") or categorizer.active("intent"))):
             from .categorization import apply_coverage_answers, classified_intent, coverage_request, intent_request
             prior_question = next((getattr(m, "content", "") for m in reversed(state["messages"][:-1])
@@ -290,8 +295,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 coverage[area_label] = DELEGATED
 
         # founder control (ADR-0016): deterministic, never costs a model call
-        control = (classified_control if categorizer.active("intent") else
-                   (founder_control(getattr(last, "content", "")) if last is not None else None))
+        control = (exact_control if exact_control == "enough" else
+                   (classified_control if categorizer.active("intent") else exact_control))
         if control is None and steer_skip:
             control = "skip"  # fallback path: a move-on phrase founder_control's strict regex misses
         control = control if control in ("skip", "enough") else None
@@ -925,6 +930,17 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         intent = state.get("intent_model") or {}
         context_seeds = derive_stakeholder_contexts(intent, founder_turns)
         scenario_seeds = [derive_scenario(x, intent) for x in scenario_seeds_from_intent(intent, founder_turns)]
+        # Missing operational evidence cannot be repaired by generating two
+        # plausible concepts. Reject before the first expensive CONOPS call.
+        if (not context_seeds or not scenario_seeds
+                or not any(seed.get("source_turns") for seed in context_seeds)
+                or not any(seed.get("source_turns") for seed in scenario_seeds)):
+            raise UserFacingError(
+                "CONOPS cannot start: the interview lacks stakeholder and scenario evidence.",
+                f"validated intent has {len(context_seeds)} stakeholder context seed(s) and "
+                f"{len(scenario_seeds)} operational scenario seed(s).",
+                "Start a new interview and answer who uses the product and at least one real-world "
+                "workflow before ending it; the current incomplete CONOPS is not an approval gate.")
 
         raw_paths: dict[str, str] = {}
         def call_json(system_text: str, body: str, label: str, detail: str,
