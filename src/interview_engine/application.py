@@ -37,6 +37,18 @@ class InterviewApplication:
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
         self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
+        from .progress_journal import ProgressJournal
+        self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
+        def journal_signal(ev):
+            # The interview graph emits intent and ConOps stages through one bus.
+            phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
+            self.progress_journal.append(phase_key=phase,stage=ev.stage,label=ev.label,
+                status=ev.status if ev.status in ("started","completed","failed","heartbeat") else "heartbeat",detail=ev.detail)
+        progress.subscribe(journal_signal)
+        def heartbeat_signal(stage, label, elapsed):
+            self.progress_journal.append(phase_key="conops" if "conops" in stage.lower() else "intent",
+                stage=stage,label=label,status="heartbeat",detail=f"Model call still running, {elapsed:.0f}s elapsed")
+        self._heartbeat_signal=heartbeat_signal
         with self._runtime_context():
             self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug',
                 session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
@@ -49,10 +61,13 @@ class InterviewApplication:
     @contextmanager
     def _runtime_context(self):
         token=model_config._session_llm_log.set(str(self.outdir/'llm-calls.jsonl'))
+        heartbeat_token=model_config._progress_heartbeat.set(self._heartbeat_signal)
         try:
             with session_models.use(self.model_map) if self.model_map is not None else nullcontext():
                 yield
-        finally:model_config._session_llm_log.reset(token)
+        finally:
+            model_config._progress_heartbeat.reset(heartbeat_token)
+            model_config._session_llm_log.reset(token)
 
     def advance(self,response:InputResponse|None=None):
         if response is not None:
