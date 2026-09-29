@@ -142,6 +142,7 @@ def _guard_limits() -> tuple[int, int, int]:
 
 
 _session_llm_log: ContextVar[str | None] = ContextVar("session_llm_log", default=None)
+_progress_heartbeat: ContextVar[object | None] = ContextVar("progress_heartbeat", default=None)
 
 def _llm_log_sink() -> str | None:
     """VMODEL_LLM_LOG: unset = off (default, zero cost); 'stderr' = console;
@@ -240,12 +241,17 @@ def _start_heartbeat(label: str):
         return lambda: None
     t0 = time.monotonic()
     stop = threading.Event()
+    sink = _progress_heartbeat.get()  # capture before the daemon thread starts
 
     def _beat() -> None:
         while not stop.wait(interval):
             if stop.is_set():  # a beat already past the wait must not print after the call returned
                 break
-            _console_line(f"  ... still working - {label}, {time.monotonic() - t0:.0f}s elapsed")
+            elapsed=time.monotonic() - t0
+            _console_line(f"  ... still working - {label}, {elapsed:.0f}s elapsed")
+            if sink is not None:
+                try:sink(label, label, elapsed)
+                except Exception:pass
 
     threading.Thread(target=_beat, daemon=True).start()
     return stop.set

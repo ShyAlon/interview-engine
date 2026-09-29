@@ -60,8 +60,10 @@ class SessionRegistry:
 
     def start(self, request: StartSessionRequest) -> tuple[EngineSession,InteractiveEvent]:
         with self._lock:
-            session=EngineSession(session_id=str(uuid4()),task_id=request.task_id,sequence=1,
+            session=EngineSession(session_id=str(request.session_id or uuid4()),task_id=request.task_id,sequence=1,
                 status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
+            if session.session_id in self._sessions or (self._state_path(session.session_id) is not None and self._state_path(session.session_id).exists()):
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session ID already exists")
             # Reject unavailable routes before recording a session or paying for a call.
             if self._program_factory is default_program_factory:
                 from . import session_models
@@ -111,6 +113,8 @@ class SessionRegistry:
                 raise ProtocolFailure(ProtocolErrorCode.DUPLICATE_RESPONSE,"input already has a different response")
             if session.open_input is None:raise ProtocolFailure(ProtocolErrorCode.UNKNOWN_INPUT,"session has no open input")
             if session.open_input.input_id != response.input_id:raise ProtocolFailure(ProtocolErrorCode.STALE_INPUT,"input is no longer open")
+            if response.expected_sequence is not None and response.expected_sequence != session.sequence:
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_SEQUENCE,"session sequence changed; refresh the open input")
             prior=(session.sequence,session.status,session.next_step,session.open_input)
             session.sequence+=1;session.status=ProcessStatus.RUNNING;session.next_step=NextStep.RUN
             accepted=self._event(session,EventType.INPUT_ACCEPTED)
@@ -185,6 +189,15 @@ class SessionRegistry:
             log.info('model.route.changed session=%s task=%s from=%s to=%s from_map=%s to_map=%s route_version=%s',
                 session.session_id,session.task_id,payload.from_route,payload.to_route,json.dumps(payload.from_model_map),json.dumps(payload.to_model_map),version)
             return event,session.snapshot()
+
+    def progress(self, session_id: str, after: int = 0, limit: int = 100):
+        # Never acquire the registry's long-lived graph/control lock here.
+        from .progress_journal import ProgressJournal
+        root = self._state_dir
+        if root is None or not (root / session_id / "interview" / "progress.sqlite").exists():
+            raise KeyError(session_id)
+        from vmodel_contracts.progress_signal import ProgressPage
+        return ProgressJournal(root, session_id, "", create=False).read(after, limit)
 
     def _state_path(self,session_id:str)->Path|None:
         return self._state_dir/session_id/'interview'/'http-session.json' if self._state_dir is not None else None
@@ -287,6 +300,8 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
     @app.post("/v1/sessions",response_model=StartSessionResponse,status_code=201,dependencies=[Depends(authenticate)])
     def start(request:StartSessionRequest):
         try:session,event=sessions.start(request)
+        except ProtocolFailure as failure:
+            raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
         except UserFacingError as exc:
             log.warning("interview session start needs action task=%s error=%s",request.task_id,exc.render().replace("\n"," | "))
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
@@ -294,6 +309,12 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             log.exception("interview session start failed task=%s",request.task_id)
             raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed during start: {type(exc).__name__}",retryable=True).model_dump(mode="json"))
         return StartSessionResponse(snapshot=session.snapshot(),accepted_event=event)
+
+    @app.get("/v1/sessions/{session_id}/progress",dependencies=[Depends(authenticate)])
+    def progress(session_id:str,after:int=0,limit:int=100):
+        if after<0 or limit<1 or limit>500:raise HTTPException(422,"invalid progress cursor or page size")
+        try:return sessions.progress(session_id,after,limit)
+        except KeyError:raise HTTPException(404,"session has no progress journal")
 
     @app.get("/v1/sessions/{session_id}",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
     def snapshot(session_id:str):
@@ -322,7 +343,7 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
         try:event,state=sessions.respond(session_id,response)
         except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
         except ProtocolFailure as failure:
-            status=409 if failure.code in (ProtocolErrorCode.STALE_INPUT,ProtocolErrorCode.DUPLICATE_RESPONSE) else 422
+            status=409 if failure.code in (ProtocolErrorCode.STALE_INPUT,ProtocolErrorCode.DUPLICATE_RESPONSE,ProtocolErrorCode.INVALID_SEQUENCE) else 422
             raise HTTPException(status,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
         except UserFacingError as exc:
             log.warning("interview input needs action session=%s input=%s error=%s",session_id,input_id,exc.render().replace("\n"," | "),exc_info=True)
