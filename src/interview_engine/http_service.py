@@ -42,6 +42,8 @@ class EngineSession:
     request: StartSessionRequest | None = None
     route_version: int = 0
     route_history: list[RouteChangePayload] = field(default_factory=list)
+    write_lock: RLock = field(default_factory=RLock, repr=False, compare=False)
+    published: EngineSnapshot | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> EngineSnapshot:
         return EngineSnapshot(session_id=self.session_id,task_id=self.task_id,sequence=self.sequence,
@@ -58,34 +60,52 @@ class SessionRegistry:
         self._state_dir=Path(state_dir) if state_dir is not None else None
         self._lock=RLock()
 
+    @staticmethod
+    def _publish(session:EngineSession)->EngineSnapshot:
+        # Publish a distinct validated value whenever control state changes.
+        # HTTP readers receive their own copy and cannot mutate this cache.
+        session.published=session.snapshot().model_copy(deep=True)
+        return session.published
+
+    def snapshot(self,session_id:str)->EngineSnapshot:
+        # Active control reads do not touch an in-flight graph or its write lock.
+        session=self.get(session_id)
+        if session.published is None:raise KeyError(session_id)
+        return session.published.model_copy(deep=True)
+
     def start(self, request: StartSessionRequest) -> tuple[EngineSession,InteractiveEvent]:
+        session=EngineSession(session_id=str(request.session_id or uuid4()),task_id=request.task_id,sequence=1,
+            status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
+        # Reserve the ID immediately, but don't advertise it until preflight
+        # succeeds. No model call runs under the global registry lock.
         with self._lock:
-            session=EngineSession(session_id=str(request.session_id or uuid4()),task_id=request.task_id,sequence=1,
-                status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
             if session.session_id in self._sessions or (self._state_path(session.session_id) is not None and self._state_path(session.session_id).exists()):
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session ID already exists")
-            # Reject unavailable routes before recording a session or paying for a call.
-            if self._program_factory is default_program_factory:
-                from . import session_models
-                try:session_models.validate(session_models.resolve(request.model_route,request.initial_model))
-                except UserFacingError:
-                    log.warning("model.route.preflight.reject task=%s route=%s",request.task_id,request.model_route,exc_info=True)
-                    raise
-                log.info("model.route.preflight.accept task=%s route=%s",request.task_id,request.model_route)
-            started=self._event(session,EventType.RUN_STARTED)
-            try:
+            self._sessions[session.session_id]=session
+        started=self._event(session,EventType.RUN_STARTED)
+        try:
+            with session.write_lock:
+                if self._program_factory is default_program_factory:
+                    from . import session_models
+                    session_models.validate(session_models.resolve(request.model_route,request.initial_model))
+                    log.info("model.route.preflight.accept task=%s route=%s",request.task_id,request.model_route)
+                # Preflight has passed; publish a RUNNING snapshot before
+                # constructing or invoking the potentially slow program.
+                self._publish(session)
                 if self._program_factory is not None:
                     session.program=self._program_factory(session.session_id,request)
                     log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
                     pending=session.program.advance()
                     if pending is not None:
                         session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
-            except Exception:
-                log.exception("model.route.start.failed session=%s task=%s selected=%s",session.session_id,request.task_id,request.model_route)
-                raise
-            self._save(session)
-            self._sessions[session.session_id]=session
+                self._save(session)
+                self._publish(session)
             return session,started
+        except Exception:
+            log.exception("model.route.start.failed session=%s task=%s selected=%s",session.session_id,request.task_id,request.model_route)
+            with self._lock:
+                self._sessions.pop(session.session_id,None)
+            raise
 
     def get(self, session_id: str) -> EngineSession:
         with self._lock:
@@ -94,22 +114,26 @@ class SessionRegistry:
                 session=self._load(session_id)
                 if session is not None:self._sessions[session_id]=session
             if session is None: raise KeyError(session_id)
+            if session.published is None and self._state_path(session_id) is not None and self._state_path(session_id).exists():
+                self._publish(session)
             return session
 
     def publish(self, session_id: str, event_type: EventType, *, phase_id: int,
                 status: ProcessStatus, next_step: NextStep,
                 input_request: InputRequest | None=None) -> InteractiveEvent:
-        with self._lock:
-            session=self.get(session_id);session.sequence+=1;session.phase_id=phase_id
+        session=self.get(session_id)
+        with session.write_lock:
+            session.sequence+=1;session.phase_id=phase_id
             session.status=status;session.next_step=next_step;session.open_input=input_request;self._save(session)
+            self._publish(session)
             return self._event(session,event_type,input_request=input_request)
 
     def respond(self, session_id: str, response: InputResponse) -> tuple[InteractiveEvent,EngineSnapshot]:
-        with self._lock:
-            session=self.get(session_id)
+        session=self.get(session_id)
+        with session.write_lock:
             if response.input_id in session.responses:
                 if session.responses[response.input_id] == response:
-                    return self._event(session,EventType.INPUT_ACCEPTED),session.snapshot()
+                    return self._event(session,EventType.INPUT_ACCEPTED),session.published or self._publish(session)
                 raise ProtocolFailure(ProtocolErrorCode.DUPLICATE_RESPONSE,"input already has a different response")
             if session.open_input is None:raise ProtocolFailure(ProtocolErrorCode.UNKNOWN_INPUT,"session has no open input")
             if session.open_input.input_id != response.input_id:raise ProtocolFailure(ProtocolErrorCode.STALE_INPUT,"input is no longer open")
@@ -117,6 +141,10 @@ class SessionRegistry:
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_SEQUENCE,"session sequence changed; refresh the open input")
             prior=(session.sequence,session.status,session.next_step,session.open_input)
             session.sequence+=1;session.status=ProcessStatus.RUNNING;session.next_step=NextStep.RUN
+            # The accepted answer is in flight, not committed. Never expose its
+            # old input as actionable while the model is advancing.
+            session.open_input=None
+            self._publish(session)
             accepted=self._event(session,EventType.INPUT_ACCEPTED)
             try:
                 pending=session.program.advance(response) if session.program is not None else None
@@ -125,6 +153,7 @@ class SessionRegistry:
                 # The last committed input remains actionable after a failed
                 # model call. Preserve the typed boundary and checkpoint pin.
                 self._save(session)
+                self._publish(session)
                 raise
             session.responses[response.input_id]=response;session.open_input=None
             if session.program is not None:
@@ -134,16 +163,16 @@ class SessionRegistry:
                 else:
                     session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
             self._save(session)
-            return accepted,session.snapshot()
+            return accepted,self._publish(session)
 
     def switch_route(self, session_id:str, request:ModelRouteSwitchRequest)->tuple[InteractiveEvent,EngineSnapshot]:
-        with self._lock:
-            session=self.get(session_id)
+        session=self.get(session_id)
+        with session.write_lock:
             for item in session.route_history:
                 if item.idempotency_key == request.idempotency_key:
                     if item.to_route != request.model_route or item.to_model_map["probing"][1] != request.model or item.actor_id != request.actor_id:
                         raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"idempotency key reused with different request")
-                    return self._event(session,EventType.ROUTE_CHANGED,route_change=item,sequence=item.session_sequence),session.snapshot()
+                    return self._event(session,EventType.ROUTE_CHANGED,route_change=item,sequence=item.session_sequence),session.published or self._publish(session)
             if session.status != ProcessStatus.WAITING_INPUT or session.open_input is None or session.next_step != NextStep.WAIT_INPUT:
                 raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"session is not at a stable input boundary")
             if session.sequence != request.expected_sequence or session.open_input.input_id != request.expected_input_id:
@@ -186,9 +215,10 @@ class SessionRegistry:
                 session.route_history.pop();session.program,session.route_version,session.sequence=previous
                 raise
             event=self._event(session,EventType.ROUTE_CHANGED,route_change=payload)
+            self._publish(session)
             log.info('model.route.changed session=%s task=%s from=%s to=%s from_map=%s to_map=%s route_version=%s',
                 session.session_id,session.task_id,payload.from_route,payload.to_route,json.dumps(payload.from_model_map),json.dumps(payload.to_model_map),version)
-            return event,session.snapshot()
+            return event,session.published
 
     def progress(self, session_id: str, after: int = 0, limit: int = 100):
         # Never acquire the registry's long-lived graph/control lock here.
@@ -318,7 +348,7 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
 
     @app.get("/v1/sessions/{session_id}",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
     def snapshot(session_id:str):
-        try:return sessions.get(session_id).snapshot()
+        try:return sessions.snapshot(session_id)
         except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
         except UserFacingError as exc:
             if exc.what == "legacy session has no pinned model route.":
