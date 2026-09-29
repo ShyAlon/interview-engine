@@ -338,3 +338,137 @@ def test_sparse_conops_failure_is_typed_nonretryable_with_way_forward():
     detail=failed.json()['detail']
     assert failed.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE
     assert detail['retryable'] is False and 'Start a new interview' in detail['detail']
+
+class BlockingProgram(FakeProgram):
+    def __init__(self,entered,release):
+        super().__init__();self.entered=entered;self.release=release
+    def advance(self,response=None):
+        if response is None:return self.pending
+        self.entered.set()
+        if not self.release.wait(5):raise RuntimeError('test model call never released')
+        self.finished=True;return None
+
+
+def test_model_advance_does_not_block_snapshot_other_sessions_or_progress(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from vmodel_contracts.interactive import StartSessionRequest,InputResponse
+    entered=Event();release=Event();program=BlockingProgram(entered,release)
+    registry=SessionRegistry(lambda sid,request:program,state_dir=tmp_path)
+    first,_=registry.start(StartSessionRequest(task_id='first',idea='first',model_route='deepseek'))
+    other,_=registry.start(StartSessionRequest(task_id='second',idea='second',model_route='deepseek'))
+    prior=registry.snapshot(first.session_id);pending=prior.open_input
+    response=InputResponse(input_id=pending.input_id,expected_sequence=prior.sequence,value='yes',actor_id='founder')
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        submitted=executor.submit(registry.respond,first.session_id,response)
+        try:
+            assert entered.wait(2)
+            # No control read can expose the old question while it is being answered.
+            current=executor.submit(registry.snapshot,first.session_id).result(timeout=.5)
+            assert current.process_status==ProcessStatus.RUNNING and current.open_input is None
+            assert current.sequence==prior.sequence+1
+            assert registry.snapshot(other.session_id).task_id=='second'
+            # Concurrent duplicate writes serialize behind the advance.
+            duplicate=executor.submit(registry.respond,first.session_id,response)
+            import time
+            time.sleep(.03);assert not duplicate.done()
+            from interview_engine.progress_journal import ProgressJournal
+            ProgressJournal(tmp_path,first.session_id,'first').append(phase_key='intent',stage='probe',label='still working',status='heartbeat')
+            page=executor.submit(registry.progress,first.session_id,0).result(timeout=.5)
+            assert page.events
+        finally:release.set()
+        accepted,done=submitted.result(timeout=2)
+        _,replayed=duplicate.result(timeout=2)
+    assert done.process_status==ProcessStatus.COMPLETED and replayed.sequence==done.sequence
+    saved=__import__('json').loads((tmp_path/first.session_id/'interview'/'http-session.json').read_text())
+    assert len(saved['responses'])==1 and saved['sequence']==done.sequence
+    assert registry.snapshot(first.session_id).sequence==done.sequence
+
+
+def test_blocked_model_start_exposes_running_snapshot_and_other_session(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from vmodel_contracts.interactive import StartSessionRequest
+    entered=Event();release=Event()
+    class BlockingStart(FakeProgram):
+        def advance(self,response=None):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('test start never released')
+            return self.pending
+    registry=SessionRegistry(lambda sid,request:BlockingStart(),state_dir=tmp_path)
+    request=StartSessionRequest(task_id='first',idea='first',model_route='deepseek',session_id=uuid4())
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        started=executor.submit(registry.start,request)
+        try:
+            assert entered.wait(2)
+            snapshot=executor.submit(registry.snapshot,str(request.session_id)).result(timeout=.5)
+            assert snapshot.process_status==ProcessStatus.RUNNING and snapshot.open_input is None
+            other_request=StartSessionRequest(task_id='second',idea='second',model_route='deepseek',session_id=uuid4())
+            other=executor.submit(registry.start,other_request)
+            # Other start can reserve and publish without waiting for the first model.
+            import time
+            time.sleep(.03)
+            assert registry.snapshot(str(other_request.session_id)).process_status==ProcessStatus.RUNNING
+        finally:release.set()
+        started.result(timeout=2);other.result(timeout=2)
+
+def test_failed_blocked_advance_restores_published_input_and_sequence(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from vmodel_contracts.interactive import StartSessionRequest,InputResponse
+    entered=Event();release=Event()
+    class FailingBlocked(FakeProgram):
+        def advance(self,response=None):
+            if response is None:return self.pending
+            entered.set()
+            if not release.wait(5):raise RuntimeError('test model did not finish')
+            raise RuntimeError('provider rejected the call')
+    registry=SessionRegistry(lambda sid,request:FailingBlocked(),state_dir=tmp_path)
+    session,_=registry.start(StartSessionRequest(task_id='first',idea='idea',model_route='deepseek'))
+    before=registry.snapshot(session.session_id)
+    response=InputResponse(input_id=before.open_input.input_id,expected_sequence=before.sequence,value='reply',actor_id='founder')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        work=pool.submit(registry.respond,session.session_id,response)
+        try:
+            assert entered.wait(2)
+            running=pool.submit(registry.snapshot,session.session_id).result(timeout=.5)
+            assert running.process_status==ProcessStatus.RUNNING and running.open_input is None
+        finally:release.set()
+        import pytest
+        with pytest.raises(RuntimeError,match='provider rejected'):work.result(timeout=2)
+    after=registry.snapshot(session.session_id)
+    assert after.sequence==before.sequence and after.open_input==before.open_input
+    assert after.process_status==ProcessStatus.WAITING_INPUT
+    assert not session.responses
+    assert __import__('json').loads((tmp_path/session.session_id/'interview'/'http-session.json').read_text())['sequence']==before.sequence
+
+
+def test_snapshot_read_cannot_mutate_published_control():
+    from vmodel_contracts.interactive import StartSessionRequest
+    registry=SessionRegistry(lambda sid,request:FakeProgram())
+    session,_=registry.start(StartSessionRequest(task_id='first',idea='idea',model_route='deepseek'))
+    read=registry.snapshot(session.session_id)
+    read.open_input.options.append(InputOption(value='bogus',label='Bogus'))
+    assert not registry.snapshot(session.session_id).open_input.options
+
+def test_blocked_http_submit_allows_concurrent_http_snapshot_and_progress(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from interview_engine.progress_journal import ProgressJournal
+    entered=Event();release=Event();registry=SessionRegistry(lambda sid,req:BlockingProgram(entered,release),state_dir=tmp_path)
+    app=create_app(registry,service_token=TOKEN)
+    started=authed(app).post('/v1/sessions',json={'task_id':'t','idea':'i','model_route':'deepseek'}).json()['snapshot']
+    sid=started['session_id'];input_id=started['open_input']['input_id']
+    ProgressJournal(tmp_path,sid,'t').append(phase_key='intent',stage='probing',label='Started',status='started')
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        work=pool.submit(lambda:authed(app).post(f'/v1/sessions/{sid}/inputs/{input_id}',json={
+            'input_id':input_id,'expected_sequence':started['sequence'],'value':'yes','actor_id':'founder'}))
+        try:
+            assert entered.wait(2)
+            state=pool.submit(lambda:authed(app).get(f'/v1/sessions/{sid}')).result(timeout=.75)
+            page=pool.submit(lambda:authed(app).get(f'/v1/sessions/{sid}/progress')).result(timeout=.75)
+            assert state.status_code==200 and state.json()['process_status']==ProcessStatus.RUNNING
+            assert state.json()['open_input'] is None
+            assert page.status_code==200 and page.json()['events']
+        finally:release.set()
+        assert work.result(timeout=2).status_code==200
