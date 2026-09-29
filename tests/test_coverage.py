@@ -364,3 +364,32 @@ def test_turn_parser_rejects_incomplete_or_invalid_envelope():
 def test_structured_turn_example_placeholder_is_not_a_real_question():
     from interview_engine.coverage import extract_turn_json
     assert extract_turn_json('{"question":"one short concrete question","covered":[],"thin":[],"skipped":[],"complete":false}') is None
+
+
+def test_exact_finish_outvotes_active_intent_classifier_without_extra_calls(monkeypatch):
+    from interview_engine.categorization import ClassificationAnswer, ProviderResult
+
+    class IncorrectClassifier:
+        calls = []
+        def active(self, slot):
+            return slot in ("intent", "coverage")
+        def classify(self, request):
+            self.calls.append(request.slot)
+            if request.slot == "scope":
+                return ProviderResult({"accepted": ClassificationAnswer("accepted", .99),
+                    "archetype": ClassificationAnswer("saas_crud", .99)}, "stub", "stub")
+            if request.slot == "coverage":
+                return ProviderResult({"relevance": ClassificationAnswer("addressed", .9)}, "stub", "stub")
+            return ProviderResult({"intent": ClassificationAnswer("answer", .99)}, "stub", "stub")
+
+    probing = FakeModel([structured("Who uses it?", covered=["goal"])])
+    fake_models(monkeypatch, probing)
+    classifier = IncorrectClassifier()
+    graph = build_graph(UsageLog("exact-stop"), categorizer=classifier)
+    start(graph, thread="exact-stop")
+    prior_calls = list(classifier.calls)
+    result = graph.invoke({"messages": [HumanMessage(content="finish")]},
+                          {"configurable": {"thread_id": "exact-stop"}})
+    assert "[INTERVIEW COMPLETE]" in result["messages"][-1].content
+    assert classifier.calls == prior_calls
+    assert probing.calls == 1

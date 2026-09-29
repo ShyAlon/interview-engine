@@ -314,3 +314,28 @@ def test_generic_clean_decomposition_preserves_semantic_numeric_leaf():
     from vmodel_contracts import StakeholderContext
     normalized=normalize_model_item({"operating_environment":{"place":"home","weekly_sessions":1,"source_turns":[2]}},StakeholderContext)
     assert normalized["operating_environment"]=="place: home\nweekly_sessions: 1"
+
+
+def test_sparse_intent_rejected_before_conops_model_call(monkeypatch):
+    """One-word smoke input has no stakeholders; do not spend minutes on options."""
+    import pytest
+    from interview_engine import model_config
+    from interview_engine.errors import UserFacingError
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel
+
+    conops = FakeModel([])
+    models = {name: FakeModel([]) for name in ("probing", "distillation", "scope_tiebreak")}
+    models["conops"] = conops
+    monkeypatch.setattr(model_config, "build_chat_model", lambda stage, **kw: models[stage])
+    graph = build_graph(UsageLog("sparse"), conops_enabled=True)
+    with pytest.raises(UserFacingError, match="CONOPS cannot start") as caught:
+        graph.invoke({"messages": [HumanMessage(content="enough")],
+                      "submission": {"free_text": "app", "founder_id": "f", "submission_id": "sparse"},
+                      "verdict": {"accepted": True},
+                      "intent_model": {"target_users": [], "stakeholder_needs": [],
+                                       "operational_concepts": []}},
+                     {"configurable": {"thread_id": "sparse"}})
+    assert conops.calls == 0
+    assert "Start a new interview" in caught.value.render()
