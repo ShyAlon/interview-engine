@@ -292,3 +292,32 @@ def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path)
     monkeypatch.setattr("interview_engine.application.InterviewApplication",StubApplication)
     restored=default_program_factory("legacy",StartSessionRequest(task_id="old",idea="idea",model_route="ollama"))
     assert restored.model_map==old and calls==[]
+
+
+def test_expected_unpinned_legacy_snapshot_logs_one_info_without_traceback(tmp_path,caplog):
+ import json,logging
+ from interview_engine.errors import UserFacingError
+ from interview_engine.http_service import default_program_factory
+ from vmodel_contracts.interactive import StartSessionRequest
+ path=tmp_path/'old'/'interview'/'http-session.json';path.parent.mkdir(parents=True)
+ path.write_text(json.dumps({'session_id':'old','task_id':'legacy-task','phase_id':1,'sequence':2,
+  'status':40,'next_step':40,'open_input':None,'responses':[],
+  'request':StartSessionRequest(task_id='legacy-task',idea='old idea',model_route='ollama').model_dump(mode='json')}))
+ def factory(sid,request):
+  from interview_engine import http_service
+  # The real restore guard is in default_program_factory, but it needs only
+  # the persisted session file, no model provider or graph to reject safely.
+  return default_program_factory(sid,request)
+ from interview_engine import http_service
+ original=http_service.artifacts_root
+ http_service.artifacts_root=lambda:tmp_path
+ try:
+  client=authed(create_app(SessionRegistry(factory,state_dir=tmp_path),service_token=TOKEN))
+  with caplog.at_level(logging.INFO,logger='interview_engine.http'):
+   response=client.get('/v1/sessions/old')
+ finally:http_service.artifacts_root=original
+ assert response.status_code==422
+ assert 'legacy session has no pinned model route' in response.json()['detail']['detail']
+ lines=[record for record in caplog.records if record.name=='interview_engine.http']
+ assert len(lines)==1 and lines[0].levelno==logging.INFO
+ assert 'legacy_unpinned' in lines[0].getMessage() and not lines[0].exc_info
