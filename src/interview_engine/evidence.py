@@ -40,7 +40,10 @@ class EvidenceLake:
         with self._lock:
             if path.exists():
                 existing=SessionSchemaBinding.model_validate_json(path.read_text())
-                if existing != binding:raise ValueError("session schema binding is immutable")
+                if existing != binding:
+                    from .binding_compat import BindingMigrationRequired,BindingIdentityMismatch,identity
+                    if identity(existing)==identity(binding):raise BindingMigrationRequired(path,existing,binding)
+                    raise BindingIdentityMismatch()
             else:
                 fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
                 with os.fdopen(fd,'w') as f:f.write(body);f.flush();os.fsync(f.fileno())
