@@ -271,6 +271,23 @@ class SessionRegistry:
                     raise UserFacingError("saved session has no graph checkpoint.","The open input cannot be resumed safely.","Inspect the checkpoint and restore from backup.")
                 session.program.result=checkpoint.values
                 session.program.state=None
+                context=session.open_input.context
+                purpose=context.get('decision_purpose')
+                if purpose=='semantic_review':
+                    from vmodel_contracts.semantic_review import SemanticReview
+                    current=checkpoint.values.get('semantic_review')
+                    SemanticReview.model_validate(current)
+                    if current!=context.get('evidence',{}).get('semantic_review'):
+                        raise UserFacingError('saved semantic review changed.','Its checkpoint no longer matches the open review.','Inspect the saved review before resuming.')
+                if purpose in ('conops_concept','interview_approval') and hasattr(session.program,'_decision_context'):
+                    try:restored=session.program._decision_context(purpose)
+                    except (ValueError,KeyError) as exc:
+                        raise UserFacingError('saved decision evidence no longer matches its checkpoint.',
+                            'The review cannot safely resume under its old input ID.','Inspect the archived review before recovering this session.') from exc
+                    if restored.get('evidence_revision')!=context.get('evidence_revision'):
+                        raise UserFacingError('saved decision evidence changed.',
+                            'The checkpoint changed during an interrupted action.','Inspect the archived review before recovering this session.')
+
             if hasattr(session.program,"usage_log"):session.program.usage_log.route_version=session.route_version
             log.info("model.route.restored session=%s task=%s route=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
         return session
