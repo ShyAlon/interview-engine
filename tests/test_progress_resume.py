@@ -270,7 +270,8 @@ def test_legacy_flat_assumptions_dropped_as_ungrounded(fake_models):
     g = build_graph(UsageLog("t1"))
     r = run_one_turn(g, {"configurable": {"thread_id": "pa"}})
     intent = IntentModel.model_validate(r["intent_model"])
-    assert intent.assumptions == [] and intent.assumption_items == []
+    assert intent.assumptions == ['internal and external data cannot conflict'] and intent.assumption_items == []
+    assert r['semantic_review']['findings'][0]['rule']=='missing_provenance'
     assert all("conflict" not in n.statement for n in intent.stakeholder_needs)
 
 
@@ -296,7 +297,8 @@ def test_prompt_echo_assumption_dropped_in_graph(fake_models):
     g = build_graph(UsageLog("t1"))
     r = run_one_turn(g, {"configurable": {"thread_id": "pe"}})
     intent = IntentModel.model_validate(r["intent_model"])
-    assert intent.assumption_items == []
+    assert len(intent.assumption_items)==2
+    assert len(r['semantic_review']['findings'])==2
 
 
 def test_duplicate_constraints_dropped_in_graph(fake_models):
@@ -306,7 +308,8 @@ def test_duplicate_constraints_dropped_in_graph(fake_models):
     g = build_graph(UsageLog("t1"))
     r = run_one_turn(g, {"configurable": {"thread_id": "pd"}})
     intent = IntentModel.model_validate(r["intent_model"])
-    assert intent.constraints == ["$0 budget cap"]
+    assert intent.constraints == ['founder data must stay secure','$0 budget cap']
+    assert r['semantic_review']['findings'][0]['rule']=='duplicate_need'
 
 
 def test_preview_solution_language_stripped(fake_models):
@@ -386,7 +389,8 @@ def test_dict_shaped_constraint_normalized_before_dedup(fake_models):
     g = build_graph(UsageLog("t1"))
     r = run_one_turn(g, {"configurable": {"thread_id": "dict-constraint"}})
     intent = IntentModel.model_validate(r["intent_model"])
-    assert intent.constraints == ["$0 infrastructure budget during the demo"]
+    assert intent.constraints == ['$0 infrastructure budget during the demo','founder data must stay secure']
+    assert r['semantic_review']['findings'][0]['rule']=='duplicate_need'
     assert all(isinstance(c, str) for c in intent.constraints)
 
 

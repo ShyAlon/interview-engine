@@ -70,40 +70,120 @@ class InterviewApplication:
             model_config._session_llm_log.reset(token)
 
     def advance(self,response:InputResponse|None=None):
+        rework_backup=None;rework_input=None
         if response is not None:
             if self.open_input is None or response.input_id!=self.open_input.input_id:raise ValueError('stale input')
             value=response.value
-            if self.open_input.kind==InputKind.APPROVAL:
-                if value == 1:self._finish();return None
-                if value == 0:raise ValueError('intent rejection requires a new interview generation')
-                raise ValueError('approval response must use a declared option value')
+            if self.open_input.context.get('decision_purpose')=='semantic_review':
+                from vmodel_contracts.semantic_review import SemanticReview
+                original=SemanticReview.model_validate(self.result['semantic_review'])
+                payload=json.loads(str(value))
+                if payload.get('revision')!=original.revision:raise ValueError('semantic review changed')
+                reviewed=SemanticReview.model_validate({**original.model_dump(),'decisions':payload.get('decisions',[])})
+                if any(d.actor!=response.actor_id for d in reviewed.decisions):raise ValueError('semantic decision actor mismatch')
+                resolved=reviewed.resolved_candidate(IntentModel.model_validate)
+                self.graph.update_state(self.cfg,{'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True})
+                (self.outdir/'semantic-review.json').write_text(reviewed.model_dump_json(indent=2))
+                self.result={**self.result,'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True}
+                self.open_input=None;self.state={}
+            if self.open_input is not None and self.open_input.kind==InputKind.APPROVAL:
+                if value == 1:
+                    if response.founder_inputs:
+                        from vmodel_contracts.founder_register import FounderRegister,apply_resolutions
+                        register=FounderRegister.model_validate(self.result['intent_model']['founder_register'])
+                        updated=apply_resolutions(register,response.founder_inputs,response.actor_id)
+                        self.result['intent_model']={**self.result['intent_model'],'founder_register':updated.model_dump(mode='json')}
+                        self.graph.update_state(self.cfg,{'intent_model':self.result['intent_model']})
+                    self._finish();return None
+                if value == 0:
+                    # Archive before changing the checkpoint. Rework ConOps only;
+                    # the reviewed intent and its source transcript remain intact.
+                    archive=self.outdir/'review-history';archive.mkdir(exist_ok=True)
+                    (archive/f'{self.open_input.input_id}.json').write_text(json.dumps(
+                        {'intent_model':self.result['intent_model'],'conops':self.result['conops'],
+                         'guidance':response.rationale or ''},ensure_ascii=False,indent=2))
+                    rework_backup=dict(self.result);rework_input=self.open_input
+                    self.graph.update_state(self.cfg,{'conops':None,'conops_draft':None,'conops_decision_attempts':0})
+                    self.state={'messages':[HumanMessage(content=response.rationale or 'Regenerate the ConOps concepts for review.')]}
+                    self.open_input=None
+                elif value != 1:raise ValueError('approval response must use a declared option value')
             answer=str(value)
-            if self.open_input.rationale_required:
+            if self.open_input is not None and self.open_input.rationale_required:
                 if not response.rationale:raise ValueError('typed input requires a rationale')
                 answer=f"{value} - {response.rationale}"
-            self.state={'messages':[HumanMessage(content=answer)]}
+            if self.open_input is not None:self.state={'messages':[HumanMessage(content=answer)]}
         while not self.finished:
-            with self._runtime_context():
-                self.result=self.graph.invoke(self.state,self.cfg)
+            try:
+                with self._runtime_context():
+                    self.result=self.graph.invoke(self.state,self.cfg)
+            except Exception:
+                if rework_backup is not None:
+                    # Registry restores the old approval on failure. Restore its
+                    # checkpoint too, so a retry/restart cannot accept a cleared
+                    # or partly regenerated ConOps under that old review ID.
+                    from langchain_core.messages import RemoveMessage
+                    current=self.graph.get_state(self.cfg).values
+                    old_ids={m.id for m in rework_backup.get('messages',[]) if getattr(m,'id',None)}
+                    remove=[RemoveMessage(id=m.id) for m in current.get('messages',[])
+                            if getattr(m,'id',None) and m.id not in old_ids]
+                    self.graph.update_state(self.cfg,{'conops':rework_backup.get('conops'),
+                        'conops_draft':rework_backup.get('conops_draft'),
+                        'conops_decision_attempts':rework_backup.get('conops_decision_attempts',0),
+                        'messages':remove+rework_backup.get('messages',[])})
+                    self.result=rework_backup;self.open_input=rework_input
+                    self.state=None
+                raise
             self.state=None;self.open_input=None
             verdict=self.result.get('verdict')
             if verdict and not verdict['accepted']:
                 self.finished=True;raise ValueError(verdict['decline_message'])
-            if 'conops' in self.result:
+            if self.result.get('semantic_review') and not self.result.get('semantic_review_resolved'):
+                review=self.result['semantic_review']
+                self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='Review these interview findings before continuing.',
+                    context={'decision_purpose':'semantic_review','evidence_version':1,'session_id':self.session_id,
+                             'evidence_revision':__import__('hashlib').sha256(json.dumps({'semantic_review':review},sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),
+                             'evidence':{'semantic_review':review}})
+                return self.open_input
+            if self.result.get('conops'):
+                if not self.result['intent_model'].get('founder_register'):
+                    from .completeness import inventory
+                    register=inventory(self.session_id,self.result['intent_model'],self.result.get('messages',[]),self.result['conops'])
+                    self.result['intent_model']={**self.result['intent_model'],'founder_register':register}
+                    self.graph.update_state(self.cfg,{'intent_model':self.result['intent_model']})
                 self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Approve this intent model?',
-                    options=[InputOption(value=1,label='Approve'),InputOption(value=0,label='Reject')],context={'artifact':'intent_model.json'})
+                    options=[InputOption(value=1,label='Proceed'),InputOption(value=0,label='Edit')],
+                    context=self._decision_context('interview_approval'))
                 return self.open_input
             last=self.result['messages'][-1].content
             if '[INTERVIEW COMPLETE]' in last:self.state={};continue
             if self.result.get('conops_draft'):
-                decision=founder_decision(self.result['conops_draft'])
+                decision=founder_decision(self._decision_context('conops_concept')['evidence']['conops_draft'])
                 self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.CHOICE,prompt=decision['prompt'],
-                    options=[InputOption.model_validate(o) for o in decision['options']],rationale_required=decision.get('rationale_required',False))
+                    options=[InputOption.model_validate(o) for o in decision['options']],rationale_required=decision.get('rationale_required',False),
+                    context=self._decision_context('conops_concept'))
             else:self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt=last)
             return self.open_input
         return None
 
+    def _decision_context(self,purpose:str)->dict:
+        """Code-owned, bounded review evidence. Never infer purpose from prompts."""
+        import hashlib
+        if purpose=='interview_approval':
+            evidence={'intent_model':IntentModel.model_validate(self.result['intent_model']).model_dump(mode='json'),
+                      'conops':ConOpsDocument.model_validate(self.result['conops']).model_dump(mode='json')}
+        else:
+            from .conops_stage import validate_draft
+            founder_turns={i for i,m in enumerate(self.result.get('messages',[])) if getattr(m,'type',None)=='human'}
+            evidence={'conops_draft':validate_draft(self.result['conops_draft'],founder_turns)}
+        raw=json.dumps(evidence,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+        if len(raw.encode('utf-8'))>1_000_000:
+            raise ValueError('decision review evidence exceeds 1 MB')
+        return {'decision_purpose':purpose,'evidence_version':1,'session_id':self.session_id,
+                'evidence_revision':hashlib.sha256(raw.encode('utf-8')).hexdigest(),'evidence':evidence}
+
     def _finish(self):
         intent=IntentModel.model_validate(self.result['intent_model']);conops=ConOpsDocument.model_validate(self.result['conops'])
+        if intent.founder_register:
+            (self.outdir/'founder-decisions.json').write_text(intent.founder_register.model_dump_json(indent=2))
         (self.outdir/'intent_model.json').write_text(intent.model_dump_json(indent=2));(self.outdir/'conops.json').write_text(conops.model_dump_json(indent=2))
         (self.outdir/'conops.md').write_text(render_conops(conops));self.finished=True;self.open_input=None

@@ -41,6 +41,8 @@ class InterviewState(TypedDict, total=False):
     conops_draft: dict        # validated context/scenarios/options, awaiting founder choice
     conops_decision_attempts: int  # bounded invalid founder replies at the decision gate
     conops: dict              # founder-confirmed ConOpsDocument
+    semantic_review: dict
+    semantic_review_resolved: bool
     distill_warnings: list[str]  # non-blocking flags for the approval gate (e.g. unrecognized ecosystem name)
     requirement_preview: list  # sample derived requirements for the approval gate (presentation-only)
     coverage: dict[str, str]  # area -> uncovered|thin|covered|skipped (ADR-0016)
@@ -166,6 +168,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
     def route_scope(state: InterviewState) -> str:
         if not state["verdict"]["accepted"]:
             return END
+        if state.get("semantic_review") and not state.get("semantic_review_resolved"):return END
         if conops_enabled and state.get("intent_model") and not state.get("conops"):
             return "conops"
         return "interview_turn"
@@ -786,16 +789,25 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             grounded, dropped_a = ground_assumptions(
                 parts.get("assumption_items") or [], turns,
                 [DISTILL_NEEDS_SYSTEM, DISTILL_SCOPE_SYSTEM])
-            parts["assumption_items"] = grounded
+            original_assumptions=list(parts.get("assumption_items") or [])
+            original_constraints=list(parts.get("constraints") or [])
+            # Keep semantic candidates intact until their owner reviews each finding.
+            semantic_findings=[]
+            for i,item in enumerate(original_assumptions):
+                if item not in grounded:
+                    semantic_findings.append({"finding_id":f"assumption:{i}","item_id":f"assumption:{i}","path":["assumption_items",i],"rule":"ungrounded_assumption","reason":"This assertion could not be grounded in its cited interview turns.","original":item})
             # legacy flat assumptions from older prompts have no provenance - drop them too.
             if parts.get("assumptions"):
                 dropped_a += [f"{a[:60]} (legacy ungrounded field)" for a in parts["assumptions"]]
-                parts["assumptions"] = []
+                for i,item in enumerate(parts["assumptions"]):
+                    semantic_findings.append({"finding_id":f"legacy-assumption:{i}","item_id":f"legacy-assumption:{i}","path":["assumptions",i],"rule":"missing_provenance","reason":"This legacy assertion has no per-item interview provenance.","original":item})
             kept_c, dropped_c = dedup_constraints(
                 parts.get("constraints") or [],
                 [str(n.get("statement", "")) for n in parts["stakeholder_needs"]
                  if isinstance(n, dict) and str(n.get("statement", "")).strip()])
-            parts["constraints"] = kept_c
+            for i,item in enumerate(original_constraints):
+                if item not in kept_c:
+                    semantic_findings.append({"finding_id":f"constraint:{i}","item_id":f"constraint:{i}","path":["constraints",i],"rule":"duplicate_need","reason":"This design constraint repeats a classified stakeholder need.","original":item})
             # Founder-delegated decisions (steers like 'you do it'): appended by
             # CODE from interview state - grounded by construction, never left
             # for the distillation model to remember.
@@ -832,23 +844,25 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     parts["assumption_items"].append(clean)
             if progress is not None:
                 for d in dropped_a:
-                    progress.emit(ProgressEvent("distill_validate", "Dropped ungrounded assumption",
+                    progress.emit(ProgressEvent("distill_validate", "Ungrounded assumption needs review",
                                                 "completed", _t2.time(), 0.0, d))
                 for d in dropped_c:
-                    progress.emit(ProgressEvent("distill_validate", "Dropped duplicate constraint",
+                    progress.emit(ProgressEvent("distill_validate", "Duplicate constraint needs review",
                                                 "completed", _t2.time(), 0.0,
                                                 d[:70] + " (already a classified need)"))
             from .distill_qa import verify_tech_preferences
 
             tprefs, dropped_tp, warnings_tp = verify_tech_preferences(parts.get("tech_preferences") or [])
-            parts["tech_preferences"] = tprefs
+            for i,item in enumerate(parts.get("tech_preferences") or []):
+                if item not in tprefs:
+                    semantic_findings.append({"finding_id":f"technology:{i}","item_id":f"technology:{i}","path":["tech_preferences",i],"rule":"ungrounded_preference","reason":"This technology preference could not be grounded in the interview.","original":item})
             for tp in tprefs:  # dual form: the flat constraints list carries them too (ADR-0019)
                 rendered = f"{tp.get('area', 'technology')}: {tp.get('preference')} (founder, {tp.get('strength', 'preferred')})"
                 if rendered not in parts["constraints"]:
                     parts["constraints"].append(rendered)
             if progress is not None:
                 for d in dropped_tp:
-                    progress.emit(ProgressEvent("distill_validate", "Dropped ungrounded tech preference",
+                    progress.emit(ProgressEvent("distill_validate", "Ungrounded tech preference needs review",
                                                 "completed", _t2.time(), 0.0, d))
                 for w in warnings_tp:
                     progress.emit(ProgressEvent("distill_validate", "Unrecognized ecosystem name",
@@ -878,7 +892,24 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     f"validation detail: {detail}",
                     "rerun (the interview resumes from its checkpoint) - or route distillation to a stronger model.",
                 ) from e
-        return {"intent_model": intent.model_dump(mode="json"), "requirement_preview": preview,
+        from vmodel_contracts.semantic_review import make_review
+        candidate=intent.model_dump(mode="json")
+        retained=[]
+        for finding in semantic_findings:
+            field=finding['path'][0]
+            # Code-owned normalization can shift the list; bind to the actual
+            # original item, never redirect a decision by old position.
+            for index,item in enumerate(candidate.get(field) or []):
+                original=finding['original']
+                comparable={k:v for k,v in item.items() if k!='contract_version'} if isinstance(item,dict) else item
+                expected={k:v for k,v in original.items() if k!='contract_version'} if isinstance(original,dict) else original
+                if comparable==expected:
+                    retained.append({**finding,'path':[field,index],'original':item});break
+        semantic=make_review(candidate['session_id'],'intent',candidate,retained).model_dump(mode='json') if retained else None
+        if semantic and raw_output_dir:
+            (Path(raw_output_dir).parent/'semantic-review.json').write_text(_json.dumps(semantic,indent=2))
+        return {"semantic_review":semantic,"semantic_review_resolved":not bool(retained),
+                "intent_model": candidate, "requirement_preview": preview,
                 "distill_warnings": warnings_tp}
 
 
@@ -1092,7 +1123,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
     g.add_conditional_edges("scope_gate", route_scope, {"interview_turn": "interview_turn", "conops": "conops", END: END})
     g.add_conditional_edges("interview_turn", route_interview,
                             {"interview_turn": "interview_turn", "await_founder": END, "distill_intent": "distill_intent"})
-    g.add_edge("distill_intent", "conops" if conops_enabled else END)
+    g.add_conditional_edges("distill_intent",lambda state: END if state.get("semantic_review") and not state.get("semantic_review_resolved") else "conops" if conops_enabled else END,{END:END,"conops":"conops"})
     g.add_edge("conops", END)
 
     return g.compile(checkpointer=checkpointer or MemorySaver())
