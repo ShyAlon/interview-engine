@@ -25,6 +25,7 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
 from . import model_config, scope_gate
 from .coverage import AREAS as _AREAS
+from .data_gate import gate_data
 from .coverage import (COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
                          founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
@@ -463,6 +464,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         if parsed is not None:
             if not categorizer.active("coverage") and not repeated:
                 coverage = apply_reply(coverage, parsed)
+                _humans = [getattr(m, "content", "") for m in state.get("messages", [])
+                           if getattr(m, "type", "") == "human"]
+                coverage = gate_data(coverage_before, coverage, parsed, _humans[-1] if _humans else "", _humans,
+                                     [str(d.get("question", "")) for d in deferred_questions] + list(parked_topics))
             # Re-assert the skip on the area the founder skipped. (Before
             # 2026-09-24 this used the recomputed next target, which silently
             # skipped the NEXT area as well.)
@@ -661,6 +666,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if not needs:
                 raise ValueError("stakeholder_needs must not be empty - an intent model with no needs is not an intent model")
             fixed = normalize_enums({"stakeholder_needs": needs}, IntentModel)["stakeholder_needs"]
+            from .distill_qa import coerce_deferred
+            _founder = {i: str(getattr(m, "content", "")) for i, m in enumerate(state["messages"])
+                        if getattr(m, "type", "") == "human"}
+            fixed = [coerce_deferred(n, _founder) if isinstance(n, dict) else n for n in fixed]
             validated = [IntentNeed.model_validate(n) for n in fixed]
             from vmodel_contracts import Assumption
             items = data.get("assumption_items") or []

@@ -9,12 +9,13 @@ from .coverage_taxonomy import AREA_KEYS
 
 INTERVIEWER_SYSTEM = f"""You are a requirements interviewer discovering a founder's product NEEDS about {PRODUCT_SCOPE_DEFINITION}.
 
-Ask ONE short, concrete, plain-language product question per turn.
+Ask ONE short, concrete product question per turn.
 - Follow NEXT TARGET. Ask for missing product truth (who, what, why, behavior), not a solution, design, implementation plan, or metric. A need is 'works offline'; caching is one possible solution.
 - A tentative example ('maybe cache', 'like TikTok') is context, not a commitment. Do not make it the next question's premise. You may build on an answer, but never re-ask a supplied fact.
 - No 'how' questions or 'what' questions that ask how in disguise (strategies, features, design elements, implementation). No numeric targets, indicators, or verification methods; those belong to downstream gates. Ask about founder-visible business impact instead.
 - If an answer is short or tentative, record it and move to the next coverage area. If the latest load-bearing answer is vague, clarify its need once, never the proposed solution.
 - Mark coverage only from founder facts: actors, flows, rules, priorities, named integrations, business impact. Never invent facts or answer for the founder.
+- If data is open, ask where its content comes from.
 - Cover tacit gaps: stakeholders, existing systems/policies, data/privacy, failure/recovery, security, usability, scale, compliance, risks, and done criteria.
 - For a dismissed conflict/accuracy claim, press once with a concrete counterexample; if dismissed again, record an assumption and move on.
 - 'skip' and 'move on' close this question; 'enough' ends the interview. 'You decide' delegates the detail. Never re-ask a terminal steer. 'I'll check and get back to you' leaves it open; move on.
@@ -31,6 +32,7 @@ Fields:
 - stakeholder_needs[]: objects {need_id, statement, kind, source_turns[]}
   - need_id: SN-1, SN-2, ... in order of first mention
   - statement: the need in the FOUNDER's language (what they need, not how to build it)
+  - deferred: true ONLY if the founder said this need is for later (future phase, not now); else false
   - kind: "functional" (a behavior the system must provide) or "non_functional" (a quality or
     constraint on behavior: security, privacy, performance, usability, auditability, cost, SLA)
   - Classification discipline: "MFA with a common provider" is a NON-FUNCTIONAL security need, not
