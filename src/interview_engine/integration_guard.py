@@ -47,11 +47,27 @@ def says_self_contained(turns: list[str], cfg: dict | None = None) -> bool:
     return any(c in t.lower().replace("-", " ") for t in turns for c in cues)
 
 
-def close_as_none_stated(founder_turns: list[str], cfg: dict | None = None) -> bool:
-    """True when the integrations question must not be asked."""
+def sn_named_systems(intent_model: dict | None, cfg: dict | None = None) -> bool:
+    """Stakeholder-need (SN) evidence of a named system: a non-empty
+    external_integrations list, or a need statement that names one."""
+    im = intent_model or {}
+    if any(str(x).strip() for x in im.get("external_integrations") or []):
+        return True
+    statements = [str(n.get("statement", "")) for n in im.get("stakeholder_needs") or [] if isinstance(n, dict)]
+    return names_external_system(statements, cfg)
+
+
+def close_as_none_stated(founder_turns: list[str], cfg: dict | None = None, intent_model: dict | None = None) -> bool:
+    """True when the integrations question must not be asked.
+
+    A named system in the founder's turns or in the SN set keeps the question.
+    A founder turn saying the product is self-contained closes it.
+    """
     cfg = cfg or question_config.current()
     if not cfg["integrations"]["none_stated_enabled"]:
         return False
     if says_self_contained(founder_turns, cfg):
         return True
+    if sn_named_systems(intent_model, cfg):
+        return False
     return not names_external_system(founder_turns, cfg)

@@ -67,3 +67,17 @@ def test_graph_closes_integrations_without_asking_and_moves_on(monkeypatch):
 def test_graph_keeps_the_question_when_a_system_is_named(monkeypatch):
     r = _run(monkeypatch, "a kids music app that plays songs from Spotify", "ig-named")
     assert r["coverage"]["integrations"] != NONE_STATED
+
+
+def test_sn_external_integrations_evidence_counts_as_a_named_system():
+    turns = ["a kids music app with songs and star animations"]
+    assert ig.close_as_none_stated(turns)
+    assert not ig.close_as_none_stated(turns, intent_model={"external_integrations": ["Spotify Web API"]})
+    assert not ig.close_as_none_stated(turns, intent_model={"external_integrations": [],
+        "stakeholder_needs": [{"statement": "Parents sign in with Google accounts"}]})
+    assert ig.close_as_none_stated(turns, intent_model={"external_integrations": [" "],
+        "stakeholder_needs": [{"statement": "Kids hear songs and earn stars"}]})
+
+
+def test_self_contained_founder_signal_still_wins_over_sn_evidence():
+    assert ig.close_as_none_stated(["it works fully offline"], intent_model={"external_integrations": ["Spotify"]})

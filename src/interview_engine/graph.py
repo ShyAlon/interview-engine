@@ -404,7 +404,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         # Integrations is asked only if a founder turn named an external system;
         # otherwise code closes it as "none stated" (visible, not founder-covered).
         if target == "integrations" and close_as_none_stated(
-                [getattr(m, "content", "") for m in state["messages"] if getattr(m, "type", "") == "human"]):
+                [getattr(m, "content", "") for m in state["messages"] if getattr(m, "type", "") == "human"],
+                intent_model=state.get("intent_model")):
             coverage["integrations"] = NONE_STATED
             target = next_area(coverage)
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
