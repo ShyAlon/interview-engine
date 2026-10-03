@@ -321,6 +321,18 @@ def guard_question(question: str, parked_topics: list[str], target: str | None) 
     return safe_question(question, parked_topics, target)
 
 
+# Project vocabulary for repeat detection: several words one concept. Applied
+# after the stem map so "elements", "capabilities" and "features" compare equal.
+_TERMINOLOGY = {
+    "element": "feature", "capability": "feature", "functionality": "feature", "function": "feature",
+    "tool": "system", "service": "system", "platform": "system", "app": "product", "application": "product",
+    "exchange": "share", "send": "share", "transfer": "share", "provide": "share",
+    "existing": "current", "kid": "child", "children": "child", "kids": "child",
+    "user": "person", "people": "person", "customer": "person",
+    "info": "information", "detail": "information",
+}
+
+
 def question_substance(question: str) -> frozenset[str]:
     """Stable content words for deterministic same-substance detection."""
     stop = {"what", "which", "the", "a", "an", "do", "does", "did", "is", "are", "will", "would",
@@ -333,39 +345,65 @@ def question_substance(question: str) -> frozenset[str]:
     return frozenset(stems.get(w, w) for w in words if w not in stop)
 
 
-def same_question_substance(left: str, right: str) -> bool:
-    a, b = question_substance(left), question_substance(right)
+def normalized_question(question: str) -> frozenset[str]:
+    """question_substance, then plural-fold and the project terminology map."""
+    out = set()
+    for w in question_substance(question):
+        if w not in _TERMINOLOGY and len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.add(_TERMINOLOGY.get(w, w))
+    return frozenset(out)
+
+
+def question_similarity(left: str, right: str) -> float:
+    """Jaccard overlap of the normalized wording, 0.0 to 1.0. Deterministic."""
+    a, b = normalized_question(left), normalized_question(right)
     if not a or not b:
-        return (left or "").strip().lower() == (right or "").strip().lower()
-    return len(a & b) / len(a | b) >= .45
+        return 1.0 if (left or "").strip().lower() == (right or "").strip().lower() else 0.0
+    return len(a & b) / len(a | b)
 
 
-def semantic_repeat_question(question: str, prior_questions: list[dict], target: str | None, same_fact) -> str:
-    """Model-backed check of whether a question repeats supplied information.
+DEFAULT_REPEAT_THRESHOLD = 0.45
 
-    The callback sees the current candidate and decides SAME/NEW from the
-    transcript; lexical overlap alone is insufficient. Prefer a new target
-    question, then a broad open gap if the target fallback also repeats.
+
+def same_question_substance(left: str, right: str, threshold: float = DEFAULT_REPEAT_THRESHOLD) -> bool:
+    return question_similarity(left, right) >= threshold
+
+
+def best_prior_similarity(question: str, prior: list[str]) -> tuple[float, str | None]:
+    """The closest PRIOR QUESTION and its similarity. Answers are never passed in."""
+    best, match = 0.0, None
+    for old in prior:
+        sim = question_similarity(question, old)
+        if sim > best:
+            best, match = sim, old
+    return best, match
+
+
+def _verbatim(question: str, prior: list[str]) -> bool:
+    key = " ".join((question or "").lower().split())
+    return any(key == " ".join(str(old).lower().split()) for old in prior)
+
+
+def unique_question(question: str, prior_questions: list[dict], target: str | None,
+                    threshold: float = DEFAULT_REPEAT_THRESHOLD) -> str:
+    """Never expose a repeat of a prior QUESTION; deterministic, no model.
+
+    Candidate -> the area fallback -> the original anyway (never a generic
+    filler). The text returned is never a verbatim repeat of anything asked:
+    if even the original is verbatim, the target-specific reframe is used.
     """
-    if not prior_questions or not same_fact(question):
-        return question
-    alternative = _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
-    if alternative != question and not same_fact(alternative):
-        return alternative
-    return _LAST_RESORT_QUESTION
-
-
-def unique_question(question: str, prior_questions: list[dict], target: str | None) -> str:
-    """Never expose a repeated probe. Reframe once to the actual current gap."""
     prior = [str(x.get("question", "")) for x in prior_questions]
-    if not any(same_question_substance(question, old) for old in prior):
+    if not any(same_question_substance(question, old, threshold) for old in prior):
         return question
     fallback = _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
-    if not any(same_question_substance(fallback, old) for old in prior):
+    if not any(same_question_substance(fallback, old, threshold) for old in prior):
         return fallback
-    # A deterministic, target-specific final reframe. The graph parks the area
-    # after two attempts, so this is only a compatibility safety net.
-    return f"What else should we understand about {_LABELS.get(target or '', 'the product')} before moving on?"
+    if not _verbatim(question, prior):
+        return question
+    reframe = f"What else should we understand about {_LABELS.get(target or '', 'the product')} before moving on?"
+    return reframe if not _verbatim(reframe, prior) else question
+
 
 def founder_control(text: str) -> str | None:
     """'skip' -> skip the current target area; 'enough' -> end the interview.

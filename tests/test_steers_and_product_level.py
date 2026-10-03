@@ -475,15 +475,3 @@ def test_business_impact_answer_can_close_nfr_after_engineering_default(monkeypa
     assert result["coverage"]["nfrs"] == "covered"
 
 
-def test_semantic_repeat_guard_reframes_related_words_not_new_needs():
-    from interview_engine.coverage import semantic_repeat_question
-    prior = [{"area": "flows", "question": "Which interactive features will children use?"}]
-    seen = []
-    def same_fact(candidate):
-        seen.append(candidate)
-        return "design elements" in candidate or "interactive features" in candidate
-    output = semantic_repeat_question("What design elements will children use?", prior, "flows", same_fact)
-    assert output != "What design elements will children use?"
-    assert seen[0] == "What design elements will children use?"
-    assert semantic_repeat_question("What should happen when the device is offline?", prior,
-                                    "failures", same_fact) == "What should happen when the device is offline?"

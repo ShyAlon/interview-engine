@@ -567,30 +567,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     parked_topics.append(topic)
             question = guard_question(candidate, parked_topics, next_target)
             history_questions = list(state.get("question_history") or [])
-            question = unique_question(question, history_questions, next_target)
-            # Lexical matching misses semantic re-asks ('features' versus
-            # 'design elements'). Ask the probing model whether the proposed
-            # question requests a fact the founder already supplied. This is
-            # deliberately stricter than merely deriving a useful new ask.
-            if history_questions and next_target is not None:
-                from .coverage import semantic_repeat_question
-                previous = [q.get("question", "") for q in history_questions]
-                founder_facts = [getattr(m, "content", "") for m in history if getattr(m, "type", "") == "human"]
-                def _same_fact(candidate):
-                    prompt = ("Reply ONLY SAME or NEW. SAME iff the candidate asks for a fact already "
-                              "provided in the founder's answers or asks the same information as a prior "
-                              "question. A related but genuinely new product need is NEW.\n"
-                              f"Prior questions: {previous!r}\nFounder answers: {founder_facts!r}\n"
-                              f"Candidate: {candidate!r}")
-                    _start = _t.time()
-                    verdict = model_config.invoke_checked(categorization_model, [SystemMessage(content=prompt)], "probing")
-                    usage_log.record("probing", model_config.for_stage("probing").provider,
-                                     model_config.for_stage("probing").model,
-                                     (getattr(verdict, "usage_metadata", None) or {}), duration_s=_t.time() - _start)
-                    label = verdict.content.strip().upper()
-                    # An unparseable adjudication is not proof of a repeat.
-                    return label == "SAME"
-                question = semantic_repeat_question(question, history_questions, next_target, _same_fact)
+            # Deterministic repeat check against PRIOR QUESTIONS only. The founder has
+            # no reason to repeat themselves, so answers are never compared here.
+            _thr = question_config.current()["question_repeat"]["similarity_threshold_pct"] / 100.0
+            question = unique_question(question, history_questions, next_target, _thr)
             if non_answer_turn and next_target is not None:
                 question = reask_question(next_target)
             if verification_log is not None:
