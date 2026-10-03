@@ -4,14 +4,14 @@ import importlib.util
 from pathlib import Path
 
 from interview_engine import categorization, coverage, prompts
-from interview_engine.coverage_taxonomy import AREA_KEYS, AREAS, LABELS, TAXONOMY_VERSION
+from interview_engine.coverage_taxonomy import AREA_KEYS, AREAS, AREAS_V1, LABELS, TAXONOMY_VERSION, V1_TAXONOMY_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 V1 = ["goal", "users", "flows", "data", "integrations", "nfrs", "failures", "constraints", "risks", "done", "glossary"]
 
 
 def test_v1_list_and_order_unchanged():
-    assert TAXONOMY_VERSION == "coverage-v1"
+    assert V1_TAXONOMY_VERSION == "coverage-v1"
     assert AREA_KEYS == V1 and [k for k, _, _ in AREAS] == V1
     assert LABELS["nfrs"] == "quality needs"
 
@@ -37,3 +37,11 @@ def test_no_other_hardcoded_area_list():
     hits = [p for p in list((ROOT / "src").rglob("*.py")) + list((ROOT / "scripts").glob("*.py"))
             if needle in p.read_text()]
     assert hits == [], hits
+
+
+def test_v1_1_changes_only_the_integrations_closing_text():
+    assert TAXONOMY_VERSION == "coverage-v1.1"
+    changed = [k for (k, _, a), (_, _, b) in zip(AREAS_V1, AREAS) if a != b]
+    assert changed == ["integrations"]
+    assert dict((k, t) for k, _, t in AREAS_V1)["integrations"] == "named systems/APIs, not categories"
+    assert dict((k, t) for k, _, t in AREAS)["integrations"].endswith("or 'none'")
