@@ -516,7 +516,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     [(i, getattr(m, "content", "")) for i, m in enumerate(history) if getattr(m, "type", "") == "human"]),
                     next_target) if next_target else []
                 vrec = verify_question(candidate, next_target, _ranked, parked_topics)
-                vrec["retrieval_spans"] = [{"id": x["id"], "score": x["score"]} for x in _ranked]
+                vrec["retrieval_spans"] = [{"id": x["id"], "uid": x.get("uid", x["id"]), "score": x["score"]} for x in _ranked]
             except Exception as exc:  # scoring must never break an interview turn
                 vrec = {"target_area": next_target, "error": f"{type(exc).__name__}: {exc}", "passed": None}
             # Retry is OFF by default (verification.retry_enabled). When on: ONE retry

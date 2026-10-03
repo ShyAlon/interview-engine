@@ -46,7 +46,7 @@ def verify_question(question: str, target: str | None, spans: list[dict], parked
     for s in spans:
         overlap = len(qwords & _content_words(s["text"]))
         if overlap > best_overlap:
-            best_id, best_overlap = s["id"], overlap
+            best_id, best_overlap = s.get("uid", s["id"]), overlap
     parked_overlap = max((len(qwords & _content_words(t)) for t in parked_topics), default=0)
     if not spans:
         grounding = {"score": 0, "span": None, "result": "no_span", "passed": True}  # nothing to ground on

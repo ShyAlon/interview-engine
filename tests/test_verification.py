@@ -13,7 +13,7 @@ def _spans(area="data"):
 
 def test_grounded_question_scores_span_overlap_and_names_the_span():
     r = v.verify_question("Where do the songs come from, and who writes them?", "data", _spans())
-    assert r["grounding"]["result"] == "grounded" and r["grounding"]["span"] in ("t0", "t2")
+    assert r["grounding"]["result"] == "grounded" and r["grounding"]["span"].split(".")[0] in ("t0", "t2")
     assert r["grounding"]["score"] >= 1 and r["passed"] and r["failed_checks"] == []
 
 
@@ -179,3 +179,17 @@ def test_hyphenated_cue_matches_either_spelling():
     from interview_engine.session_retrieval import _score
     assert _score("it is self contained", ["self-contained"]) == 1
     assert _score("it is self-contained", ["self contained"]) == 1
+
+def test_spans_from_one_message_get_distinct_uids_and_keep_the_message_id():
+    from interview_engine.session_retrieval import build_spans
+    spans = build_spans([(0, "We write every song ourselves. Kids play on tablets. Parents see progress.")])
+    assert [s["id"] for s in spans] == ["t0", "t0", "t0"]          # the prompt block still quotes [t0]
+    assert [s["uid"] for s in spans] == ["t0.0", "t0.1", "t0.2"]
+
+
+def test_verification_record_lists_unique_span_uids(monkeypatch, tmp_path):
+    idea = "a kids music app. We write every song ourselves. Songs are kept in a folder."
+    r, rows, _ = _graph_run(monkeypatch, tmp_path, [GOOD], "vr-uid", idea=idea)
+    uids = [x["uid"] for x in rows[0]["retrieval_spans"]]
+    assert uids and len(uids) == len(set(uids))
+    assert all("id" in x for x in rows[0]["retrieval_spans"])
