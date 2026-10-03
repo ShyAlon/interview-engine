@@ -313,6 +313,23 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             raise HTTPException(401,"invalid interview engine service token")
 
 
+    if sessions._state_dir is not None and not os.environ.get("INTERVIEW_ENGINE_QUESTION_QUALITY_CONFIG"):
+        from . import question_config
+        question_config.set_store(question_config.ConfigStore(sessions._state_dir/"question_quality.json"))
+
+    @app.get("/v1/question-quality-config",dependencies=[Depends(authenticate)])
+    def get_question_quality_config():
+        from . import question_config
+        return {"config_version":question_config.CONFIG_VERSION,"config":question_config.current(),
+                "defaults":question_config.defaults()}
+
+    @app.put("/v1/question-quality-config",dependencies=[Depends(authenticate)])
+    def put_question_quality_config(body:dict):
+        from . import question_config
+        try:saved=question_config.store().put(body.get("config",body) if isinstance(body,dict) else body)
+        except question_config.ConfigError as exc:raise HTTPException(422,str(exc))
+        return {"config_version":question_config.CONFIG_VERSION,"config":saved}
+
     @app.get("/v1/model-routes/default",dependencies=[Depends(authenticate)])
     def default_model_route():
         from . import session_models
