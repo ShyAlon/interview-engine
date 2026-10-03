@@ -27,6 +27,7 @@ from . import model_config, scope_gate
 from .coverage import AREAS as _AREAS
 from .data_gate import gate_data
 from .non_answer import is_non_answer
+from .session_retrieval import retrieval_block
 from .coverage import reask_question
 from .integration_guard import close_as_none_stated
 from .coverage import (NONE_STATED, COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
@@ -413,8 +414,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             parked_block = ("\n\nPARKED SUB-TOPICS (founder deferred; never ask these again): "
                             + ", ".join(parked_topics)) if parked_topics else ""
             follow_block = drill_block(drill_area) if drill_area else ""
+            facts_block = retrieval_block(
+                [(i, getattr(m, "content", "")) for i, m in enumerate(history) if getattr(m, "type", "") == "human"],
+                drill_area or target)
             system = (INTERVIEWER_SYSTEM + "\n\n" + status_block(coverage, drill_area) + parked_block
-                      + follow_block + "\n\n" + STRUCTURED_TURN_FORMAT)
+                      + follow_block + facts_block + "\n\n" + STRUCTURED_TURN_FORMAT)
             _t0 = _time.time()
             request_messages = [SystemMessage(content=system), *history,
                                 HumanMessage(content="FINAL RESPONSE CONTRACT: " + STRUCTURED_TURN_FORMAT)]

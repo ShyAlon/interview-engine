@@ -33,8 +33,19 @@ DEFAULTS: dict = {
         "external_system_verbs": ["connect", "integrate", "sync", "import", "export"],
         "self_contained_cues": ["offline", "no external", "self contained", "self-contained"],
     },
+    # Words whose presence ties a founder sentence to an area (prefix match).
     "area_cues": {
-        "data": ["from", "own", "store", "bundled", "enter", "import"],
+        "goal": ["problem", "want", "need", "help", "goal", "so that", "because", "hurt", "struggl"],
+        "users": ["user", "customer", "parent", "kid", "child", "student", "teacher", "admin", "owner", "manager", "staff", "team"],
+        "flows": ["when", "then", "after", "before", "step", "click", "tap", "sign", "book", "pay", "play", "submit", "upload"],
+        "data": ["data", "from", "own", "store", "bundled", "enter", "import", "song", "tune", "music", "image", "video", "record", "content", "file"],
+        "integrations": ["api", "connect", "integrat", "sync", "import", "export", "login", "payment", "calendar", "email"],
+        "nfrs": ["fast", "slow", "wait", "quick", "load", "secure", "private", "reliab", "scale", "offline", "available"],
+        "failures": ["fail", "break", "crash", "error", "lose", "lost", "wrong", "never", "down", "miss"],
+        "constraints": ["budget", "deadline", "weeks", "months", "team", "cost", "cheap", "language", "cloud", "platform"],
+        "risks": ["risk", "assum", "depend", "unsure", "if wrong", "worry", "concern"],
+        "done": ["done", "ready", "launch", "first version", "success", "demo", "mvp"],
+        "glossary": ["means", "call", "term", "we say", "known as", "stands for"],
     },
 }
 
@@ -67,6 +78,9 @@ def validate(cfg: dict) -> dict:
             raise ConfigError(f"{section} must be an object")
         for key, val in body.items():
             if section == "area_cues":
+                from .coverage_taxonomy import AREA_KEYS
+                if key not in AREA_KEYS:
+                    raise ConfigError(f"area_cues.{key} is not a coverage area")
                 if not _str_list(val):
                     raise ConfigError(f"area_cues.{key} must be a list of non-empty strings")
                 out[section][key] = [v.strip() for v in val]
