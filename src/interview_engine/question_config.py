@@ -28,6 +28,11 @@ DEFAULTS: dict = {
         "retry_enabled": False,       # one retry with the failed check named; OFF until calibrated
         "grounding_overlap_min": 1,   # shared content words between question and a span
     },
+    "question_repeat": {
+        # A candidate whose normalized wording overlaps a PRIOR QUESTION at or above
+        # this percentage is a repeat. Founder answers are never compared.
+        "similarity_threshold_pct": 45,
+    },
     "integrations": {
         "none_stated_enabled": True,
         "external_system_verbs": ["connect", "integrate", "sync", "import", "export"],
@@ -55,6 +60,7 @@ _INT_RANGES = {
     ("retrieval", "max_chars"): (100, 2000),
     ("retrieval", "top_k"): (1, 10),
     ("verification", "grounding_overlap_min"): (1, 5),
+    ("question_repeat", "similarity_threshold_pct"): (10, 100),
 }
 
 
