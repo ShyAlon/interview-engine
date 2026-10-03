@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from .data_gate import DATA_SOURCES
 from .coverage_taxonomy import AREAS, AREA_KEYS, LABELS as _LABELS  # single source of truth
 
 
@@ -32,6 +33,10 @@ def turn_output_schema() -> dict:
             "thin": {"type": "array", "items": area},
             "skipped": {"type": "array", "items": area},
             "complete": {"type": "boolean"},
+            # Optional: where the product's content/data comes from. Code verifies
+            # source_quote against the founder's latest turn (data_gate.py).
+            "data_source": {"type": "string", "enum": [*DATA_SOURCES, "none"]},
+            "source_quote": {"type": "string"},
         },
         "required": ["question", "covered", "thin", "skipped", "complete"],
         "additionalProperties": False,

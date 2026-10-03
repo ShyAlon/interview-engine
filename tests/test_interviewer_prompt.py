@@ -37,7 +37,7 @@ def test_interviewer_prompt_has_a_hard_runtime_budget():
     # whitespace tokens. Keep enough headroom for clarity without regressing.
     prompt = assembled()
     assert len(prompt) <= 3_200
-    assert len(prompt.split()) <= 450
+    assert len(prompt.split()) <= 460  # +1 data-provenance sentence (was 450)
 
 
 def test_need_not_solution_or_metric_and_no_disguised_how():
