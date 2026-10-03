@@ -57,3 +57,21 @@ def test_failed_rework_restores_checkpoint_and_old_review_identity(tmp_path):
  assert app.open_input is pending;assert app.result['conops']=={'old':'accepted review'}
  assert app.graph.updates[-1]['conops']=={'old':'accepted review'}
  assert app.graph.updates[-1]['messages'][0].id=='new';assert app.state is None
+
+def test_rework_also_records_founder_input_resolutions_with_history(tmp_path):
+ app=application(tmp_path);app.cfg={'configurable':{'thread_id':'x'}}
+ register={'version':1,'session_id':'s','advisories':[],'items':[{'item_id':'FD-style','data_class':'styling','question':'Style?','owner':'founder','status':'open','scope':'UI','source':'Interview','blocks':['UI']}]}
+ app.result['intent_model']={'problem_statement':'P','founder_register':register};app.result['conops']={'old':'review'}
+ pending=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Review',options=[InputOption(value=1,label='Proceed'),InputOption(value=0,label='Edit')]);app.open_input=pending
+ class Graph:
+  def __init__(self):self.updates=[]
+  def update_state(self,cfg,value):self.updates.append(value)
+  def invoke(self,state,cfg):return {'messages':[HumanMessage(content='Habit app')],'intent_model':app.result['intent_model'],'conops_draft':draft()}
+ app.graph=Graph()
+ from contextlib import nullcontext
+ app._runtime_context=lambda:nullcontext()
+ app.advance(InputResponse(input_id=pending.input_id,value=0,rationale='Rework',actor_id='ann',founder_inputs=[{'item_id':'FD-style','status':'decided','decision':'Blue','reason':'Calm'}]))
+ item=app.result['intent_model']['founder_register']['items'][0]
+ assert (item['status'],item['decision'])==('decided','Blue');assert [h['actor'] for h in item['history']]==['ann']
+ assert any('intent_model' in u for u in app.graph.updates)
+ assert json.loads((tmp_path/'review-history'/f'{pending.input_id}.json').read_text())['intent_model']['founder_register']['items'][0]['decision']=='Blue'
