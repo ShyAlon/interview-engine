@@ -501,13 +501,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if owned:
                 topic, default = owned
                 source_turn = max(0, len(history) - 1)
-                delegated.append({
-                    "statement": f"FOUNDER-DELEGATED: {topic} - engineering-owned provisional default: "
-                                 f"{default}. This remains founder-overridable.",
-                    "research_brief": f"Validate the provisional {topic} against current industry guidance and "
-                                      "map the founder's business-impact answer to measurable acceptance criteria.",
-                    "source_turns": [source_turn],
-                })
+                # Only a founder who delegated this turn creates a delegated record;
+                # a guard rewrite alone is the interviewer's call, not the founder's.
+                if steer:
+                    delegated.append({
+                        "statement": f"FOUNDER-DELEGATED: {topic} - engineering-owned provisional default: "
+                                     f"{default}. This remains founder-overridable.",
+                        "research_brief": f"Validate the provisional {topic} against current industry guidance and "
+                                          "map the founder's business-impact answer to measurable acceptance criteria.",
+                        "source_turns": [source_turn],
+                    })
                 if topic not in parked_topics:
                     parked_topics.append(topic)
             question = guard_question(candidate, parked_topics, next_target)
