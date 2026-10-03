@@ -75,3 +75,33 @@ def test_two_non_answers_hit_the_existing_two_attempt_closeout(monkeypatch):
     assert r1["coverage"]["goal"] == "uncovered"
     assert r2["coverage"]["goal"] == "delegated" and any("after two interview attempts" in d["statement"]
                                                        for d in r2["delegated_decisions"])
+
+
+def test_data_gate_runs_on_the_jev_path(monkeypatch):
+    """Jev marks data covered while the founder named content ('songs') but no source."""
+    probing = FakeModel([structured("what data?"), structured("next?")])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t-gate-jev"), categorizer=Cat([("addressed", "data")]))
+    start(g, "a kids music PWA with songs and star animations", thread="gj1")
+    r1 = _drive(g, "gj1", "Kids play the songs and get stars.")
+    assert r1["coverage"]["data"] == "thin"          # was 'covered' before the gate ran on this path
+
+
+class SourceAwareModel(FakeModel):
+    """Reports a verified provenance quote only on the turn that follows the founder's answer."""
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+        humans = [m.content for m in messages if getattr(m, "type", "") == "human"]
+        if any("we write every song ourselves" in h for h in humans[:-1] or humans):
+            return AIMessage(content='{"question":"next?","covered":[],"thin":[],"skipped":[],"complete":false,'
+                                     '"data_source":"founder_supplied","source_quote":"we write every song ourselves"}')
+        return super().invoke(messages)
+
+
+def test_data_gate_lets_verified_provenance_close_on_the_jev_path(monkeypatch):
+    probing = SourceAwareModel([structured("what data?") for _ in range(4)])
+    fake_models(monkeypatch, probing)
+    g = build_graph(UsageLog("t-gate-jev2"), categorizer=Cat([("addressed", "data")]))
+    start(g, "a kids music PWA with songs and star animations", thread="gj2")
+    r1 = _drive(g, "gj2", "we write every song ourselves")
+    assert r1["coverage"]["data"] == "covered"

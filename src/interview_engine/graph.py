@@ -478,8 +478,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     )
         question, complete = prose_question or resp.content, False
         if parsed is not None:
-            if not categorizer.active("coverage") and not frozen:
-                coverage = apply_reply(coverage, parsed)
+            if not frozen:
+                if not categorizer.active("coverage"):
+                    coverage = apply_reply(coverage, parsed)
+                # The data gate runs on BOTH paths. With Jev active, coverage was
+                # already set by apply_coverage_answers above and the gate used
+                # to be skipped (session 42b71e2e), so it must run here too.
                 _humans = [getattr(m, "content", "") for m in state.get("messages", [])
                            if getattr(m, "type", "") == "human"]
                 coverage = gate_data(coverage_before, coverage, parsed, _humans[-1] if _humans else "", _humans,

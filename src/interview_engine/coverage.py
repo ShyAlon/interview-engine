@@ -377,7 +377,7 @@ def founder_control(text: str) -> str | None:
 
 def _valid_turn_object(obj) -> bool:
     """Require the complete interview-turn envelope before coverage can change."""
-    if not isinstance(obj, dict) or set(obj) != {"question", "covered", "thin", "skipped", "complete"}:
+    if not isinstance(obj, dict) or not ({"question", "covered", "thin", "skipped", "complete"} <= set(obj) <= {"question", "covered", "thin", "skipped", "complete", "data_source", "source_quote"}):
         return False
     if not isinstance(obj["question"], str) or not isinstance(obj["complete"], bool):
         return False
