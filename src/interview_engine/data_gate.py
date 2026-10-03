@@ -18,7 +18,8 @@ import re
 
 DATA_SOURCES = ("founder_supplied", "user_entered", "imported", "suggested_then_approved", "none_needed")
 
-CONTENT_NOUNS = ("song", "lesson", "catalog", "library", "content", "data")
+CONTENT_NOUNS = ("song", "lesson", "catalog", "library", "content", "data",
+                 "tune", "music", "sound", "animation", "image", "asset", "media", "video")
 _NOUN_RE = re.compile(r"\b(?:" + "|".join(CONTENT_NOUNS) + r")s?\b", re.IGNORECASE)
 _PROVENANCE_RE = re.compile(r"\b(?:source|sources|sourced|provenance|origin|licen[sc]\w*|where .{0,40}comes? from)\b",
                             re.IGNORECASE)

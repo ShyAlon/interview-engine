@@ -62,3 +62,11 @@ def test_mentions_content_nouns():
     for w in ("song", "lesson", "catalog", "library", "content", "data"):
         assert mentions_content(f"our {w}s matter")
     assert not mentions_content("our users log in")
+
+
+def test_session_42b71e2e_nouns_trigger_the_gate():
+    for noun in ("tunes", "music", "sound effects", "animations", "images", "assets", "media", "videos"):
+        assert mentions_content(f"kids get catchy {noun}"), noun
+    assert not mentions_content("a booking app for surf schools")
+    ctx = ["gamification, animations, catchy tunes", "stars animation, for example"]
+    assert gate_data({"data": "uncovered"}, {"data": "covered"}, {}, ctx[-1], ctx, [])["data"] == "thin"

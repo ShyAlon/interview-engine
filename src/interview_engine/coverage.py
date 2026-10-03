@@ -276,13 +276,13 @@ def question_topic(question: str) -> str | None:
 
 
 _FALLBACK_QUESTIONS = {
-    "goal": "What change should people see in their work or lives if this product succeeds?",
-    "users": "Who will use, support, or be affected by this product, and in what situation?",
-    "flows": "Please walk through one important real-world use from the moment it starts to a successful result.",
-    "data": "What information does that use need, where does it come from, and who is responsible for it?",
-    "integrations": "Which existing tools or services must this product exchange information with?",
-    "nfrs": "In that important use, what kind of slowness, outage, or busy-period failure would make the product unacceptable?",
-    "failures": "If something goes wrong during that use, what must be preserved or recoverable for the user?",
+    "goal": "What change should people see in their work or lives if the product succeeds?",
+    "users": "Who will use, support, or be affected by the product, and in what situation?",
+    "flows": "Please walk through one important real-world use of the product, from the first step to a successful result.",
+    "data": "What information does the product need to show or keep, where does that information come from, and who provides or maintains the information?",
+    "integrations": "Which existing tools or services must the product exchange information with, or is the product fully self-contained?",
+    "nfrs": "In an important use of the product, what kind of slowness, outage, or busy-period failure would make the product unacceptable?",
+    "failures": "If something goes wrong during an important use of the product, what must be preserved or recoverable for the user?",
     "constraints": "What real deadline, budget, staffing, platform, legal, or policy limit must the solution respect?",
     "risks": "Which assumption about the users, problem, or operating environment are you least certain about?",
     "done": "What would you need to observe before calling the first useful version ready?",
@@ -290,6 +290,12 @@ _FALLBACK_QUESTIONS = {
 }
 
 _LAST_RESORT_QUESTION = "What important product fact have we not captured yet?"
+
+
+def reask_question(target: str | None) -> str:
+    """Self-contained re-ask after a reply that did not understand the question
+    (no pronoun refers to an earlier turn the founder may not have followed)."""
+    return "Sorry, that question was not clear. " + _FALLBACK_QUESTIONS.get(target or "", _LAST_RESORT_QUESTION)
 
 
 
@@ -355,7 +361,7 @@ def unique_question(question: str, prior_questions: list[dict], target: str | No
         return fallback
     # A deterministic, target-specific final reframe. The graph parks the area
     # after two attempts, so this is only a compatibility safety net.
-    return f"What else should we understand about {_LABELS.get(target or '', 'this part of the product')} before moving on?"
+    return f"What else should we understand about {_LABELS.get(target or '', 'the product')} before moving on?"
 
 def founder_control(text: str) -> str | None:
     """'skip' -> skip the current target area; 'enough' -> end the interview.
@@ -371,7 +377,7 @@ def founder_control(text: str) -> str | None:
 
 def _valid_turn_object(obj) -> bool:
     """Require the complete interview-turn envelope before coverage can change."""
-    if not isinstance(obj, dict) or set(obj) != {"question", "covered", "thin", "skipped", "complete"}:
+    if not isinstance(obj, dict) or not ({"question", "covered", "thin", "skipped", "complete"} <= set(obj) <= {"question", "covered", "thin", "skipped", "complete", "data_source", "source_quote"}):
         return False
     if not isinstance(obj["question"], str) or not isinstance(obj["complete"], bool):
         return False

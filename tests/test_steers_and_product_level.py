@@ -442,11 +442,10 @@ def test_latency_budget_is_engineering_owned_and_rephrased_for_founder(monkeypat
     asked = result["messages"][-1].content.lower()
     assert "latency" not in asked and "seconds" not in asked
     assert "important use" in asked and "unacceptable" in asked
-    assumption = next(d for d in result["delegated_decisions"]
-                      if "interactive response-time target" in d["statement"])
-    assert "2 seconds" in assumption["statement"]
-    assert "founder-overridable" in assumption["statement"]
-    assert assumption["research_brief"]
+    # The guard rewrote the model's question; the founder delegated nothing,
+    # so no FOUNDER-DELEGATED record may be created on their behalf.
+    assert not any("interactive response-time target" in d["statement"]
+                   for d in result.get("delegated_decisions", []))
 
 
 def test_founder_language_quality_probe_is_allowed():

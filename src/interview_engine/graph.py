@@ -26,6 +26,8 @@ from vmodel_contracts import IntakeSubmission, ScopeVerdict
 from . import model_config, scope_gate
 from .coverage import AREAS as _AREAS
 from .data_gate import gate_data
+from .non_answer import is_non_answer
+from .coverage import reask_question
 from .coverage import (COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
                          founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
@@ -224,6 +226,20 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         "founder repeated the same answer - treated as a dodge, no coverage advance "
                         f"(strike {repeat_strikes})"))
 
+        # A reply that only says the question was not understood is not an
+        # answer (D12 3.3.3): coverage stays frozen and the same area is
+        # re-asked through a self-contained template (see below).
+        non_answer_turn = False
+        if (last is not None and getattr(last, "type", "") == "human" and len(state.get("messages") or []) > 1
+                and exact_control is None and founder_steer(getattr(last, "content", "")) is None
+                and is_non_answer(getattr(last, "content", ""))):
+            non_answer_turn = True
+            if progress is not None:
+                progress.emit(ProgressEvent(
+                    "interview_turn", "Coverage", "completed", _time.time(), 0.0,
+                    "founder did not understand the question - no coverage advance, re-asking"))
+        frozen = repeated or non_answer_turn
+
         if (last is not None and getattr(last, "type", "") == "human" and len(state.get("messages") or []) > 1
                 and exact_control != "enough"
                 and (categorizer.active("coverage") or categorizer.active("intent"))):
@@ -237,7 +253,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     from .evidence import record_founder_classification
                     record_founder_classification(evidence_lake,session_id=session_id or usage_log.session_id,
                         sequence=turn,raw_text=founder_answer,target=state.get("coverage_target"),result=coverage_result)
-                if not repeated:
+                if not frozen:
                     coverage = apply_coverage_answers(coverage, coverage_result.answers)
                 rel = coverage_result.answers.get("relevance")
                 relevance_label = str(rel.value) if rel is not None else None
@@ -462,8 +478,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     )
         question, complete = prose_question or resp.content, False
         if parsed is not None:
-            if not categorizer.active("coverage") and not repeated:
-                coverage = apply_reply(coverage, parsed)
+            if not frozen:
+                if not categorizer.active("coverage"):
+                    coverage = apply_reply(coverage, parsed)
+                # The data gate runs on BOTH paths. With Jev active, coverage was
+                # already set by apply_coverage_answers above and the gate used
+                # to be skipped (session 42b71e2e), so it must run here too.
                 _humans = [getattr(m, "content", "") for m in state.get("messages", [])
                            if getattr(m, "type", "") == "human"]
                 coverage = gate_data(coverage_before, coverage, parsed, _humans[-1] if _humans else "", _humans,
@@ -481,13 +501,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if owned:
                 topic, default = owned
                 source_turn = max(0, len(history) - 1)
-                delegated.append({
-                    "statement": f"FOUNDER-DELEGATED: {topic} - engineering-owned provisional default: "
-                                 f"{default}. This remains founder-overridable.",
-                    "research_brief": f"Validate the provisional {topic} against current industry guidance and "
-                                      "map the founder's business-impact answer to measurable acceptance criteria.",
-                    "source_turns": [source_turn],
-                })
+                # Only a founder who delegated this turn creates a delegated record;
+                # a guard rewrite alone is the interviewer's call, not the founder's.
+                if steer:
+                    delegated.append({
+                        "statement": f"FOUNDER-DELEGATED: {topic} - engineering-owned provisional default: "
+                                     f"{default}. This remains founder-overridable.",
+                        "research_brief": f"Validate the provisional {topic} against current industry guidance and "
+                                          "map the founder's business-impact answer to measurable acceptance criteria.",
+                        "source_turns": [source_turn],
+                    })
                 if topic not in parked_topics:
                     parked_topics.append(topic)
             question = guard_question(candidate, parked_topics, next_target)
@@ -516,6 +539,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     # An unparseable adjudication is not proof of a repeat.
                     return label == "SAME"
                 question = semantic_repeat_question(question, history_questions, next_target, _same_fact)
+            if non_answer_turn and next_target is not None:
+                question = reask_question(next_target)
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
             # self-grading cannot jump 0/11 -> done.
