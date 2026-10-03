@@ -32,6 +32,7 @@ Fields:
 - stakeholder_needs[]: objects {need_id, statement, kind, source_turns[]}
   - need_id: SN-1, SN-2, ... in order of first mention
   - statement: the need in the FOUNDER's language (what they need, not how to build it)
+  - deferred: true ONLY if the founder said this need is for later (future phase, not now); else false
   - kind: "functional" (a behavior the system must provide) or "non_functional" (a quality or
     constraint on behavior: security, privacy, performance, usability, auditability, cost, SLA)
   - Classification discipline: "MFA with a common provider" is a NON-FUNCTIONAL security need, not

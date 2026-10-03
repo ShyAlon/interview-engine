@@ -666,6 +666,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if not needs:
                 raise ValueError("stakeholder_needs must not be empty - an intent model with no needs is not an intent model")
             fixed = normalize_enums({"stakeholder_needs": needs}, IntentModel)["stakeholder_needs"]
+            from .distill_qa import coerce_deferred
+            _founder = {i: str(getattr(m, "content", "")) for i, m in enumerate(state["messages"])
+                        if getattr(m, "type", "") == "human"}
+            fixed = [coerce_deferred(n, _founder) if isinstance(n, dict) else n for n in fixed]
             validated = [IntentNeed.model_validate(n) for n in fixed]
             from vmodel_contracts import Assumption
             items = data.get("assumption_items") or []

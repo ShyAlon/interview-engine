@@ -106,3 +106,24 @@ def verify_tech_preferences(prefs: list[dict]) -> tuple[list[dict], list[str], l
                 f"technology preference '{pref.get('preference')}' ({area}) is not a recognized "
                 f"ecosystem name - confirm the founder meant it before approving")
     return kept, dropped, warnings
+
+
+# Founder wording that postpones a need. Same family as spec-generator's fallback
+# markers; here it only CONFIRMS a model-proposed deferred=true against the
+# founder's own turns, it never sets the flag by itself.
+_DEFER_WORDING = re.compile(
+    r"\b(?:in the future|future (?:phase|release|version)|phase (?:2|two|ii)|v2|post[- ]?mvp|down the road|"
+    r"later(?: on)?|after launch|eventually|someday|not yet|not now|for now|next version)\b", re.IGNORECASE)
+
+
+def coerce_deferred(need: dict, founder_turns: dict[int, str]) -> dict:
+    """Normalize need['deferred'] to a strict bool. True survives only when one of the
+    need's source_turns is a founder turn with postponing wording; otherwise False
+    (the safe default - the need stays a current need). source_turns is untouched."""
+    out = dict(need)
+    raw = out.get("deferred")
+    flag = raw if isinstance(raw, bool) else (str(raw).strip().lower() == "true" if raw is not None else False)
+    if flag:
+        flag = any(_DEFER_WORDING.search(founder_turns.get(t, "")) for t in (out.get("source_turns") or []))
+    out["deferred"] = flag
+    return out
