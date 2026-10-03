@@ -66,7 +66,7 @@ def _isolate_store():
     qc.set_store(old)
 
 
-def _graph_run(monkeypatch, tmp_path, replies, tid, cfg=None, coverage_target="data", idea="a kids music app. We write every song ourselves."):
+def _graph_run(monkeypatch, tmp_path, replies, tid, cfg=None, coverage_target="data", idea="a kids music app. We write every song ourselves.", history=None):
     from langchain_core.messages import HumanMessage
     from interview_engine.coverage import AREA_KEYS
     from interview_engine.graph import build_graph
@@ -82,6 +82,7 @@ def _graph_run(monkeypatch, tmp_path, replies, tid, cfg=None, coverage_target="d
         "messages": [HumanMessage(content=idea)],
         "submission": {"free_text": idea, "founder_id": "t", "submission_id": tid},
         "verdict": {"accepted": True}, "coverage": cov, "coverage_target": coverage_target,
+        **({"question_history": history} if history else {}),
     }, {"configurable": {"thread_id": tid}})
     rows = [json.loads(l) for l in (tmp_path / "verification.jsonl").read_text().splitlines()]
     return r, rows, model
@@ -129,3 +130,23 @@ def test_retry_on_falls_back_to_the_template_when_the_retry_also_fails(monkeypat
 def test_passing_question_is_never_retried_even_when_the_flag_is_on(monkeypatch, tmp_path):
     r, rows, _ = _graph_run(monkeypatch, tmp_path, [GOOD], "vr-nop", cfg=RETRY_ON)
     assert rows[0]["retry_count"] == 0 and r["messages"][-1].content == GOOD
+
+
+def test_repeat_check_is_deterministic_one_model_call_and_prints_the_boundary(monkeypatch, tmp_path):
+    prior = "Where are the songs kept and who adds new songs?"
+    proposed = "Where are the songs kept, and who adds new ones?"
+    from interview_engine.coverage import question_similarity
+    sim = question_similarity(proposed, prior)
+    qc.store().put({"question_repeat": {"similarity_threshold_pct": int(round(sim * 100))}})
+    r, rows, model = _graph_run(monkeypatch, tmp_path, [proposed], "vr-boundary", history=[{"area": "data", "question": prior}])
+    assert model.calls == 1      # no SAME/NEW judge call
+    row = rows[0]
+    assert row["repeat_similarity"] == round(sim, 3) and "boundary" in row
+    assert row["boundary"].startswith("repeat similarity=") and "matched=" in row["boundary"]
+
+
+def test_clearly_new_question_has_no_boundary_line(monkeypatch, tmp_path):
+    r, rows, _ = _graph_run(monkeypatch, tmp_path, [GOOD], "vr-noboundary",
+                            history=[{"area": "users", "question": "Who are the buyers?"}])
+    assert "boundary" not in rows[0] and rows[0]["repeat_threshold"] == 0.45
+    assert r["messages"][-1].content == GOOD

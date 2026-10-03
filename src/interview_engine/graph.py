@@ -32,7 +32,7 @@ from .verification import verify_question
 from .coverage import reask_question, _FALLBACK_QUESTIONS
 from .integration_guard import close_as_none_stated
 from .coverage import (NONE_STATED, COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
-                         founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, engineering_default, DELEGATED,
+                         founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, best_prior_similarity, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
 from .prompts import INTERVIEWER_SYSTEM, STRUCTURED_TURN_FORMAT
@@ -570,6 +570,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # Deterministic repeat check against PRIOR QUESTIONS only. The founder has
             # no reason to repeat themselves, so answers are never compared here.
             _thr = question_config.current()["question_repeat"]["similarity_threshold_pct"] / 100.0
+            _prior = [str(q.get("question", "")) for q in history_questions]
+            _sim_in, _match_in = best_prior_similarity(question, _prior)
             question = unique_question(question, history_questions, next_target, _thr)
             if non_answer_turn and next_target is not None:
                 question = reask_question(next_target)
@@ -578,7 +580,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     verification_log.write({**vrec, "turn": turn, "proposed_question": candidate,
                                             "final_question": question, "replaced": question != candidate,
                                             "non_answer": non_answer_turn, "retry_count": retry_count,
-                                            "fallback_used": fallback_used})
+                                            "fallback_used": fallback_used,
+                                            "repeat_similarity": round(_sim_in, 3), "repeat_threshold": _thr,
+                                            **({"boundary": f"repeat similarity={_sim_in:.2f} threshold={_thr:.2f} "
+                                                            f"decision={'repeat' if _sim_in >= _thr else 'new'} "
+                                                            f"matched={_match_in!r}"}
+                                               if abs(_sim_in - _thr) <= 0.05 else {})})
                 except OSError:
                     pass
             # saturation guard (run-4 audit): the model may only declare the
