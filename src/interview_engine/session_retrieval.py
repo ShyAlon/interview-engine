@@ -30,11 +30,11 @@ def build_spans(founder_turns: list[tuple[int, str]]) -> list[dict]:
 
 
 def _score(text: str, cues: list[str]) -> int:
-    low = text.lower()
+    low = text.lower().replace("-", " ")   # "self-contained" and "self contained" are one cue
     words = re.findall(r"[a-z0-9']+", low)
     hit = 0
     for cue in cues:
-        c = cue.lower()
+        c = cue.lower().replace("-", " ")
         if " " in c:
             hit += c in low
         else:
