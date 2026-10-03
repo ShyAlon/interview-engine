@@ -55,6 +55,17 @@ def test_log_appends_one_json_line_per_record(tmp_path):
     assert [r["turn"] for r in rows] == [1, 2] and all("ts" in r for r in rows)
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_store():
+    old = qc.store()
+    qc.set_store(qc.ConfigStore())
+    yield
+    qc.set_store(old)
+
+
 def _graph_run(monkeypatch, tmp_path, replies, tid, cfg=None, coverage_target="data", idea="a kids music app. We write every song ourselves."):
     from langchain_core.messages import HumanMessage
     from interview_engine.coverage import AREA_KEYS
@@ -87,3 +98,34 @@ def test_scores_are_written_every_turn_even_when_the_question_is_bad(monkeypatch
     assert row["retrieval_spans"] and row["proposed_question"] == "Which payment currencies matter most?"
     # scoring alone never rewrites a question
     assert r["messages"][-1].content == "Which payment currencies matter most?"
+
+
+BAD = "Which payment currencies matter most?"
+GOOD = "You said you write every song ourselves - where are the songs kept, and who adds new ones?"
+RETRY_ON = {"verification": {"retry_enabled": True}}
+
+
+def test_retry_is_off_by_default_so_one_probing_call_is_made(monkeypatch, tmp_path):
+    _, rows, _ = _graph_run(monkeypatch, tmp_path, [BAD, GOOD], "vr-off")
+    assert rows[0]["retry_count"] == 0 and rows[0]["fallback_used"] is False
+    assert rows[0]["final_question"] == BAD
+
+
+def test_retry_on_uses_the_retried_question_when_it_passes(monkeypatch, tmp_path):
+    r, rows, _ = _graph_run(monkeypatch, tmp_path, [BAD, GOOD], "vr-pass", cfg=RETRY_ON)
+    assert r["messages"][-1].content == GOOD
+    row = rows[0]
+    assert row["retry_count"] == 1 and row["fallback_used"] is False and row["passed"] is True
+    assert row["retry_cleared"] == ["grounding"] and row["proposed_question"] == GOOD
+
+
+def test_retry_on_falls_back_to_the_template_when_the_retry_also_fails(monkeypatch, tmp_path):
+    from interview_engine.coverage import _FALLBACK_QUESTIONS
+    r, rows, _ = _graph_run(monkeypatch, tmp_path, [BAD, "Which tax rates apply?"], "vr-fb", cfg=RETRY_ON)
+    assert r["messages"][-1].content == _FALLBACK_QUESTIONS["data"]
+    assert rows[0]["retry_count"] == 1 and rows[0]["fallback_used"] is True
+
+
+def test_passing_question_is_never_retried_even_when_the_flag_is_on(monkeypatch, tmp_path):
+    r, rows, _ = _graph_run(monkeypatch, tmp_path, [GOOD], "vr-nop", cfg=RETRY_ON)
+    assert rows[0]["retry_count"] == 0 and r["messages"][-1].content == GOOD

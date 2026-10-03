@@ -23,13 +23,13 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from vmodel_contracts import IntakeSubmission, ScopeVerdict
 
-from . import model_config, scope_gate
+from . import model_config, question_config, scope_gate
 from .coverage import AREAS as _AREAS
 from .data_gate import gate_data
 from .non_answer import is_non_answer
 from .session_retrieval import build_spans, rank_spans, retrieval_block
 from .verification import verify_question
-from .coverage import reask_question
+from .coverage import reask_question, _FALLBACK_QUESTIONS
 from .integration_guard import close_as_none_stated
 from .coverage import (NONE_STATED, COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
                          founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, engineering_default, DELEGATED,
@@ -519,6 +519,36 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 vrec["retrieval_spans"] = [{"id": x["id"], "score": x["score"]} for x in _ranked]
             except Exception as exc:  # scoring must never break an interview turn
                 vrec = {"target_area": next_target, "error": f"{type(exc).__name__}: {exc}", "passed": None}
+            # Retry is OFF by default (verification.retry_enabled). When on: ONE retry
+            # naming the failed checks, then the code-owned template. Never ship the
+            # unverified question.
+            retry_count, fallback_used = 0, False
+            if (vrec.get("passed") is False and not non_answer_turn and next_target
+                    and question_config.current()["verification"]["retry_enabled"]):
+                feedback = ("Your question failed these checks: " + ", ".join(vrec["failed_checks"]) + ". "
+                            "Ask ONE question about the " + _LABELS.get(next_target, next_target)
+                            + " that quotes or names something the founder actually said, asks for a need "
+                            "(not a technology or a method), and does not ask the founder to staff the work. "
+                            "Reply ONLY with the JSON object: " + STRUCTURED_TURN_FORMAT)
+                _t0 = _time.time()
+                resp_v = model_config.invoke_checked(
+                    probing_model, [*request_messages, AIMessage(content=resp.content), HumanMessage(content=feedback)], "probing")
+                usage_log.record("probing", model_config.for_stage("probing").provider,
+                                 model_config.for_stage("probing").model,
+                                 (getattr(resp_v, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
+                retry_count = 1
+                again = extract_turn_json(resp_v.content)
+                retried = (again or {}).get("question", "").strip() or _clean_single_question(resp_v.content) or ""
+                if retried:
+                    rr = verify_question(retried, next_target, _ranked, parked_topics)
+                    if rr["passed"]:
+                        candidate = retried
+                        vrec = {**rr, "retrieval_spans": vrec.get("retrieval_spans", []), "retry_cleared": vrec["failed_checks"]}
+                    else:
+                        vrec["retry_failed_checks"] = rr["failed_checks"]
+                if candidate == parsed["question"].strip():
+                    candidate = _FALLBACK_QUESTIONS.get(next_target, candidate)
+                    fallback_used = True
             owned = engineering_default(candidate)
             if owned:
                 topic, default = owned
@@ -567,7 +597,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 try:
                     verification_log.write({**vrec, "turn": turn, "proposed_question": candidate,
                                             "final_question": question, "replaced": question != candidate,
-                                            "non_answer": non_answer_turn, "retry_count": 0, "fallback_used": False})
+                                            "non_answer": non_answer_turn, "retry_count": retry_count,
+                                            "fallback_used": fallback_used})
                 except OSError:
                     pass
             # saturation guard (run-4 audit): the model may only declare the
