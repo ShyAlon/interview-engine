@@ -50,7 +50,8 @@ class InterviewApplication:
                 stage=stage,label=label,status="heartbeat",detail=f"Model call still running, {elapsed:.0f}s elapsed")
         self._heartbeat_signal=heartbeat_signal
         with self._runtime_context():
-            self.graph=build_graph(log,checkpointer=saver,progress=progress,conops_enabled=True,raw_output_dir=self.outdir/'debug',
+            from .verification import VerificationLog
+            self.graph=build_graph(log,checkpointer=saver,progress=progress,verification_log=VerificationLog(self.outdir/'verification.jsonl'),conops_enabled=True,raw_output_dir=self.outdir/'debug',
                 session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
         self.checkpointer=saver
         self.cfg={'configurable':{'thread_id':session_id}}

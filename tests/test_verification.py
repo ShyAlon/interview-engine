@@ -53,3 +53,37 @@ def test_log_appends_one_json_line_per_record(tmp_path):
     log.write({"turn": 2, "passed": False})
     rows = [json.loads(l) for l in (tmp_path / "x" / "verification.jsonl").read_text().splitlines()]
     assert [r["turn"] for r in rows] == [1, 2] and all("ts" in r for r in rows)
+
+
+def _graph_run(monkeypatch, tmp_path, replies, tid, cfg=None, coverage_target="data", idea="a kids music app. We write every song ourselves."):
+    from langchain_core.messages import HumanMessage
+    from interview_engine.coverage import AREA_KEYS
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel, fake_models, structured
+    if cfg:
+        qc.store().put(cfg)
+    cov = {k: "covered" for k in AREA_KEYS}; cov[coverage_target] = "uncovered"
+    model = FakeModel([structured(q) for q in replies])
+    fake_models(monkeypatch, model)
+    log = v.VerificationLog(tmp_path / "verification.jsonl")
+    r = build_graph(UsageLog(tid), verification_log=log).invoke({
+        "messages": [HumanMessage(content=idea)],
+        "submission": {"free_text": idea, "founder_id": "t", "submission_id": tid},
+        "verdict": {"accepted": True}, "coverage": cov, "coverage_target": coverage_target,
+    }, {"configurable": {"thread_id": tid}})
+    rows = [json.loads(l) for l in (tmp_path / "verification.jsonl").read_text().splitlines()]
+    return r, rows, model
+
+
+def test_scores_are_written_every_turn_even_when_the_question_is_bad(monkeypatch, tmp_path):
+    import pytest
+    qc.set_store(qc.ConfigStore())
+    r, rows, _ = _graph_run(monkeypatch, tmp_path, ["Which payment currencies matter most?"], "vr-score")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["target_area"] == "data" and row["passed"] is False and "grounding" in row["failed_checks"]
+    assert row["retry_count"] == 0 and row["fallback_used"] is False and row["non_answer"] is False
+    assert row["retrieval_spans"] and row["proposed_question"] == "Which payment currencies matter most?"
+    # scoring alone never rewrites a question
+    assert r["messages"][-1].content == "Which payment currencies matter most?"

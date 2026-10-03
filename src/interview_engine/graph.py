@@ -27,7 +27,8 @@ from . import model_config, scope_gate
 from .coverage import AREAS as _AREAS
 from .data_gate import gate_data
 from .non_answer import is_non_answer
-from .session_retrieval import retrieval_block
+from .session_retrieval import build_spans, rank_spans, retrieval_block
+from .verification import verify_question
 from .coverage import reask_question
 from .integration_guard import close_as_none_stated
 from .coverage import (NONE_STATED, COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
@@ -101,7 +102,7 @@ def _clean_single_question(text: str) -> str | None:
     return candidate
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None, evidence_lake=None):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None, evidence_lake=None, verification_log=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
     probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
@@ -509,6 +510,15 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             # threshold. Metrics are derived at the downstream verification gate.
             next_target = drill_area or next_area(coverage)
             candidate = parsed["question"].strip()
+            # Scoring is always on and never changes the question by itself.
+            try:
+                _ranked = rank_spans(build_spans(
+                    [(i, getattr(m, "content", "")) for i, m in enumerate(history) if getattr(m, "type", "") == "human"]),
+                    next_target) if next_target else []
+                vrec = verify_question(candidate, next_target, _ranked, parked_topics)
+                vrec["retrieval_spans"] = [{"id": x["id"], "score": x["score"]} for x in _ranked]
+            except Exception as exc:  # scoring must never break an interview turn
+                vrec = {"target_area": next_target, "error": f"{type(exc).__name__}: {exc}", "passed": None}
             owned = engineering_default(candidate)
             if owned:
                 topic, default = owned
@@ -553,6 +563,13 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 question = semantic_repeat_question(question, history_questions, next_target, _same_fact)
             if non_answer_turn and next_target is not None:
                 question = reask_question(next_target)
+            if verification_log is not None:
+                try:
+                    verification_log.write({**vrec, "turn": turn, "proposed_question": candidate,
+                                            "final_question": question, "replaced": question != candidate,
+                                            "non_answer": non_answer_turn, "retry_count": 0, "fallback_used": False})
+                except OSError:
+                    pass
             # saturation guard (run-4 audit): the model may only declare the
             # interview complete when the coverage map actually is saturated -
             # self-grading cannot jump 0/11 -> done.
