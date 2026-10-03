@@ -16,7 +16,7 @@ TURNS = [(0, "a kids music app with songs and star animations"),
 
 def test_spans_split_on_sentences_with_turn_ids():
     spans = sr.build_spans(TURNS)
-    assert {"id": "t2", "turn": 2, "text": "We write every song ourselves."} in spans
+    assert {"id": "t2", "uid": "t2.0", "turn": 2, "text": "We write every song ourselves."} in spans
     assert all(s["id"] == f't{s["turn"]}' for s in spans)
 
 

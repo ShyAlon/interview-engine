@@ -20,12 +20,15 @@ def build_spans(founder_turns: list[tuple[int, str]]) -> list[dict]:
     """founder_turns: (message index, text). One span per sentence or clause."""
     spans, seen = [], set()
     for idx, text in founder_turns:
+        n = 0
         for part in _SENT.split(text or ""):
             part = part.strip().strip('"')
             key = part.casefold()
             if len(part) >= 8 and key not in seen:  # a repeated sentence is one fact
                 seen.add(key)
-                spans.append({"id": f"t{idx}", "turn": idx, "text": part})
+                # "id" stays the message id the prompt block quotes; "uid" adds the sentence index.
+                spans.append({"id": f"t{idx}", "uid": f"t{idx}.{n}", "turn": idx, "text": part})
+                n += 1
     return spans
 
 
