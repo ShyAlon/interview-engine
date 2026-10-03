@@ -88,13 +88,14 @@ class InterviewApplication:
                 self.result={**self.result,'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True}
                 self.open_input=None;self.state={}
             if self.open_input is not None and self.open_input.kind==InputKind.APPROVAL:
+                if response.founder_inputs and value in (0,1):
+                    # Founder answers to open inputs are recorded for both approval and rework.
+                    from vmodel_contracts.founder_register import FounderRegister,apply_resolutions
+                    register=FounderRegister.model_validate(self.result['intent_model']['founder_register'])
+                    updated=apply_resolutions(register,response.founder_inputs,response.actor_id)
+                    self.result['intent_model']={**self.result['intent_model'],'founder_register':updated.model_dump(mode='json')}
+                    self.graph.update_state(self.cfg,{'intent_model':self.result['intent_model']})
                 if value == 1:
-                    if response.founder_inputs:
-                        from vmodel_contracts.founder_register import FounderRegister,apply_resolutions
-                        register=FounderRegister.model_validate(self.result['intent_model']['founder_register'])
-                        updated=apply_resolutions(register,response.founder_inputs,response.actor_id)
-                        self.result['intent_model']={**self.result['intent_model'],'founder_register':updated.model_dump(mode='json')}
-                        self.graph.update_state(self.cfg,{'intent_model':self.result['intent_model']})
                     self._finish();return None
                 if value == 0:
                     # Archive before changing the checkpoint. Rework ConOps only;
