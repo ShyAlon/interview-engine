@@ -287,12 +287,12 @@ def intent_request(question: str, answer: str, variant=None) -> ClassificationRe
 
 def apply_coverage_answers(coverage: Mapping[str, str], answers: Mapping[str, ClassificationAnswer]) -> dict[str, str]:
     """Code-owned accumulation. Classifiers judge one answer; they never own state."""
-    from .coverage import COVERED, DELEGATED, SKIPPED, THIN
+    from .coverage import COVERED, DELEGATED, NONE_STATED, SKIPPED, THIN
     out = dict(coverage)
     relevance = str(answers["relevance"].value)
     for area in COVERAGE_AREAS:
         signal = answers.get(f"covers_{area}")
-        if signal is None or float(signal.value) < .5 or out.get(area) in (COVERED, SKIPPED, DELEGATED):
+        if signal is None or float(signal.value) < .5 or out.get(area) in (COVERED, SKIPPED, DELEGATED, NONE_STATED):
             continue
         out[area] = COVERED if relevance == "addressed" else THIN
     return out

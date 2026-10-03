@@ -112,7 +112,7 @@ def render_coverage_markdown(coverage: dict[str, str]) -> str:
     if not coverage:
         return ""
     from .coverage import AREA_KEYS, _LABELS
-    groups = {"covered": [], "delegated": [], "thin": [], "skipped": [], "deferred": [], "uncovered": []}
+    groups = {"covered": [], "delegated": [], "thin": [], "skipped": [], "deferred": [], "none_stated": [], "uncovered": []}
     for k in AREA_KEYS:
         groups.get(coverage.get(k, "uncovered"), groups["uncovered"]).append(_LABELS[k])
     lines = ["\n## Interview coverage"]
@@ -126,6 +126,8 @@ def render_coverage_markdown(coverage: dict[str, str]) -> str:
         lines.append("**Skipped by you:** " + "; ".join(groups["skipped"]))
     if groups["deferred"]:
         lines.append("**Deferred by you - still open, awaiting your answer:** " + "; ".join(groups["deferred"]))
+    if groups["none_stated"]:
+        lines.append("**None stated (no external system was mentioned; not asked):** " + "; ".join(groups["none_stated"]))
     if groups["uncovered"]:
         lines.append("**Not covered:** " + "; ".join(groups["uncovered"]))
     return "\n".join(lines)

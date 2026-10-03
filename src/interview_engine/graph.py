@@ -28,7 +28,8 @@ from .coverage import AREAS as _AREAS
 from .data_gate import gate_data
 from .non_answer import is_non_answer
 from .coverage import reask_question
-from .coverage import (COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
+from .integration_guard import close_as_none_stated
+from .coverage import (NONE_STATED, COVERED, THIN, SKIPPED, DEFERRED, _LABELS, apply_reply, extract_turn_json, founder_control,
                          founder_steer, guard_question, initial_coverage, next_area, unique_question, same_question_substance, engineering_default, DELEGATED,
                          progress_line, question_topic, status_block, turn_output_schema)
 from .progress import ProgressBus, ProgressEvent, track
@@ -399,6 +400,12 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 "research_brief": f"Research the unresolved {_LABELS.get(target, target)} question from current authoritative sources and present the method or choice at the review gate.",
                 "source_turns": [source_turn]})
             coverage[target] = DELEGATED
+            target = next_area(coverage)
+        # Integrations is asked only if a founder turn named an external system;
+        # otherwise code closes it as "none stated" (visible, not founder-covered).
+        if target == "integrations" and close_as_none_stated(
+                [getattr(m, "content", "") for m in state["messages"] if getattr(m, "type", "") == "human"]):
+            coverage["integrations"] = NONE_STATED
             target = next_area(coverage)
         with track(progress, "interview_turn", "Interviewing", f"turn {turn}"):
             history = state["messages"]

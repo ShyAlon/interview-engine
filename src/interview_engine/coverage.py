@@ -47,7 +47,11 @@ UNCOVERED, THIN, COVERED, SKIPPED, DELEGATED = "uncovered", "thin", "covered", "
 # you'). Still open: never counted as covered or delegated, but the interview
 # moves on instead of re-asking now. A later concrete answer can still cover it.
 DEFERRED = "deferred"
-_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x", DELEGATED: "d", DEFERRED: "?"}
+# Code closed the area because no founder turn named an external system (or the
+# founder said the product is self-contained). Shown as "none stated", never as
+# founder-covered. Additive value; coverage keys are unchanged.
+NONE_STATED = "none_stated"
+_MARK = {UNCOVERED: "-", THIN: "~", COVERED: "+", SKIPPED: "x", DELEGATED: "d", DEFERRED: "?", NONE_STATED: "n"}
 
 
 def initial_coverage() -> dict[str, str]:
@@ -84,7 +88,7 @@ def status_block(coverage: dict[str, str], target: str | None = None) -> str:
 
 
 def progress_line(coverage: dict[str, str]) -> str:
-    done = [k for k in AREA_KEYS if coverage.get(k) in (COVERED, SKIPPED, DELEGATED)]
+    done = [k for k in AREA_KEYS if coverage.get(k) in (COVERED, SKIPPED, DELEGATED, NONE_STATED)]
     nxt = next_area(coverage)
     line = f"coverage {len(done)}/{len(AREA_KEYS)} ({', '.join(done) or 'none yet'})"
     deferred = [k for k in AREA_KEYS if coverage.get(k) == DEFERRED]
@@ -98,13 +102,13 @@ def apply_reply(coverage: dict[str, str], parsed: dict) -> dict[str, str]:
     can only improve or skip an area, never un-cover one."""
     out = dict(coverage)
     for k in parsed.get("covered") or []:
-        if k in out and out[k] not in (SKIPPED, DELEGATED):
+        if k in out and out[k] not in (SKIPPED, DELEGATED, NONE_STATED):
             out[k] = COVERED
     for k in parsed.get("thin") or []:
-        if k in out and out[k] not in (COVERED, SKIPPED, DELEGATED):
+        if k in out and out[k] not in (COVERED, SKIPPED, DELEGATED, NONE_STATED):
             out[k] = THIN
     for k in parsed.get("skipped") or []:
-        if k in out and out[k] not in (COVERED, DELEGATED):
+        if k in out and out[k] not in (COVERED, DELEGATED, NONE_STATED):
             out[k] = SKIPPED
     return out
 
