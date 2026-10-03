@@ -150,3 +150,32 @@ def test_clearly_new_question_has_no_boundary_line(monkeypatch, tmp_path):
                             history=[{"area": "users", "question": "Who are the buyers?"}])
     assert "boundary" not in rows[0] and rows[0]["repeat_threshold"] == 0.45
     assert r["messages"][-1].content == GOOD
+
+T3 = "Does the app need to exchange data with any existing system or service (e.g. GitHub, a music library, analytics), or is it fully self-contained?"
+T4 = "Does the app need to exchange data with any existing system or service (e.g. GitHub Pages hosting, analytics, audio libraries), or is it fully self-contained with none?"
+
+
+def test_integrations_closing_question_hits_its_own_area_cues():
+    # Shy's session 7315ff94 turn 3: target_cue_score 0, best_other data=2 -> false off_target.
+    for q in (T3, T4):
+        r = v.verify_question(q, "integrations", [])
+        assert r["target_cue_score"] > 0 and "off_target" not in r["failed_checks"], r
+
+
+def test_integrations_cues_follow_the_none_stated_config():
+    cfg = qc.defaults()
+    cfg["integrations"]["self_contained_cues"] = ["walled garden"]
+    cfg["area_cues"]["integrations"] = ["api"]
+    r = v.verify_question("Is this a walled garden with its own songs and music?", "integrations", [], cfg=cfg)
+    assert r["target_cue_score"] == 1
+
+
+def test_data_questions_asked_under_integrations_still_fail_off_target():
+    r = v.verify_question("Where are the songs and music files stored, and who adds the content?", "integrations", [])
+    assert "off_target" in r["failed_checks"]
+
+
+def test_hyphenated_cue_matches_either_spelling():
+    from interview_engine.session_retrieval import _score
+    assert _score("it is self contained", ["self-contained"]) == 1
+    assert _score("it is self-contained", ["self contained"]) == 1

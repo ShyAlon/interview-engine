@@ -58,7 +58,11 @@ def verify_question(question: str, target: str | None, spans: list[dict], parked
     impl = implementation_question(question)
     role = bool(_FOUNDER_ROLE_RE.search(question or ""))
 
-    cues = cfg["area_cues"]
+    cues = dict(cfg["area_cues"])
+    # The integrations area also owns the none-stated vocabulary: a closing question
+    # that asks "is it fully self-contained?" must hit its own area.
+    cues["integrations"] = list(cues.get("integrations", [])) + list(cfg["integrations"]["self_contained_cues"]) \
+        + list(cfg["integrations"]["external_system_verbs"])
     scores = {a: _score(question, cues.get(a, [])) for a in AREA_KEYS}
     target_score = scores.get(target or "", 0)
     other_area, other_score = max(((a, v) for a, v in scores.items() if a != target), key=lambda t: t[1],
