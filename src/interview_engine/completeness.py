@@ -1,5 +1,6 @@
 """Conservative recorded-data inventory, not a claim about the founder's world."""
 import re
+from .conops_stage import scenario_depth_problems
 from vmodel_contracts.founder_register import FounderRegister
 
 _CLASSES={
@@ -17,11 +18,20 @@ def inventory(session_id,intent,messages,conops=None):
  for cls,(pattern,question,scope) in _CLASSES.items():
   # ConOps scenarios are concrete flow data; do not report missing flows once
   # a reviewed flow exists. Keyword evidence suppresses uncertain absence.
-  if cls=='flows' and conops and conops.get('operational_scenarios'):continue
+  # Flows: a ConOps scenario with 2+ real steps is concrete flow data. A shallow
+  # scenario must not hide the gap, so the check ignores keyword evidence then.
+  if cls=='flows' and conops and conops.get('operational_scenarios'):
+   if any('operational_flow' not in scenario_depth_problems(x) for x in conops['operational_scenarios']):continue
+   items.append({'item_id':'FD-missing-flows','data_class':'flows','question':_CLASSES['flows'][1],'owner':'founder','status':'open','scope':'user flows',
+    'source':'Every Concept of Operations scenario has fewer than 2 real steps; completeness finding, not proof no flow exists.','blocks':['user flows']});continue
   if re.search(pattern,corpus,re.I):continue
   items.append({'item_id':f'FD-missing-{cls}','data_class':cls,'question':question,
     'owner':'founder','status':'open','scope':scope,'source':'Recorded founder interview has no explicit data for this class; completeness finding, not proof no external material exists.',
     'blocks':[scope]})
+ shallow=[x.get('name','scenario') for x in (conops or {}).get('operational_scenarios') or [] if 'exceptions' in scenario_depth_problems(x)]
+ if shallow:
+  items.append({'item_id':'FD-missing-scenario-exceptions','data_class':'error_states','question':'What should happen when these scenarios fail or deviate: '+'; '.join(shallow)+'?','owner':'founder','status':'open','scope':'scenario exceptions',
+   'source':'Concept of Operations scenarios without any recorded exception; completeness finding, not proof none exist.','blocks':['scenario exceptions']})
  for i,question in enumerate(intent.get('open_questions') or [],1):
   items.append({'item_id':f'FD-open-{i}','data_class':'other','question':question,'owner':'founder','scope':'Unresolved interview question','source':'intent_model.json#open_questions','blocks':['work depending on this answer']})
  advisories=[]

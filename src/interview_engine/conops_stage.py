@@ -147,6 +147,8 @@ def render_conops(doc: ConOpsDocument) -> str:
         lines.append(f"Success: {s.success_outcome}")
         if s.exceptions:
             lines.append(f"Exceptions: {'; '.join(s.exceptions)}")
+        elif s.no_exceptions_reason:
+            lines.append(f"No exceptions: {s.no_exceptions_reason}")
     lines += ["", "## Concept comparison"]
     for o in doc.concept_options:
         marker = " (selected)" if o.name.casefold() == doc.decision.selected_concept.casefold() else ""
@@ -162,7 +164,7 @@ def scenario_seeds_from_intent(intent: dict, founder_turns: set[int]) -> list[di
     """Derive scenario identities from intent concepts/scope, never model prose."""
     concepts = [str(x).strip() for x in (intent.get("operational_concepts") or []) if str(x).strip()]
     if not concepts:
-        concepts = [str(x).strip() for x in (intent.get("in_scope") or []) if str(x).strip()][:3]
+        concepts = [str(x).strip() for x in (intent.get("in_scope") or []) if str(x).strip()]
     if not concepts:
         concepts = [str(intent.get("core_value_proposition") or "Primary operation").strip()]
     source_map = intent.get("source_turns") or {}
@@ -213,11 +215,33 @@ def derive_scenario(seed: dict, intent: dict) -> dict:
     if users:
         out["actors"] = users
     if flows and out.get("name") in flows:
-        out["operational_flow"] = [out["name"]]
+        pass  # a scenario name is not a flow: the model derives ordered steps from the transcript
     value = str(intent.get("core_value_proposition") or "").strip()
     if value:
         out["success_outcome"] = value
-    out["exceptions"] = []
     out["_derived_fields"] = [k for k in ("scenario_id","name","actors","operational_flow",
                                            "success_outcome","exceptions","source_turns") if k in out]
     return out
+
+
+def scenario_depth_problems(scenario: dict) -> dict[str, str]:
+    """Deterministic ConOps depth rule: field -> why it is too shallow.
+
+    A flow needs 2+ distinct steps, none just the scenario name; every scenario
+    needs at least one exception (failure or deviation the concept must handle),
+    or a non-blank no_exceptions_reason saying why it has none.
+    """
+    problems: dict[str, str] = {}
+    name = str(scenario.get("name", "")).strip().casefold()
+    steps = [str(x).strip() for x in (scenario.get("operational_flow") or []) if str(x).strip()]
+    distinct = {x.casefold() for x in steps if x.casefold() != name}
+    if len(distinct) < 2:
+        problems["operational_flow"] = (
+            "operational_flow needs at least 2 distinct ordered steps that describe what happens, "
+            "not just the scenario name.")
+    has_exception = any(str(x).strip() for x in (scenario.get("exceptions") or []))
+    if not has_exception and not str(scenario.get("no_exceptions_reason") or "").strip():
+        problems["exceptions"] = (
+            "exceptions needs at least 1 situation where this scenario deviates or fails "
+            "(for example: connection lost, invalid input, nothing found) and what the user then needs.")
+    return problems

@@ -51,6 +51,7 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     conops = FakeModel([json.dumps({"operating_environment":"phone, often offline"}),
                         json.dumps({"trigger":"habit completed"}),
                         json.dumps({"operational_flow":["open product","record points"]}),
+                        json.dumps({"exceptions":["offline"]}),
                         json.dumps({"name":d["concept_options"][0]["name"],"summary":d["concept_options"][0]["summary"]}),
                         json.dumps({"name":d["concept_options"][1]["name"],"summary":d["concept_options"][1]["summary"]}),
                         json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["store release"]}),
@@ -69,7 +70,7 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     assert "Concept Decision" in r["messages"][-1].content
     r = g.invoke({"messages": [HumanMessage(content="1 - reliable native APIs")]}, cfg)
     assert r["conops"]["decision"]["selected_concept"] == "Native app"
-    assert conops.calls == 9
+    assert conops.calls == 10
 
 
 def test_preseed_uses_validated_intent_identity_and_provenance():
@@ -107,6 +108,7 @@ def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholde
       "done_criteria":[],"tech_preferences":[],"glossary":{},"operational_concepts":["Log habit"],"open_questions":[],
       "source_turns":{"operational_concepts":[0],"core_value_proposition":[0]}}
     conops=FakeModel([json.dumps({"trigger":"habit completed"}),
+                      json.dumps({"operational_flow":["open product","record points"]}),json.dumps({"exceptions":["offline"]}),
                       json.dumps({"name":"Native app","summary":"installed"}),
                       json.dumps({"name":"PWA","summary":"web"}),
                       json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["release"]}),
@@ -118,7 +120,7 @@ def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholde
                 "verdict":{"accepted":True},"intent_model":intent},cfg)
     ctx=r["conops_draft"]["stakeholder_context"][0]
     assert ctx["goals"]==["runner needs quick capture"] and ctx["operating_environment"].startswith("phone, often offline")
-    assert conops.calls==7  # no stakeholder call; trigger + 2 identity micro-calls + 4 option fields
+    assert conops.calls==9  # no stakeholder call; trigger + flow + exceptions + 2 identity micro-calls + 4 option fields
 
 
 def test_per_field_null_is_a_named_failure_with_raw_path(monkeypatch,tmp_path):
@@ -164,6 +166,7 @@ def test_conops_weak_model_container_echo_retries_one_option_then_assembles(monk
         def __init__(self, outputs): super().__init__(outputs); self.messages=[]
         def invoke(self, messages): self.messages.append(messages); return super().invoke(messages)
     conops=Capture([json.dumps({"trigger":"habit completed"}),
+                    json.dumps({"operational_flow":["open product","record points"]}),json.dumps({"exceptions":["offline"]}),
                     json.dumps({"stakeholder_context": []}),
                     json.dumps({"name":"Native","summary":"installed"}),
                     json.dumps({"name":"PWA","summary":"web"}),
@@ -177,9 +180,9 @@ def test_conops_weak_model_container_echo_retries_one_option_then_assembles(monk
       "verdict":{"accepted":True},"intent_model":intent},{"configurable":{"thread_id":"repair"}})
     options=result["conops_draft"]["concept_options"]
     assert [x["name"] for x in options] == ["Native", "PWA"]
-    assert any("previous response failed" in m.content.lower() for m in conops.messages[2] for _ in [0])
-    assert "concept 2 of 2" in conops.messages[3][1].content
-    assert "Native" in conops.messages[3][1].content
+    assert any("previous response failed" in m.content.lower() for m in conops.messages[4] for _ in [0])
+    assert "concept 2 of 2" in conops.messages[5][1].content
+    assert "Native" in conops.messages[5][1].content
 
 
 def test_conops_option_dict_statements_normalize_at_assembly(monkeypatch):
@@ -339,3 +342,79 @@ def test_sparse_intent_rejected_before_conops_model_call(monkeypatch):
                      {"configurable": {"thread_id": "sparse"}})
     assert conops.calls == 0
     assert "Start a new interview" in caught.value.render()
+
+
+def test_scenario_depth_problems_rule():
+    from interview_engine.conops_stage import scenario_depth_problems
+    ok={"name":"Log habit","operational_flow":["open app","tap habit"],"exceptions":["offline"]}
+    assert scenario_depth_problems(ok)=={}
+    assert set(scenario_depth_problems({**ok,"operational_flow":["Log habit"]}))=={"operational_flow"}
+    assert set(scenario_depth_problems({**ok,"operational_flow":["Log habit","log habit"]}))=={"operational_flow"}
+    assert set(scenario_depth_problems({**ok,"operational_flow":["a","a"]}))=={"operational_flow"}
+    assert set(scenario_depth_problems({**ok,"exceptions":[" "]}))=={"exceptions"}
+
+
+def test_derive_scenario_does_not_prefill_flow_or_exceptions_and_seeds_are_uncapped():
+    from interview_engine.conops_stage import derive_scenario, scenario_seeds_from_intent
+    intent={"operational_concepts":["Log habit"],"target_users":["runner"],"core_value_proposition":"points sync"}
+    out=derive_scenario({"scenario_id":"OS-1","name":"Log habit","source_turns":[0]},intent)
+    assert "operational_flow" not in out and "exceptions" not in out and out["actors"]==["runner"]
+    seeds=scenario_seeds_from_intent({"in_scope":[f"item {i}" for i in range(6)],"source_turns":{"in_scope":[0]}},{0})
+    assert len(seeds)==6
+
+
+def _depth_run(monkeypatch, scenario_replies, tid):
+    from interview_engine import model_config
+    from interview_engine.graph import build_graph
+    from interview_engine.telemetry import UsageLog
+    from tests.test_coverage import FakeModel
+    intent={"session_id":tid,"problem_statement":"p","target_users":["runner"],
+      "core_value_proposition":"points sync","stakeholder_needs":[{"need_id":"SN-1","statement":"runner needs quick capture","kind":"functional","source_turns":[0]}],
+      "in_scope":["Log habit"],"out_of_scope":["native-only"],"external_integrations":[],
+      "constraints":["phone, often offline"],"assumptions":[],"assumption_items":[],"scope_exclusions":[],
+      "done_criteria":[],"tech_preferences":[],"glossary":{},"operational_concepts":["Log habit"],"open_questions":[],
+      "source_turns":{"operational_concepts":[0],"core_value_proposition":[0]}}
+    class Capture(FakeModel):
+        def __init__(self, outputs): super().__init__(outputs); self.messages=[]
+        def invoke(self, messages): self.messages.append(messages); return super().invoke(messages)
+    conops=Capture([json.dumps(x) for x in scenario_replies]+[
+        json.dumps({"name":"Native","summary":"installed"}),json.dumps({"name":"PWA","summary":"web"}),
+        json.dumps({"advantages":["native"]}),json.dumps({"disadvantages":["release"]}),
+        json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
+    models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
+    monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
+    g=build_graph(UsageLog(tid),conops_enabled=True)
+    r=g.invoke({"messages":[HumanMessage(content="runner uses phone offline")],"submission":{"free_text":"web app","founder_id":"f","submission_id":tid},
+                "verdict":{"accepted":True},"intent_model":intent},{"configurable":{"thread_id":tid}})
+    return r, conops
+
+
+def test_shallow_scenario_gets_one_depth_retry_with_the_failure(monkeypatch):
+    r,conops=_depth_run(monkeypatch,[{"trigger":"habit done"},{"operational_flow":["Log habit"]},{"exceptions":[]},
+        {"operational_flow":["open app","tap habit"]},{"exceptions":["offline"]}],"depth-ok")
+    s=r["conops_draft"]["operational_scenarios"][0]
+    assert s["operational_flow"]==["open app","tap habit"] and s["exceptions"]==["offline"]
+    assert any("too shallow" in m.content.lower() for m in conops.messages[3])  # 4th call is the flow retry
+
+
+def test_still_shallow_after_retry_is_kept_and_surfaces_in_register(monkeypatch):
+    from interview_engine.completeness import inventory
+    r,_=_depth_run(monkeypatch,[{"trigger":"habit done"},{"operational_flow":["Log habit"]},{"exceptions":[]},
+        {"operational_flow":["Log habit"]},{"exceptions":[]},
+        {"no_exceptions_reason":""},{"no_exceptions_reason":""}],"depth-bad")
+    s=r["conops_draft"]["operational_scenarios"][0]
+    assert s["operational_flow"]==["Log habit"] and s["exceptions"]==[]
+    reg=inventory("depth-bad",{},[HumanMessage(content="a flow with retry errors, empty state, style, accessibility")],{"operational_scenarios":[s]})
+    assert {"FD-missing-flows","FD-missing-scenario-exceptions"} <= {i["item_id"] for i in reg["items"]}
+
+
+def test_a_stated_reason_satisfies_the_exceptions_rule_and_is_rendered(monkeypatch):
+    from interview_engine.completeness import inventory
+    from interview_engine.conops_stage import scenario_depth_problems
+    r,_=_depth_run(monkeypatch,[{"trigger":"habit done"},{"operational_flow":["open app","tap habit"]},{"exceptions":[]},
+        {"exceptions":[]},{"no_exceptions_reason":"Read-only view, the founder said nothing can fail."}],"depth-reason")
+    s=r["conops_draft"]["operational_scenarios"][0]
+    assert s["exceptions"]==[] and s["no_exceptions_reason"].startswith("Read-only")
+    assert scenario_depth_problems(s)=={}
+    reg=inventory("depth-reason",{},[HumanMessage(content="a flow with retry errors, empty state, style, accessibility")],{"operational_scenarios":[s]})
+    assert "FD-missing-scenario-exceptions" not in {i["item_id"] for i in reg["items"]}

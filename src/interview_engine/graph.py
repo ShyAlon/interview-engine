@@ -1019,7 +1019,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from .conops_stage import (CONOPS_SYSTEM, comparison_question, finalize,
                                    derive_scenario, derive_stakeholder_contexts,
-                                   scenario_seeds_from_intent, validate_draft)
+                                   scenario_depth_problems, scenario_seeds_from_intent, validate_draft)
         from .errors import UserFacingError
         from .repair import extract_json_value, normalize_model_item
         import json as _json
@@ -1124,18 +1124,20 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             candidate.update({k:v for k,v in identity.items() if k in model_cls.model_fields})
             missing=[]
             for name, field in model_cls.model_fields.items():
-                if name == "contract_version" or not field.is_required():
+                if name == "contract_version" or (not field.is_required() and not (kind == "scenario" and name == "exceptions")):
                     continue
                 if candidate.get(name) in (None,"",[]):
                     missing.append(name)
-            for field_name in missing:
-                label=f"Building CONOPS {kind} {index}/{total} field {field_name}"
+            def fill(field_name, feedback=""):
+                label=f"Building CONOPS {kind} {index}/{total} field {field_name}"+(" (depth retry)" if feedback else "")
                 body=(f"Fill ONLY the `{field_name}` field for this {kind}. Return JSON exactly as "
                       f"{{\"{field_name}\": <value>}}. Do not return null.\n"
-                      f"CODE-DERIVED FIELDS (do not rewrite): {_json.dumps(candidate)}\n"
+                      + (f"PREVIOUS ANSWER WAS TOO SHALLOW: {feedback}\n" if feedback else "")
+                      + f"CODE-DERIVED FIELDS (do not rewrite): {_json.dumps(candidate)}\n"
                       f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n{prompt}")
                 def field_contract(value):
-                    if not isinstance(value, dict) or value.get(field_name) in (None, "", []):
+                    soft = kind == "scenario" and field_name == "exceptions"  # shallow answers are retried and reported, never fatal
+                    if not isinstance(value, dict) or value.get(field_name) is None or (not soft and value.get(field_name) in ("", [])):
                         raise ValueError(f"expected object with non-empty field {field_name!r}, got {str(value)[:250]}")
                 raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}", field_contract)
                 try:
@@ -1143,7 +1145,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     # error contract: normalize wrapper, whitelist, take only it.
                     normalized=normalize_model_item(raw,model_cls)
                     value=normalized.get(field_name)
-                    if value in (None,"",[]):
+                    if value is None or (value in ("",[]) and not (kind == "scenario" and field_name == "exceptions")):
                         raise ValueError(f"field {field_name} was not provided")
                     candidate[field_name]=value
                 except ValueError as field_error:
@@ -1152,10 +1154,29 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         f"stage 'conops': {kind} item {index}/{total} field '{field_name}' was not provided.",
                         str(field_error), "inspect the raw response at "+(path or "the configured debug output")
                         +", then rerun with the same --session id.") from field_error
+            for field_name in missing:
+                fill(field_name)
+            if kind == "scenario":
+                # Deterministic depth check; one retry with the exact failure, then it becomes a register finding.
+                for field_name, why in scenario_depth_problems(candidate).items():
+                    before = candidate.get(field_name)
+                    try:
+                        fill(field_name, why)
+                    except UserFacingError:
+                        candidate[field_name] = before
+                    if scenario_depth_problems(candidate).get(field_name) and candidate.get(field_name) in (None, [], ""):
+                        candidate[field_name] = before
+                if "exceptions" in scenario_depth_problems(candidate):
+                    # Last resort the founder can see: the model must say why there are none.
+                    try:
+                        fill("no_exceptions_reason", "Name the reason, from the founder's words, why this scenario has no "
+                             "deviation or failure; if there is one, return it in exceptions instead.")
+                    except UserFacingError:
+                        candidate.pop("no_exceptions_reason", None)
             try:
                 item=model_cls.model_validate(candidate)
             except Exception as final_error:
-                path=raw_paths.get(label) if missing else None
+                path=None
                 raise UserFacingError(
                     f"stage 'conops': {kind} item {index}/{total} failed after per-field generation.",
                     f"validation detail: {str(final_error)[:350]}; code-derived fields: {derived_fields}",
