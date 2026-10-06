@@ -77,6 +77,7 @@ def test_real_schema_drift_and_identity_mismatch_are_blocked_without_backup(tmp_
 def test_scan_dry_run_and_apply_reports_every_session(tmp_path,monkeypatch,capsys):
  fixture(tmp_path);fixture(tmp_path,'7b0c0da6-c340-4cd2-8a10-0a803104192f','task-two')
  import sys
+ monkeypatch.setattr(module,'CONTRACT_VERSION','0.20.0')  # the one-time script refuses other contract versions on purpose
  monkeypatch.setattr(sys,'argv',['migration','--artifacts-root',str(tmp_path),'--all']);assert main()==0
  preview=json.loads(capsys.readouterr().out);assert len(preview['results'])==2 and preview['mode']=='dry-run'
  monkeypatch.setattr(sys,'argv',['migration','--artifacts-root',str(tmp_path),'--all','--apply'])

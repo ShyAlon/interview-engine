@@ -451,3 +451,19 @@ def test_legacy_graph_checkpoint_switches_pinned_model_and_resumes(monkeypatch,t
     assert snapshot.model_map['probing']==('ollama','phi4') and snapshot.open_input.input_id==old.open_input.input_id
     restarted.respond(session.session_id,InputResponse(input_id=old.open_input.input_id,value='Help surfers book lessons',actor_id='founder'))
     assert ('ollama','phi4') in seen
+
+
+def test_distill_keeps_grounded_reference_names_and_flags_the_rest(fake_models):
+    text = "a saas web app for surf schools, like Calendly, working title WaveDesk"
+    scope = dict(SCOPE_REPLY, reference_names=[
+        {"name": "Calendly", "kind": "reference_product", "source_turns": [0]},
+        {"name": "WaveDesk", "kind": "working_title", "source_turns": [0]},
+        {"name": "Booksy", "kind": "competitor", "source_turns": [0]},   # the founder never said it
+    ])
+    fake_models["distillation"] = FakeModel([json.dumps(NEEDS_REPLY), json.dumps(scope), json.dumps(PREVIEW_REPLY)])
+    r = run_one_turn(build_graph(UsageLog("t1")), {"configurable": {"thread_id": "t-refnames"}}, text=text)
+    intent = r["intent_model"]
+    assert {"Calendly", "WaveDesk"} <= {n["name"] for n in intent["reference_names"]}
+    assert not any(name in " ".join(intent["constraints"]) for name in ("Calendly", "WaveDesk", "Booksy"))
+    rules = [f["rule"] for f in (r.get("semantic_review") or {}).get("findings", [])]
+    assert "ungrounded_reference_name" in rules
