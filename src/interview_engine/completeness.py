@@ -11,6 +11,11 @@ _CLASSES={
  'accessibility':(r'\b(accessib|screen reader|keyboard navigation|contrast)', 'What accessibility needs must the app meet?','accessibility'),
 }
 
+# Earliest pipeline stage that cannot be built correctly without the missing data.
+# Free-text open questions have no known owning stage, so they stay empty and only block the final handoff.
+_BLOCKED_STAGES={'flows':['srs'],'error_states':['srs'],'styling':['items'],'empty_states':['items'],
+ 'accessibility':['items'],'content':['items'],'deployment':['architecture']}
+
 def inventory(session_id,intent,messages,conops=None):
  turns=[(i,str(getattr(m,'content',''))) for i,m in enumerate(messages) if getattr(m,'type',None)=='human']
  corpus=' '.join(text for _,text in turns)
@@ -26,11 +31,11 @@ def inventory(session_id,intent,messages,conops=None):
     'source':'Every Concept of Operations scenario has fewer than 2 real steps; completeness finding, not proof no flow exists.','blocks':['user flows']});continue
   if re.search(pattern,corpus,re.I):continue
   items.append({'item_id':f'FD-missing-{cls}','data_class':cls,'question':question,
-    'owner':'founder','status':'open','scope':scope,'source':'Recorded founder interview has no explicit data for this class; completeness finding, not proof no external material exists.',
+    'owner':'founder','status':'open','scope':scope,'blocked_stages':_BLOCKED_STAGES.get(cls,[]),'source':'Recorded founder interview has no explicit data for this class; completeness finding, not proof no external material exists.',
     'blocks':[scope]})
  shallow=[x.get('name','scenario') for x in (conops or {}).get('operational_scenarios') or [] if 'exceptions' in scenario_depth_problems(x)]
  if shallow:
-  items.append({'item_id':'FD-missing-scenario-exceptions','data_class':'error_states','question':'What should happen when these scenarios fail or deviate: '+'; '.join(shallow)+'?','owner':'founder','status':'open','scope':'scenario exceptions',
+  items.append({'item_id':'FD-missing-scenario-exceptions','data_class':'error_states','question':'What should happen when these scenarios fail or deviate: '+'; '.join(shallow)+'?','owner':'founder','status':'open','scope':'scenario exceptions','blocked_stages':_BLOCKED_STAGES['error_states'],
    'source':'Concept of Operations scenarios without any recorded exception; completeness finding, not proof none exist.','blocks':['scenario exceptions']})
  for i,question in enumerate(intent.get('open_questions') or [],1):
   items.append({'item_id':f'FD-open-{i}','data_class':'other','question':question,'owner':'founder','scope':'Unresolved interview question','source':'intent_model.json#open_questions','blocks':['work depending on this answer']})

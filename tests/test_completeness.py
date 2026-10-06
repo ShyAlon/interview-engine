@@ -15,3 +15,10 @@ def test_shallow_conops_scenario_does_not_hide_flow_or_exception_findings():
  r=inventory('s',{},[HumanMessage(content='Blue colors, a flow, retry errors, empty state and screen reader support')],{'operational_scenarios':[{'name':'Log habit','operational_flow':['Log habit'],'exceptions':[]}]})
  ids={i['item_id'] for i in r['items']}
  assert ids=={'FD-missing-flows','FD-missing-scenario-exceptions'}
+ assert [i['blocked_stages'] for i in r['items'] if i['item_id']=='FD-missing-scenario-exceptions']==[['srs']]
+
+def test_missing_data_items_name_the_stage_they_block_and_open_questions_do_not():
+ r=inventory('s',{'open_questions':['Which curriculum?']},[HumanMessage(content='A music app on iPad')])
+ stages={x['data_class']:x['blocked_stages'] for x in r['items'] if x['item_id'].startswith('FD-missing')}
+ assert stages=={'flows':['srs'],'styling':['items'],'error_states':['srs'],'empty_states':['items'],'accessibility':['items']}
+ assert [x['blocked_stages'] for x in r['items'] if x['item_id'].startswith('FD-open')]==[[]]
