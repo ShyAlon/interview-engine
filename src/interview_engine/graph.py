@@ -937,6 +937,23 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for i,item in enumerate(parts.get("tech_preferences") or []):
                 if item not in tprefs:
                     semantic_findings.append({"finding_id":f"technology:{i}","item_id":f"technology:{i}","path":["tech_preferences",i],"rule":"ungrounded_preference","reason":"This technology preference could not be grounded in the interview.","original":item})
+            from .distill_qa import verify_reference_names
+
+            founder_turn_text = {i: str(getattr(m, "content", "")) for i, m in enumerate(state["messages"])
+                                 if getattr(m, "type", "") == "human"}
+            original_names = list(parts.get("reference_names") or [])
+            rnames, dropped_rn = verify_reference_names(original_names, founder_turn_text)
+            for i, item in enumerate(original_names):
+                if item not in rnames and not any(isinstance(item, dict) and str(item.get("name", "")).strip().casefold() == r["name"].casefold() for r in rnames):
+                    semantic_findings.append({"finding_id": f"reference_name:{i}", "item_id": f"reference_name:{i}",
+                        "path": ["reference_names", i], "rule": "ungrounded_reference_name",
+                        "reason": "This product name could not be found in the founder's own words in its cited turns.",
+                        "original": item})
+            parts["reference_names"] = rnames  # never copied into constraints or prose: the names stay out of specs
+            if progress is not None:
+                for d in dropped_rn:
+                    progress.emit(ProgressEvent("distill_validate", "Ungrounded reference name needs review",
+                                                "completed", _t2.time(), 0.0, d))
             for tp in tprefs:  # dual form: the flat constraints list carries them too (ADR-0019)
                 rendered = f"{tp.get('area', 'technology')}: {tp.get('preference')} (founder, {tp.get('strength', 'preferred')})"
                 if rendered not in parts["constraints"]:

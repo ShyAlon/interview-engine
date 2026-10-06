@@ -122,3 +122,41 @@ def test_agnostic_is_an_answer_not_silence():
     from vmodel_contracts import TechPreference
     tp = TechPreference(area="language", preference="agnostic", strength="preferred", source_turns=[1])
     assert tp.preference == "agnostic"
+
+
+FOUNDER = {2: "I want to build something like Duolingo for piano, working title Keys16", 4: "no competitors yet"}
+
+
+def test_reference_names_grounded_kept_and_normalized():
+    from interview_engine.distill_qa import verify_reference_names
+    kept, dropped = verify_reference_names([
+        {"name": "Duolingo", "kind": "reference_product", "source_turns": [2]},
+        {"name": "keys16", "kind": "working_title", "source_turns": [2]},
+        {"name": "DUOLINGO", "kind": "reference_product", "source_turns": [2]},   # case duplicate collapses
+    ], FOUNDER)
+    assert [k["name"] for k in kept] == ["Duolingo", "keys16"] and dropped == []
+
+
+def test_reference_names_ungrounded_are_dropped_with_a_reason():
+    from interview_engine.distill_qa import verify_reference_names
+    kept, dropped = verify_reference_names([
+        {"name": "Duolingo", "kind": "competitor", "source_turns": []},              # no turns
+        {"name": "Duolingo", "kind": "rival", "source_turns": [2]},                  # bad kind
+        {"name": "Simply Piano", "kind": "competitor", "source_turns": [2]},         # not in the cited turn
+        {"name": "Duolingo", "kind": "competitor", "source_turns": [3]},             # turn 3 is not a founder turn
+        {"name": "Duo", "kind": "competitor", "source_turns": [2]},                  # substring, not a whole word
+        {"name": "", "kind": "competitor", "source_turns": [2]},
+        "Duolingo",
+    ], FOUNDER)
+    assert kept == [] and len(dropped) == 7
+
+
+def test_scope_prompt_asks_for_reference_names_and_forbids_inference():
+    from interview_engine.prompts import DISTILL_SCOPE_SYSTEM
+    assert "reference_names[]" in DISTILL_SCOPE_SYSTEM and "Never infer or guess a name" in DISTILL_SCOPE_SYSTEM
+
+
+def test_intent_model_accepts_and_defaults_reference_names():
+    from vmodel_contracts import IntentModel, ReferenceName
+    assert IntentModel.model_fields["reference_names"].default_factory() == []
+    assert ReferenceName(name="Keys16", kind="working_title", source_turns=[2]).kind.value == "working_title"

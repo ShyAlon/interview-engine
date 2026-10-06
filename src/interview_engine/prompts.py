@@ -58,7 +58,7 @@ Output STRICT JSON only."""
 
 DISTILL_SCOPE_SYSTEM = """From this interview transcript, extract the framing fields of the intent
 model (JSON): problem_statement, target_users[], core_value_proposition, in_scope[], out_of_scope[],
-external_integrations[], constraints[], open_questions[], tech_preferences[], source_turns{field: [turn indexes]}.
+external_integrations[], constraints[], open_questions[], tech_preferences[], reference_names[], source_turns{field: [turn indexes]}.
 
 Rules:
 - in_scope / out_of_scope are the scope BOUNDARY (what the system will and will not do).
@@ -81,6 +81,11 @@ Rules:
   strength=required ONLY when the founder mandated it ("must be", "we are locked into"); affinity and
   "we'd rather" are preferred. "Agnostic" / "no preference" IS an answer: record it (preferred), never
   treat it as silence. Never infer a preference the founder did not state in the transcript.
+- reference_names[]: objects {name, kind, source_turns[]} - product names the founder said, for
+  orientation only. kind: working_title = what the founder calls THIS product; competitor = a named
+  existing product or company the founder positions against; reference_product = a named product the
+  founder wants to resemble or borrow from. The name must appear in the founder's own words in the
+  cited turns. Never infer or guess a name; no name said means an empty list.
 - glossary: {term: meaning as the founder used it} for the founder's domain terms
   ("exceptions", "facilities", ...). Only terms the founder actually said.
 - source_turns: every field names the transcript turns it came from. Auditability, not decoration.

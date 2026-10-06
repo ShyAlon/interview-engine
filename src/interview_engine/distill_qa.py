@@ -108,6 +108,40 @@ def verify_tech_preferences(prefs: list[dict]) -> tuple[list[dict], list[str], l
     return kept, dropped, warnings
 
 
+REFERENCE_KINDS = ("working_title", "competitor", "reference_product")
+
+
+def verify_reference_names(items: list[dict], founder_turns: dict[int, str]) -> tuple[list[dict], list[str]]:
+    """Keep a reference name only when it is provably the founder's own: it cites founder turns, its kind is
+    one of REFERENCE_KINDS, and the name appears (case-insensitive, whole word) in one of those turns.
+    Case-insensitive duplicates collapse to the first. Everything else is DROPPED with a reason; the
+    caller raises it for founder review, never silently keeps it."""
+    kept, dropped, seen = [], [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            dropped.append(str(item)[:60])
+            continue
+        name = str(item.get("name") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        turns = item.get("source_turns") or []
+        if not name:
+            dropped.append("(empty reference name)")
+        elif kind not in REFERENCE_KINDS:
+            dropped.append(f"'{name[:50]}' - kind '{kind[:30]}' is not one of {', '.join(REFERENCE_KINDS)}")
+        elif not turns or any(not isinstance(t, int) or t not in founder_turns for t in turns):
+            dropped.append(f"'{name[:50]}' - no valid founder turns cited")
+        else:
+            pattern = r"(?<![A-Za-z0-9])" + r"\s+".join(re.escape(part) for part in name.split()) + r"(?![A-Za-z0-9])"
+            if not any(re.search(pattern, founder_turns[t], re.IGNORECASE) for t in turns):
+                dropped.append(f"'{name[:50]}' - not found in the founder's cited turns")
+            elif name.casefold() in seen:
+                continue
+            else:
+                seen.add(name.casefold())
+                kept.append({"name": name, "kind": kind, "source_turns": [int(t) for t in turns]})
+    return kept, dropped
+
+
 # Founder wording that postpones a need. Same family as spec-generator's fallback
 # markers; here it only CONFIRMS a model-proposed deferred=true against the
 # founder's own turns, it never sets the flag by itself.
