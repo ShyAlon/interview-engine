@@ -798,7 +798,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 data[k] = _as_str_list(raw, field=k)
             exclusions = [ScopeExclusion.model_validate(x).model_dump(mode="json")
                           for x in (data.get("scope_exclusions") or [])]
-            keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "glossary", "source_turns")
+            keep = required_str + required_list + ("external_integrations", "constraints", "open_questions", "glossary", "source_turns", "reference_names")
             out = {k: data.get(k) for k in keep}
             # glossary drift: {term: meaning} sometimes arrives as [{term, meaning}, ...]
             gl = out.get("glossary")
@@ -949,7 +949,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         "path": ["reference_names", i], "rule": "ungrounded_reference_name",
                         "reason": "This product name could not be found in the founder's own words in its cited turns.",
                         "original": item})
-            parts["reference_names"] = rnames  # never copied into constraints or prose: the names stay out of specs
+            parts["reference_names"] = original_names  # candidates stay until the owner reviews each finding (same as assumptions); never copied into constraints or prose
             if progress is not None:
                 for d in dropped_rn:
                     progress.emit(ProgressEvent("distill_validate", "Ungrounded reference name needs review",
