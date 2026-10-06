@@ -64,6 +64,11 @@ def ground_assumptions(
     return kept, dropped
 
 
+def _repeats(cw: set[str], nw: set[str]) -> bool:
+    shared = len(_shared(cw, nw))
+    return bool(cw) and (shared / len(cw) >= 0.5 or (shared >= 2 and len(cw) <= 3))
+
+
 def dedup_constraints(constraints: list[str], need_statements: list[str]) -> tuple[list[str], list[str]]:
     """Drop constraints whose fact is already a need (the run-2/run-3
     double-classification). A constraint survives only if most of its content
@@ -72,14 +77,39 @@ def dedup_constraints(constraints: list[str], need_statements: list[str]) -> tup
     need_word_sets = [content_words(s) for s in need_statements]
     for c in constraints:
         cw = content_words(c)
-        if cw and any(
-            len(_shared(cw, nw)) / len(cw) >= 0.5 or (len(_shared(cw, nw)) >= 2 and len(cw) <= 3)
-            for nw in need_word_sets
-        ):
+        if any(_repeats(cw, nw) for nw in need_word_sets):
             dropped.append(c)
         else:
             kept.append(c)
     return kept, dropped
+
+
+_ALSO_OVERLAPS = 0.3
+
+
+def explain_duplicate_constraint(constraint: str, needs: list[tuple[str, str]]) -> str:
+    """Founder-readable reason for a constraint dropped by dedup_constraints.
+
+    `needs` are (need_id, statement) pairs; an empty id is named by its wording only.
+    Names the best-matching need (the one the rule fired on), lists other needs that
+    share at least a third of the constraint's wording, and says why a fact should
+    not appear twice. Same matching as the rule; no new threshold."""
+    cw = content_words(constraint)
+    scored = sorted(((len(_shared(cw, content_words(st))) / len(cw), nid, st)
+                     for nid, st in needs if cw), key=lambda x: -x[0])
+    firing = [x for x in scored if _repeats(cw, content_words(x[2]))]
+    if not firing:
+        return "This design constraint repeats a classified stakeholder need."
+    _, nid, st = firing[0]
+    label = f"need {nid}" if nid else "a need"
+    text = f'Same fact as {label}: "{st.strip()}"'
+    others = [x for x in scored if x[2] != st and x[0] >= _ALSO_OVERLAPS]
+    if others:
+        text += " It also overlaps " + ", ".join(
+            f"need {n}" if n else f'"{t.strip()[:60]}"' for _, n, t in others) + "."
+    return (text + " A fact should live in one place, either as a need (what people need) or "
+            "as a design constraint (a limit on how it is built). Listed twice, the two copies "
+            "can drift apart. Keep one.")
 
 
 

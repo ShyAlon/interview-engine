@@ -160,3 +160,52 @@ def test_intent_model_accepts_and_defaults_reference_names():
     from vmodel_contracts import IntentModel, ReferenceName
     assert IntentModel.model_fields["reference_names"].default_factory() == []
     assert ReferenceName(name="Keys16", kind="working_title", source_turns=[2]).kind.value == "working_title"
+
+
+# A real session's classified needs and constraints (a tabletop-game web app). The rule
+# flagged three of five constraints; all three restate a need.
+_REAL_NEEDS = [
+    ("SN-3", "The Virtual DM works with the SRD 3.5 rules and should stay consistent with the SRD 3.5 rules and the module's text as much as possible."),
+    ("SN-4", "The Virtual DM should accept adventure modules written to SRD 3.5 standards as input."),
+    ("SN-5", "The web application should support multiple devices."),
+    ("SN-6", "The application should provide a playful experience, such as dice rolling, sounds of battles, trumpets when leveling up."),
+    ("SN-13", "The SRD will be baked into the code, and so will the audio assets and voice libraries (nothing is exchanged with existing external systems or services)."),
+    ("SN-21", "Because the game is turn based, a short delay is acceptable in keeping every player's device in sync."),
+    ("SN-22", "The players create their characters by hand, and the application saves the state of the characters as well as the state of the adventure."),
+    ("SN-23", "The app should validate the players' characters according to the SRD rules (for example, strength can't be above a threshold for a specific race)."),
+]
+_REAL_CONSTRAINTS = [
+    "The product is a web application that must support multiple devices.",
+    "Must work with SRD 3.5 rules and accept adventure modules written in SRD 3.5 standards.",
+    "SRD 3.5 rules, audio assets, and voice libraries must be baked into the code rather than supplied by external services.",
+    "The experience is turn-based; a short delay in syncing across devices is acceptable, so real-time sync is not a design constraint.",
+    "Players build characters by hand; the app's role is validation, not generation.",
+]
+
+
+def test_real_session_rule_is_unchanged_three_flagged_two_kept():
+    kept, dropped = dedup_constraints(_REAL_CONSTRAINTS, [s for _, s in _REAL_NEEDS])
+    assert dropped == _REAL_CONSTRAINTS[:3] and kept == _REAL_CONSTRAINTS[3:]
+
+
+def test_flag_text_names_the_matched_need_and_says_why():
+    from interview_engine.distill_qa import explain_duplicate_constraint
+    texts = [explain_duplicate_constraint(c, _REAL_NEEDS) for c in _REAL_CONSTRAINTS[:3]]
+    assert texts[0].startswith('Same fact as need SN-5: "The web application should support multiple devices."')
+    assert texts[1].startswith("Same fact as need SN-4:") and "also overlaps need SN-3" in texts[1]
+    assert texts[2].startswith("Same fact as need SN-13:")
+    for t in texts:
+        assert "one place" in t and "drift apart" in t and "Keep one." in t
+    assert "also overlaps" not in texts[0]
+
+
+def test_flag_text_without_need_ids_quotes_the_need_only():
+    from interview_engine.distill_qa import explain_duplicate_constraint
+    text = explain_duplicate_constraint(_REAL_CONSTRAINTS[0], [("", s) for _, s in _REAL_NEEDS])
+    assert text.startswith('Same fact as a need: "The web application should support multiple devices."')
+
+
+def test_flag_text_falls_back_when_no_need_fires():
+    from interview_engine.distill_qa import explain_duplicate_constraint
+    assert explain_duplicate_constraint("$0 infrastructure budget", _REAL_NEEDS) == \
+        "This design constraint repeats a classified stakeholder need."

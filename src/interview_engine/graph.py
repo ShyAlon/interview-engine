@@ -639,7 +639,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         from pydantic import ValidationError
         from vmodel_contracts import IntentModel, IntentNeed
 
-        from .distill_qa import dedup_constraints, ground_assumptions, grounded_in, is_solution_language
+        from .distill_qa import dedup_constraints, explain_duplicate_constraint, ground_assumptions, grounded_in, is_solution_language
         from .errors import UserFacingError, translate_json_error
         from .progress import ProgressEvent
         from .prompts import DISTILL_NEEDS_SYSTEM, DISTILL_PREVIEW_SYSTEM, DISTILL_SCOPE_SYSTEM
@@ -888,7 +888,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                  if isinstance(n, dict) and str(n.get("statement", "")).strip()])
             for i,item in enumerate(original_constraints):
                 if item not in kept_c:
-                    semantic_findings.append({"finding_id":f"constraint:{i}","item_id":f"constraint:{i}","path":["constraints",i],"rule":"duplicate_need","reason":"This design constraint repeats a classified stakeholder need.","original":item})
+                    semantic_findings.append({"finding_id":f"constraint:{i}","item_id":f"constraint:{i}","path":["constraints",i],"rule":"duplicate_need","reason":explain_duplicate_constraint(item,[(str(n.get("need_id","")),str(n.get("statement",""))) for n in parts["stakeholder_needs"] if isinstance(n,dict) and str(n.get("statement","")).strip()]),"original":item})
             # Founder-delegated decisions (steers like 'you do it'): appended by
             # CODE from interview state - grounded by construction, never left
             # for the distillation model to remember.
