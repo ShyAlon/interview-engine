@@ -1166,6 +1166,13 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         candidate[field_name] = before
                     if scenario_depth_problems(candidate).get(field_name) and candidate.get(field_name) in (None, [], ""):
                         candidate[field_name] = before
+                if "exceptions" in scenario_depth_problems(candidate):
+                    # Last resort the founder can see: the model must say why there are none.
+                    try:
+                        fill("no_exceptions_reason", "Name the reason, from the founder's words, why this scenario has no "
+                             "deviation or failure; if there is one, return it in exceptions instead.")
+                    except UserFacingError:
+                        candidate.pop("no_exceptions_reason", None)
             try:
                 item=model_cls.model_validate(candidate)
             except Exception as final_error:

@@ -400,8 +400,21 @@ def test_shallow_scenario_gets_one_depth_retry_with_the_failure(monkeypatch):
 def test_still_shallow_after_retry_is_kept_and_surfaces_in_register(monkeypatch):
     from interview_engine.completeness import inventory
     r,_=_depth_run(monkeypatch,[{"trigger":"habit done"},{"operational_flow":["Log habit"]},{"exceptions":[]},
-        {"operational_flow":["Log habit"]},{"exceptions":[]}],"depth-bad")
+        {"operational_flow":["Log habit"]},{"exceptions":[]},
+        {"no_exceptions_reason":""},{"no_exceptions_reason":""}],"depth-bad")
     s=r["conops_draft"]["operational_scenarios"][0]
     assert s["operational_flow"]==["Log habit"] and s["exceptions"]==[]
     reg=inventory("depth-bad",{},[HumanMessage(content="a flow with retry errors, empty state, style, accessibility")],{"operational_scenarios":[s]})
     assert {"FD-missing-flows","FD-missing-scenario-exceptions"} <= {i["item_id"] for i in reg["items"]}
+
+
+def test_a_stated_reason_satisfies_the_exceptions_rule_and_is_rendered(monkeypatch):
+    from interview_engine.completeness import inventory
+    from interview_engine.conops_stage import scenario_depth_problems
+    r,_=_depth_run(monkeypatch,[{"trigger":"habit done"},{"operational_flow":["open app","tap habit"]},{"exceptions":[]},
+        {"exceptions":[]},{"no_exceptions_reason":"Read-only view, the founder said nothing can fail."}],"depth-reason")
+    s=r["conops_draft"]["operational_scenarios"][0]
+    assert s["exceptions"]==[] and s["no_exceptions_reason"].startswith("Read-only")
+    assert scenario_depth_problems(s)=={}
+    reg=inventory("depth-reason",{},[HumanMessage(content="a flow with retry errors, empty state, style, accessibility")],{"operational_scenarios":[s]})
+    assert "FD-missing-scenario-exceptions" not in {i["item_id"] for i in reg["items"]}

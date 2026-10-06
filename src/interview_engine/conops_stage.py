@@ -147,6 +147,8 @@ def render_conops(doc: ConOpsDocument) -> str:
         lines.append(f"Success: {s.success_outcome}")
         if s.exceptions:
             lines.append(f"Exceptions: {'; '.join(s.exceptions)}")
+        elif s.no_exceptions_reason:
+            lines.append(f"No exceptions: {s.no_exceptions_reason}")
     lines += ["", "## Concept comparison"]
     for o in doc.concept_options:
         marker = " (selected)" if o.name.casefold() == doc.decision.selected_concept.casefold() else ""
@@ -226,7 +228,8 @@ def scenario_depth_problems(scenario: dict) -> dict[str, str]:
     """Deterministic ConOps depth rule: field -> why it is too shallow.
 
     A flow needs 2+ distinct steps, none just the scenario name; every scenario
-    needs at least one exception (failure or deviation the concept must handle).
+    needs at least one exception (failure or deviation the concept must handle),
+    or a non-blank no_exceptions_reason saying why it has none.
     """
     problems: dict[str, str] = {}
     name = str(scenario.get("name", "")).strip().casefold()
@@ -236,7 +239,8 @@ def scenario_depth_problems(scenario: dict) -> dict[str, str]:
         problems["operational_flow"] = (
             "operational_flow needs at least 2 distinct ordered steps that describe what happens, "
             "not just the scenario name.")
-    if not [x for x in (scenario.get("exceptions") or []) if str(x).strip()]:
+    has_exception = any(str(x).strip() for x in (scenario.get("exceptions") or []))
+    if not has_exception and not str(scenario.get("no_exceptions_reason") or "").strip():
         problems["exceptions"] = (
             "exceptions needs at least 1 situation where this scenario deviates or fails "
             "(for example: connection lost, invalid input, nothing found) and what the user then needs.")
