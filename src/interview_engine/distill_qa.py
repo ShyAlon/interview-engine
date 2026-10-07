@@ -141,6 +141,69 @@ def verify_tech_preferences(prefs: list[dict]) -> tuple[list[dict], list[str], l
 REFERENCE_KINDS = ("working_title", "competitor", "reference_product")
 
 
+def reference_name_reason(item: dict, transcript: list) -> str:
+    """Precise founder-readable evidence for a rejected reference candidate."""
+    if not isinstance(item, dict):
+        return "This reference is not a valid product-name item."
+    name = str(item.get("name") or "").strip()
+    turns = item.get("source_turns") or []
+    if not name:
+        return "This reference has no product name."
+    if item.get("kind") not in REFERENCE_KINDS:
+        return "This reference has an invalid reference kind."
+    if not turns:
+        return "This product name has no cited founder turns."
+    evidence = []
+    non_founder = False
+    for turn in turns:
+        if isinstance(turn, bool) or not isinstance(turn, int) or not 0 <= turn < len(transcript):
+            evidence.append(f"Turn {turn}: no such interview turn.")
+            continue
+        message = transcript[turn]
+        founder = getattr(message, "type", "") == "human"
+        non_founder = non_founder or not founder
+        role = "You" if founder else "Interviewer"
+        quote = str(getattr(message, "content", ""))
+        evidence.append(f'Turn {turn} ({role}): "{quote[:900]}"')
+    reason = ("A cited turn is the interviewer, not you. Interviewer examples are not founder evidence."
+              if non_founder else "This exact product name was not found in your cited words.")
+    return (reason + "\n" + "\n".join(evidence))[:2000]
+
+
+def reject_non_founder_citations(value, transcript: list, path: str = "distillation") -> None:
+    """All producer provenance is founder-only, including framing citation maps."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            current = f"{path}.{key}"
+            if key == "source_turns":
+                def check(citations, label):
+                    if isinstance(citations, dict):
+                        for field, turns in citations.items():
+                            check(turns, f"{label}.{field}")
+                        return
+                    if not isinstance(citations, list):
+                        raise ValueError(f"{label} must be a list of founder turn numbers")
+                    for turn in citations:
+                        invalid = (isinstance(turn, bool) or not isinstance(turn, int)
+                                   or not 0 <= turn < len(transcript))
+                        if invalid or getattr(transcript[turn], "type", "") != "human":
+                            detail = reference_name_reason(
+                                {"name": "cited evidence", "kind": "reference_product", "source_turns": [turn]},
+                                transcript)
+                            raise ValueError(f"{label} cites non-founder evidence: {detail} "
+                                             "Cite only human/founder turns, or remove the unsupported assertion.")
+                check(child, current)
+            else:
+                reject_non_founder_citations(child, transcript, current)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            reject_non_founder_citations(child, transcript, f"{path}[{index}]")
+
+
+def reject_non_founder_reference_citations(items: list[dict], transcript: list) -> None:
+    reject_non_founder_citations(items, transcript, "reference_names")
+
+
 def verify_reference_names(items: list[dict], founder_turns: dict[int, str]) -> tuple[list[dict], list[str]]:
     """Keep a reference name only when it is provably the founder's own: it cites founder turns, its kind is
     one of REFERENCE_KINDS, and the name appears (case-insensitive, whole word) in one of those turns.

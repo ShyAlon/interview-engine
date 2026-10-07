@@ -54,6 +54,8 @@ Classification reminders: a done-criterion is not a need. A human/operational pr
 non-functional need. If the system itself must behave differently because of them (e.g. degraded
 mode when a feed dies), THAT system behavior is the need.
 
+SOURCE ROLE RULE: Every source_turns citation must refer to a human/founder turn, never an
+ai/interviewer turn. Interviewer questions and examples are not founder assertions.
 Output STRICT JSON only."""
 
 DISTILL_SCOPE_SYSTEM = """From this interview transcript, extract the framing fields of the intent
@@ -85,11 +87,15 @@ Rules:
   orientation only. kind: working_title = what the founder calls THIS product; competitor = a named
   existing product or company the founder positions against; reference_product = a named product the
   founder wants to resemble or borrow from. The name must appear in the founder's own words in the
-  cited turns. Never infer or guess a name; no name said means an empty list.
+  cited turns. Cite only human/founder turns, NEVER ai/interviewer turns. Interviewer examples are
+  not founder evidence, even if the founder answers the question. A founder's rejection of integrations
+  does not adopt the example product names. Never infer or guess a name; no name said means an empty list.
 - glossary: {term: meaning as the founder used it} for the founder's domain terms
   ("exceptions", "facilities", ...). Only terms the founder actually said.
 - source_turns: every field names the transcript turns it came from. Auditability, not decoration.
 
+SOURCE ROLE RULE: Every source_turns citation must refer to a human/founder turn, never an
+ai/interviewer turn. Interviewer questions and examples are not founder assertions.
 Output STRICT JSON only."""
 
 DISTILL_PREVIEW_SYSTEM = """Given these stakeholder needs from an approved-intent interview, draft a

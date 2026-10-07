@@ -688,6 +688,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         resp, data = _call(system, extra, fb)
                         if not isinstance(data, dict):
                             raise ValueError(f"expected a JSON object, got {type(data).__name__}")
+                        # Check the original producer citations before coercion can
+                        # erase malformed citation maps or normalize booleans.
+                        from .distill_qa import reject_non_founder_citations
+                        reject_non_founder_citations(data, state["messages"], stage)
                         return validate(coerce_for_model(data, IntentModel))
                     except _ParseFailure as e:
                         last_err = e
@@ -734,6 +738,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return out
 
         def _valid_needs(data):
+            from .distill_qa import reject_non_founder_citations
+            reject_non_founder_citations(data, state["messages"], "needs")
             needs = data.get("stakeholder_needs") or []
             if not needs:
                 raise ValueError("stakeholder_needs must not be empty - an intent model with no needs is not an intent model")
@@ -779,6 +785,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             return out
 
         def _valid_scope(data):
+            from .distill_qa import reject_non_founder_citations
+            reject_non_founder_citations(data, state["messages"], "scope")
             required_str = ("problem_statement", "core_value_proposition")
             required_list = ("target_users", "in_scope", "out_of_scope")
             for k in required_str:
@@ -940,7 +948,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             for i,item in enumerate(parts.get("tech_preferences") or []):
                 if item not in tprefs:
                     semantic_findings.append({"finding_id":f"technology:{i}","item_id":f"technology:{i}","path":["tech_preferences",i],"rule":"ungrounded_preference","reason":"This technology preference could not be grounded in the interview.","original":item})
-            from .distill_qa import verify_reference_names
+            from .distill_qa import verify_reference_names, reference_name_reason
 
             founder_turn_text = {i: str(getattr(m, "content", "")) for i, m in enumerate(state["messages"])
                                  if getattr(m, "type", "") == "human"}
@@ -950,7 +958,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 if item not in rnames and not any(isinstance(item, dict) and str(item.get("name", "")).strip().casefold() == r["name"].casefold() for r in rnames):
                     semantic_findings.append({"finding_id": f"reference_name:{i}", "item_id": f"reference_name:{i}",
                         "path": ["reference_names", i], "rule": "ungrounded_reference_name",
-                        "reason": "This product name could not be found in the founder's own words in its cited turns.",
+                        "reason": reference_name_reason(item, state["messages"]),
                         "original": item})
             parts["reference_names"] = original_names  # candidates stay until the owner reviews each finding (same as assumptions); never copied into constraints or prose
             if progress is not None:
