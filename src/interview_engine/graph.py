@@ -814,8 +814,11 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
         parts = _phase("distill_needs", "Extracting interview-level needs", "phase 1/4",
                        DISTILL_NEEDS_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_needs)
         _needs_glossary = parts.pop("_glossary", None)
+        scope_input = ("NEEDS ALREADY CAPTURED:\n"
+                       + "\n".join(f"- {n['statement']}" for n in parts["stakeholder_needs"])
+                       + "\n\nTRANSCRIPT:\n" + transcript)
         parts.update(_phase("distill_scope", "Building scope and framing", "phase 2/4",
-                            DISTILL_SCOPE_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_scope))
+                            DISTILL_SCOPE_SYSTEM, scope_input, _valid_scope))
         if not parts.get("glossary") and isinstance(_needs_glossary, dict):
             parts["glossary"] = _needs_glossary
         parts["session_id"] = state["submission"]["submission_id"]
