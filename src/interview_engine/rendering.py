@@ -1,30 +1,7 @@
 """Human-readable artifact rendering, independent of transport."""
 from __future__ import annotations
-import json
-from pathlib import Path
 from vmodel_contracts import IntentModel
 
-def _prefer_migrated_intent(outdir: Path, session: str, checkpoint_intent: dict) -> tuple[dict, Path | None]:
-    """Use a current, schema-valid disk artifact over a stale checkpoint copy.
-
-    The migration command named by the version error targets
-    intent_model.raw.json, so that file is checked first. A stale or invalid
-    candidate is ignored; normal compatibility handling remains downstream.
-    """
-    from vmodel_contracts import check_compatible
-    for name in ("intent_model.raw.json", "intent_model.json"):
-        path = outdir / name
-        if not path.is_file():
-            continue
-        try:
-            candidate = json.loads(path.read_text())
-            check_compatible(candidate)
-            validated = IntentModel.model_validate(candidate)
-        except Exception:
-            continue
-        if validated.session_id == session:
-            return validated.model_dump(mode="json"), path
-    return checkpoint_intent, None
 
 def render_intent_markdown(intent: IntentModel) -> str:
     """Human-readable rendering for the founder review gate (scoping doc, step 2),
