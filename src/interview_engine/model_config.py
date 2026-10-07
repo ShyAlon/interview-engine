@@ -648,6 +648,10 @@ def build_chat_model(stage: str, schema: dict | None = None):
 
         env = _API_KEY_ENV[cfg.provider]
         extra = {}
+        if cfg.provider == "deepseek":
+            # Classification and plain-text artifact calls need the same policy
+            # as schema calls; the provider otherwise enables hidden thinking.
+            extra["extra_body"] = {"thinking": {"type": "disabled"}}
         if cfg.provider == "ollama":
             body = {"num_ctx": _ollama_num_ctx(),  # honored once ollama PR #16825 lands
                     "keep_alive": _ollama_keep_alive()}
@@ -656,7 +660,6 @@ def build_chat_model(stage: str, schema: dict | None = None):
             extra = {"extra_body": body}
         if schema is not None:
             if cfg.provider == "deepseek":
-                extra["extra_body"] = {"thinking": {"type": "disabled"}}
                 _console_line(f"  output mode [{stage}]: DeepSeek forced function call; field shape provider-constrained, semantic validation+retry retained")
             else:
                 extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
