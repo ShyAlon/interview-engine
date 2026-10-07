@@ -61,7 +61,7 @@ def test_glossary_from_needs_phase_merged(monkeypatch):
 
 def test_done_criteria_dicts_render_as_statements(monkeypatch):
     needs = dict(NEEDS, done_criteria=[{"statement": "A developer can build from the spec",
-                                       "source_turns": [20]}])
+                                       "source_turns": [0]}])
     distills = [json.dumps(needs), json.dumps(SCOPE), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
                         lambda stage, **kwargs: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"
@@ -74,7 +74,7 @@ def test_done_criteria_dicts_render_as_statements(monkeypatch):
 
 def test_operational_concepts_dicts_render_as_statements(monkeypatch):
     needs = dict(NEEDS, operational_concepts=[{"statement": "support team handles feed failures",
-                                               "source_turns": [18]}])
+                                               "source_turns": [0]}])
     distills = [json.dumps(needs), json.dumps(SCOPE), "[]"]
     monkeypatch.setattr(model_config, "build_chat_model",
                         lambda stage, **kwargs: FakeModel(["[INTERVIEW COMPLETE]"]) if stage == "probing"

@@ -17,7 +17,7 @@ NEEDS_REPLY = {
         {"need_id": "SN-1", "statement": "founders need a spec before code",
          "kind": "functional", "source_turns": [0]},
         {"need_id": "SN-2", "statement": "founder data must stay secure",
-         "kind": "non_functional", "source_turns": [1]},
+         "kind": "non_functional", "source_turns": [0]},
     ],
     "assumptions": [],
 }
@@ -31,7 +31,7 @@ SCOPE_REPLY = {
     "external_integrations": [],
     "constraints": [],
     "open_questions": [],
-    "source_turns": {"problem_statement": [0, 1]},
+    "source_turns": {"problem_statement": [0]},
 }
 
 PREVIEW_REPLY = [
@@ -201,7 +201,7 @@ def test_enum_drift_normalized_before_validation():
 
     drifted = dict(VALID_INTENT, stakeholder_needs=[
         {"need_id": "SN-1", "statement": "a", "kind": "Functional", "source_turns": [0]},
-        {"need_id": "SN-2", "statement": "b", "kind": "non-functional", "source_turns": [1]},
+        {"need_id": "SN-2", "statement": "b", "kind": "non-functional", "source_turns": [0]},
     ])
     fixed = normalize_enums(coerce_for_model(drifted, IntentModel), IntentModel)
     intent = IntentModel.model_validate(fixed)
@@ -518,3 +518,41 @@ def test_distillation_progress_has_no_hard_coded_phase_count(fake_models):
     assert started
     assert all(e.label and e.detail is None for e in started)
     assert not any("/4" in (e.detail or "") for e in events)
+
+
+def test_interviewer_reference_citation_repairs_before_candidate(fake_models):
+    scope = dict(SCOPE_REPLY, reference_names=[
+        {'name': 'D&D Beyond', 'kind': 'reference_product', 'source_turns': [1]}])
+    repaired = dict(SCOPE_REPLY, reference_names=[])
+    model = fake_models['distillation'] = FakeModel([
+        json.dumps(NEEDS_REPLY), json.dumps(scope), json.dumps(repaired), json.dumps(PREVIEW_REPLY)])
+    result = run_one_turn(build_graph(UsageLog('t1')), {'configurable': {'thread_id': 'ref-role-repair'}})
+    assert result['intent_model']['reference_names'] == []
+    assert not any(f['rule'] == 'ungrounded_reference_name'
+                   for f in (result.get('semantic_review') or {}).get('findings', []))
+    feedback = ' '.join(m.content for m in model.calls[2])
+    assert 'reference_names[0].source_turns cites non-founder evidence' in feedback
+    assert 'interviewer, not you' in feedback
+
+
+def test_repeated_interviewer_reference_citation_is_defect_not_review(fake_models):
+    from interview_engine.errors import UserFacingError
+    scope = dict(SCOPE_REPLY, reference_names=[
+        {'name': 'D&D Beyond', 'kind': 'reference_product', 'source_turns': [1]}])
+    fake_models['distillation'] = FakeModel([
+        json.dumps(NEEDS_REPLY), json.dumps(scope), json.dumps(scope)])
+    with pytest.raises(UserFacingError) as error:
+        run_one_turn(build_graph(UsageLog('t1')), {'configurable': {'thread_id': 'ref-role-defect'}})
+    assert 'non-founder evidence' in error.value.render()
+
+
+def test_reference_mismatch_review_shows_exact_founder_quote(fake_models):
+    scope = dict(SCOPE_REPLY, reference_names=[
+        {'name': 'D&D Beyond', 'kind': 'reference_product', 'source_turns': [0]}])
+    fake_models['distillation'] = FakeModel([
+        json.dumps(NEEDS_REPLY), json.dumps(scope), json.dumps(PREVIEW_REPLY)])
+    result = run_one_turn(build_graph(UsageLog('t1')), {'configurable': {'thread_id': 'ref-quote'}},
+                          text='a saas web app like DnD Beyond')
+    finding = next(f for f in result['semantic_review']['findings'] if f['rule'] == 'ungrounded_reference_name')
+    assert 'This exact product name was not found in your cited words.' in finding['reason']
+    assert 'Turn 0 (You): "a saas web app like DnD Beyond"' in finding['reason']
