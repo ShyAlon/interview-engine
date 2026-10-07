@@ -811,13 +811,13 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             out["scope_exclusions"] = exclusions
             return out
 
-        parts = _phase("distill_needs", "Extracting interview-level needs", "phase 1/4",
+        parts = _phase("distill_needs", "Extracting interview-level needs", None,
                        DISTILL_NEEDS_SYSTEM, "TRANSCRIPT:\n" + transcript, _valid_needs)
         _needs_glossary = parts.pop("_glossary", None)
         scope_input = ("NEEDS ALREADY CAPTURED:\n"
                        + "\n".join(f"- {n['statement']}" for n in parts["stakeholder_needs"])
                        + "\n\nTRANSCRIPT:\n" + transcript)
-        parts.update(_phase("distill_scope", "Building scope and framing", "phase 2/4",
+        parts.update(_phase("distill_scope", "Building scope and framing", None,
                             DISTILL_SCOPE_SYSTEM, scope_input, _valid_scope))
         if not parts.get("glossary") and isinstance(_needs_glossary, dict):
             parts["glossary"] = _needs_glossary
@@ -825,7 +825,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
 
         # phase 3: requirement PREVIEW (presentation-only; never blocks the run)
         preview: list[dict] = []
-        with track(progress, "distill_preview", "Drafting requirement preview", "phase 3/4"):
+        with track(progress, "distill_preview", "Drafting requirement preview", None):
             try:
                 raw = None
                 preview_error = None
@@ -866,7 +866,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                         "unavailable from this model - the full set derives in spec-generator"))
 
         # phase 4: deterministic assembly + full contract validation
-        with track(progress, "distill_validate", "Validating intent model", "phase 4/4"):
+        with track(progress, "distill_validate", "Validating intent model", None):
             # mechanical QA (ADR-0015): grounding and dedup are ENFORCED, not prompted.
             import time as _t2
             turns = [str(getattr(m, "content", "")) for m in state["messages"]]

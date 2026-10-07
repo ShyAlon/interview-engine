@@ -505,3 +505,16 @@ def test_scope_addendum_matches_structural_replay_wording():
     assert DISTILL_SCOPE_SYSTEM.endswith(
         "\n\nThe stakeholder needs below are ALREADY CAPTURED. List a constraint only if it adds a limit that "
         "none of these needs states. Never restate a need as a constraint.")
+
+
+def test_distillation_progress_has_no_hard_coded_phase_count(fake_models):
+    bus = ProgressBus()
+    events = []
+    bus.subscribe(events.append)
+    result = run_one_turn(build_graph(UsageLog("t1"), progress=bus),
+                          {"configurable": {"thread_id": "no-phase-count"}})
+    assert "intent_model" in result
+    started = [e for e in events if e.stage.startswith("distill_") and e.status == "started"]
+    assert started
+    assert all(e.label and e.detail is None for e in started)
+    assert not any("/4" in (e.detail or "") for e in events)
