@@ -51,8 +51,10 @@ VALID_INTENT = {
 class FakeModel:
     def __init__(self, replies):
         self.replies = list(replies)
+        self.calls = []
 
     def invoke(self, messages):
+        self.calls.append(messages)
         return AIMessage(content=self.replies.pop(0) if self.replies else "[INTERVIEW COMPLETE]")
 
 
@@ -467,3 +469,39 @@ def test_distill_keeps_grounded_reference_names_and_flags_the_rest(fake_models):
     assert not any(name in " ".join(intent["constraints"]) for name in ("Calendly", "WaveDesk", "Booksy"))
     rules = [f["rule"] for f in (r.get("semantic_review") or {}).get("findings", [])]
     assert "ungrounded_reference_name" in rules
+
+
+@pytest.mark.parametrize("retry_scope", [False, True])
+def test_scope_receives_validated_needs_before_transcript(fake_models, retry_scope):
+    from interview_engine.prompts import DISTILL_NEEDS_SYSTEM, DISTILL_SCOPE_SYSTEM
+
+    scope = dict(SCOPE_REPLY, constraints=["Annual hosting budget is capped at 100 euros."])
+    replies = [json.dumps(NEEDS_REPLY)]
+    if retry_scope:
+        replies.append(json.dumps({"problem_statement": ""}))
+    replies.extend([json.dumps(scope), json.dumps(PREVIEW_REPLY)])
+    model = FakeModel(replies)
+    fake_models["distillation"] = model
+    result = run_one_turn(build_graph(UsageLog("t1")),
+                          {"configurable": {"thread_id": f"scope-needs-{retry_scope}"}})
+
+    assert model.calls[0][0].content.startswith(DISTILL_NEEDS_SYSTEM + "\n\nTRANSCRIPT:\n")
+    expected = (DISTILL_SCOPE_SYSTEM + "\n\nNEEDS ALREADY CAPTURED:\n"
+                + "\n".join(f"- {n['statement']}" for n in NEEDS_REPLY["stakeholder_needs"])
+                + "\n\nTRANSCRIPT:\n")
+    for call in model.calls[1:3 if retry_scope else 2]:
+        assert call[0].content.startswith(expected)
+    if retry_scope:
+        assert "failed validation" in model.calls[2][1].content
+    intent = IntentModel.model_validate(result["intent_model"])
+    assert [n.statement for n in intent.stakeholder_needs] == [
+        n["statement"] for n in NEEDS_REPLY["stakeholder_needs"]]
+    assert intent.constraints == scope["constraints"]
+
+
+def test_scope_addendum_matches_structural_replay_wording():
+    from interview_engine.prompts import DISTILL_SCOPE_SYSTEM
+
+    assert DISTILL_SCOPE_SYSTEM.endswith(
+        "\n\nThe stakeholder needs below are ALREADY CAPTURED. List a constraint only if it adds a limit that "
+        "none of these needs states. Never restate a need as a constraint.")

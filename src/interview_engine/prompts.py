@@ -121,6 +121,10 @@ from vmodel_contracts.method_pack import load_method_pack
 # Interviewer rules above are the compact runtime form of method-pack sections 1-2.
 DISTILL_NEEDS_SYSTEM += "\n\n" + load_method_pack(["1", "2"])
 DISTILL_SCOPE_SYSTEM += "\n\n" + load_method_pack(["4"])
+DISTILL_SCOPE_SYSTEM += (
+    "\n\nThe stakeholder needs below are ALREADY CAPTURED. List a constraint only if it adds a limit that "
+    "none of these needs states. Never restate a need as a constraint."
+)
 DISTILL_PREVIEW_SYSTEM += "\n\n" + load_method_pack(["3"])
 
 # Appended LAST in the assembled system prompt (after the method pack and the
