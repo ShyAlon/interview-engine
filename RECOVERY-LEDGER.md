@@ -15,3 +15,8 @@ Recovered exact Oct7 18:16:05 no-service-token path-access test and Oct9 07:05:2
 
 ## Application runtime binding check
 Source diff review raised a conditional context grouping hypothesis. Fake regression tests passed on original source for both missing/present model map, disproving it. No production edit retained. Two runtime tests pass; expanded engine647 passed with two existing warnings. This is an added regression check, not a recovered fix or defect claim.
+
+## Private execution-anchor StopFence binding
+StopFence optionally requires typed authenticated installed anchor and pinned unchanged bytes. Initializes later execution generation from exact binding, keeps Stop as one-way requested marker at anchor generation+1, rejects stale/false/conflicting/removed markers and changed/missing anchors. An anchor namespace without explicit binding cannot fall back to legacy generation1. Existing non-lineage behavior unchanged. No production caller switched, writer/installation route or public restart added; installation must authenticate expected binding separately.
+
+Full engine657 pass/2 existing warnings with current contracts source; targeted prior20 before extra fallback regression.
