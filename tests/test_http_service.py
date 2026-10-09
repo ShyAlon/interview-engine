@@ -278,7 +278,7 @@ def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path)
     from vmodel_contracts.interactive import StartSessionRequest
     old={stage:["ollama","qwen2.5-coder:14b"] for stage in session_models.STAGES}
     path=tmp_path/"legacy"/"interview"/"http-session.json";path.parent.mkdir(parents=True);path.write_text(__import__("json").dumps({"model_map":old}))
-    monkeypatch.setattr("interview_engine.http_service.artifacts_root",lambda:tmp_path)
+    monkeypatch.setattr("interview_engine.http_service.artifacts_root",lambda arg=None:tmp_path)
     monkeypatch.setattr("interview_engine.application.artifacts_root",lambda arg=None:tmp_path)
     calls=[]
     def preflight(cfg,stage):
@@ -310,7 +310,7 @@ def test_expected_unpinned_legacy_snapshot_logs_one_info_without_traceback(tmp_p
   return default_program_factory(sid,request)
  from interview_engine import http_service
  original=http_service.artifacts_root
- http_service.artifacts_root=lambda:tmp_path
+ http_service.artifacts_root=lambda arg=None:tmp_path
  try:
   client=authed(create_app(SessionRegistry(factory,state_dir=tmp_path),service_token=TOKEN))
   with caplog.at_level(logging.INFO,logger='interview_engine.http'):
