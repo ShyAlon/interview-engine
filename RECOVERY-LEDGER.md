@@ -26,3 +26,11 @@ Rebuilt vendor contracts wheel from contracts95b41c1 with private execution-anch
 
 ## Vendor lock hash correction
 Previous offline lock command reused the same-version local wheel's cached old hash even though the vendor bytes changed. Targeted uv lock --refresh-package vmodel-contracts updates the exact SHA to bc8cb30c63719e106451d514532b28a30d8e69fbcce8a771121eab2369f0391e; subsequent offline lock check passes. No blanket upgrades. Direct-wheel clean install/anchor tests were valid independently of this lock; prior successful offline check did not prove current wheel hash. Lock-only correction, diff clean.
+
+## Private installed execution control binding
+Added unconnected typed installed control loader requiring exact DB-supplied anchor and raw digest, constructs next-generation StopFence, rechecks immutable anchor and explicitly rejects interview mutations against preserved source. No HTTP registry/session start/input route imports this helper; no request/file inference of authority. Parent permits private binding mechanics, not public gate lifting.
+
+Targeted12/full659 pass/2 existing warnings, diff clean. Constructed anchor fixture proves semantic id retained, generation2 Stop advances one-way to3, new interview input rejects and missing/wrong/different-byte anchor fails. No live owner session or provider effect. Public registry integration/reconciliation remains future fenced work.
+
+## Private installed execution registry
+Unconnected owner-scoped registry requires callable authenticated installed DB reader on every access, exact typed owner/execution anchor+hash and contained tenant path. No cache/graph restore/session publication/start. Separate Stop rechecks current binding immediately before marker write; revoked second read refuses. Explicit stopped reconciliation checks writer exclusion. Respond always rejects preserved interview mutation. Initial test wrongly expected STOP_REQUESTED with no active writer; actual existing fence correctly reports STOPPED and test corrected. Full662 pass/2 existing warnings. Default HTTP factory unchanged; no public registration/live call.
