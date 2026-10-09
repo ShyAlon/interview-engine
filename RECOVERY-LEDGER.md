@@ -12,3 +12,6 @@ Restored explicit contracts0.28.0 metadata/UV local-wheel source from archived O
 
 ## Initial private-worker and owner-scoped Stop tests
 Recovered exact Oct7 18:16:05 no-service-token path-access test and Oct9 07:05:28 same-session-id owner-scoped Stop test. Current private-worker suite5 passes (one existing Starlette warning). No production changes.
+
+## Application runtime binding check
+Source diff review raised a conditional context grouping hypothesis. Fake regression tests passed on original source for both missing/present model map, disproving it. No production edit retained. Two runtime tests pass; expanded engine647 passed with two existing warnings. This is an added regression check, not a recovered fix or defect claim.
