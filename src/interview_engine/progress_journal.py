@@ -26,6 +26,11 @@ class ProgressJournal:
     def append(self, *, phase_key: str, stage: str, label: str, status: str,
                detail: str | None = None, completed: int | None = None,
                total: int | None = None) -> ProgressSignal:
+        from .stop_fence import guarded_publish
+        return guarded_publish(lambda:self._append(phase_key=phase_key,stage=stage,label=label,status=status,
+            detail=detail,completed=completed,total=total))
+
+    def _append(self, *, phase_key, stage, label, status, detail, completed, total):
         # Fail closed on invalid records before touching the journal. The bus
         # may swallow observability errors, but a malformed signal never lands.
         common = dict(task_id=self.task_id, session_id=self.session_id,

@@ -9,6 +9,10 @@ class RawOutputLog:
         self.counts: dict[str,int] = {}
 
     def write(self, stage: str, label: str, raw: str) -> Path | None:
+        from .stop_fence import guarded_publish
+        return guarded_publish(lambda:self._write(stage,label,raw))
+
+    def _write(self, stage: str, label: str, raw: str) -> Path | None:
         if self.root is None:
             return None
         slug = re.sub(r"[^a-z0-9]+", "-", label.casefold()).strip("-") or "output"
