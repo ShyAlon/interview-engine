@@ -32,3 +32,6 @@ Package revision provenance: {
 Tracked tests, migrations, scripts and build configuration initially come from remote main, not the lost workspace. Missing assets are recovered separately. No production deploy or live provider/SQL authorized.
 
 Oct9 policy refinement: remote main is authoritative wherever ahead of the frozen wheel scaffold. Already-merged features will be retained; lost tenant/provider units are reconstructed as new commits, not invented history. Full suite after root-resolver fixture signature reconciliation:579 passed,2 warnings. Cross-repo merged-feature comparison is ongoing.
+
+## Authoritative source policy
+Remote main is the source of truth wherever ahead. Frozen-v3 wheels are a recovery scaffold, not an authoritative replacement for already-merged features. Main history is preserved, followed by new recovery commits; no history rewriting. Lost units are retained only where main lacks them. Conflicts and validation are recorded in recovery documentation. This branch remains WIP until cross-repo recovered tests, packaging, and UI checks are complete.
