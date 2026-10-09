@@ -23,3 +23,6 @@ Full engine657 pass/2 existing warnings with current contracts source; targeted 
 
 ## Coordinated anchor contracts wheel refresh
 Rebuilt vendor contracts wheel from contracts95b41c1 with private execution-anchor module. SHA256 bc8cb30c63719e106451d514532b28a30d8e69fbcce8a771121eab2369f0391e, version0.28.0 unchanged. Offline uv lock regeneration/check and project wheel build passed, diff check clean. This records build/lock checks only; clean installed current four-wheel context verification is next, not claimed complete. Frozen v3 untouched, no deployment. Existing PR description correctly records pre-refresh packaged limitation at creation time.
+
+## Vendor lock hash correction
+Previous offline lock command reused the same-version local wheel's cached old hash even though the vendor bytes changed. Targeted uv lock --refresh-package vmodel-contracts updates the exact SHA to bc8cb30c63719e106451d514532b28a30d8e69fbcce8a771121eab2369f0391e; subsequent offline lock check passes. No blanket upgrades. Direct-wheel clean install/anchor tests were valid independently of this lock; prior successful offline check did not prove current wheel hash. Lock-only correction, diff clean.
