@@ -61,6 +61,10 @@ class EvidenceLake:
         return self._append("promotions",review.model_dump(mode="json"))
 
     def _append(self,stream:str,row:dict)->Path:
+        from .stop_fence import guarded_publish
+        return guarded_publish(lambda:self._append_unfenced(stream,row))
+
+    def _append_unfenced(self,stream:str,row:dict)->Path:
         directory=self.paths.run/stream;directory.mkdir(parents=True,exist_ok=True)
         line=json.dumps(row,separators=(",",":"),sort_keys=True,default=str)
         with self._lock:

@@ -92,6 +92,10 @@ class VerificationLog:
         self._lock = threading.Lock()
 
     def write(self, record: dict) -> None:
+        from .stop_fence import guarded_publish
+        return guarded_publish(lambda:self._write(record))
+
+    def _write(self, record: dict) -> None:
         line = json.dumps({"ts": time.time(), **record}, ensure_ascii=False, sort_keys=True)
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)

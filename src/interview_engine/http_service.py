@@ -7,6 +7,7 @@ text. Control decisions use protocol enums and identifiers exclusively.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import hmac
@@ -17,6 +18,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from .errors import UserFacingError
+from .tenant_worker import current_owner as _tenant_owner
 
 log=logging.getLogger("interview_engine.http")
 
@@ -44,10 +46,12 @@ class EngineSession:
     route_history: list[RouteChangePayload] = field(default_factory=list)
     write_lock: RLock = field(default_factory=RLock, repr=False, compare=False)
     published: EngineSnapshot | None = field(default=None, repr=False, compare=False)
+    stop_fence: object | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> EngineSnapshot:
+        stopped=self.stop_fence.state if self.stop_fence is not None else None
         return EngineSnapshot(session_id=self.session_id,task_id=self.task_id,sequence=self.sequence,
-            process_status=self.status,next_step=self.next_step,open_input=self.open_input,
+            process_status=ProcessStatus[stopped] if stopped else self.status,next_step=NextStep.STOP if stopped else self.next_step,open_input=None if stopped else self.open_input,
             model_route=getattr(self.program,"model_route",None) or (self.request.model_route if self.request else None),
             model_map=getattr(self.program,"model_map",None),route_version=self.route_version,route_history=self.route_history)
 
@@ -71,17 +75,26 @@ class SessionRegistry:
         # Active control reads do not touch an in-flight graph or its write lock.
         session=self.get(session_id)
         if session.published is None:raise KeyError(session_id)
+        if session.stop_fence is not None and session.stop_fence.state:return session.snapshot()
         return session.published.model_copy(deep=True)
 
     def start(self, request: StartSessionRequest) -> tuple[EngineSession,InteractiveEvent]:
         session=EngineSession(session_id=str(request.session_id or uuid4()),task_id=request.task_id,sequence=1,
             status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
+        from .tenant_worker import _owner
+        if _owner.get() is not None:
+            import re
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}',request.task_id):
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'invalid scoped task identity')
+            request=request.model_copy(update={'session_id':UUID(session.session_id)})
+            session.request=request
         # Reserve the ID immediately, but don't advertise it until preflight
         # succeeds. No model call runs under the global registry lock.
         with self._lock:
             if session.session_id in self._sessions or (self._state_path(session.session_id) is not None and self._state_path(session.session_id).exists()):
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session ID already exists")
             self._sessions[session.session_id]=session
+        self._ensure_stop_fence(session)
         started=self._event(session,EventType.RUN_STARTED)
         try:
             with session.write_lock:
@@ -93,15 +106,27 @@ class SessionRegistry:
                 # constructing or invoking the potentially slow program.
                 self._publish(session)
                 if self._program_factory is not None:
-                    session.program=self._program_factory(session.session_id,request)
+                    session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
                     log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
-                    pending=session.program.advance()
-                    if pending is not None:
-                        session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
-                self._save(session)
-                self._publish(session)
+                    self._save(session)  # factory/pinned model is now ready, before long advance
+                    pending=self._advance(session)
+                    with self._control_commit(session):
+                        if pending is not None:
+                            session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+                        self._save(session)
+                        self._publish(session)
+                else:
+                    with self._control_commit(session):
+                        self._save(session)
+                        self._publish(session)
+            return session,started
+        except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+            session.open_input=None
             return session,started
         except Exception:
+            if session.stop_fence is not None and session.stop_fence.requested:
+                session.open_input=None
+                return session,started
             log.exception("model.route.start.failed session=%s task=%s selected=%s",session.session_id,request.task_id,request.model_route)
             with self._lock:
                 self._sessions.pop(session.session_id,None)
@@ -123,14 +148,19 @@ class SessionRegistry:
                 input_request: InputRequest | None=None) -> InteractiveEvent:
         session=self.get(session_id)
         with session.write_lock:
-            session.sequence+=1;session.phase_id=phase_id
-            session.status=status;session.next_step=next_step;session.open_input=input_request;self._save(session)
-            self._publish(session)
-            return self._event(session,event_type,input_request=input_request)
+            with self._control_commit(session):
+                session.sequence+=1;session.phase_id=phase_id
+                session.status=status;session.next_step=next_step;session.open_input=input_request;self._save(session)
+                self._publish(session)
+                return self._event(session,event_type,input_request=input_request)
 
     def respond(self, session_id: str, response: InputResponse) -> tuple[InteractiveEvent,EngineSnapshot]:
         session=self.get(session_id)
+        if session.stop_fence is not None and session.stop_fence.requested:
+            raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'session stop requested; inputs are disabled')
         with session.write_lock:
+            if session.stop_fence is not None and session.stop_fence.requested:
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'session stop requested; inputs are disabled')
             if response.input_id in session.responses:
                 if session.responses[response.input_id] == response:
                     return self._event(session,EventType.INPUT_ACCEPTED),session.published or self._publish(session)
@@ -139,35 +169,56 @@ class SessionRegistry:
             if session.open_input.input_id != response.input_id:raise ProtocolFailure(ProtocolErrorCode.STALE_INPUT,"input is no longer open")
             if response.expected_sequence is not None and response.expected_sequence != session.sequence:
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_SEQUENCE,"session sequence changed; refresh the open input")
-            prior=(session.sequence,session.status,session.next_step,session.open_input)
-            session.sequence+=1;session.status=ProcessStatus.RUNNING;session.next_step=NextStep.RUN
-            # The accepted answer is in flight, not committed. Never expose its
-            # old input as actionable while the model is advancing.
-            session.open_input=None
-            self._publish(session)
-            accepted=self._event(session,EventType.INPUT_ACCEPTED)
             try:
-                pending=session.program.advance(response) if session.program is not None else None
+                with self._control_commit(session):
+                    prior=(session.sequence,session.status,session.next_step,session.open_input)
+                    session.sequence+=1;session.status=ProcessStatus.RUNNING;session.next_step=NextStep.RUN
+                    # Acceptance is atomic with Stop, never held over execution.
+                    session.open_input=None
+                    self._publish(session)
+                    accepted=self._event(session,EventType.INPUT_ACCEPTED)
+            except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'session stop requested; inputs are disabled')
+            try:
+                pending=self._advance(session,response) if session.program is not None else None
+            except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+                session.open_input=None
+                return accepted,session.snapshot()
             except Exception:
-                session.sequence,session.status,session.next_step,session.open_input=prior
-                # The last committed input remains actionable after a failed
-                # model call. Preserve the typed boundary and checkpoint pin.
-                self._save(session)
-                self._publish(session)
+                if session.stop_fence is not None and session.stop_fence.requested:
+                    session.open_input=None
+                    return accepted,session.snapshot()
+                try:
+                    with self._control_commit(session):
+                        session.sequence,session.status,session.next_step,session.open_input=prior
+                        self._save(session)
+                        self._publish(session)
+                except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+                    session.open_input=None
+                    return accepted,session.snapshot()
                 raise
-            session.responses[response.input_id]=response;session.open_input=None
-            if session.program is not None:
-                session.sequence+=1;session.open_input=pending
-                if session.program.finished:
-                    session.status=ProcessStatus.COMPLETED;session.next_step=NextStep.COMPLETE
-                else:
-                    session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
-            self._save(session)
-            return accepted,self._publish(session)
+            try:
+                with self._control_commit(session):
+                    session.responses[response.input_id]=response;session.open_input=None
+                    if session.program is not None:
+                        session.sequence+=1;session.open_input=pending
+                        if session.program.finished:
+                            session.status=ProcessStatus.COMPLETED;session.next_step=NextStep.COMPLETE
+                        else:
+                            session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+                    self._save(session)
+                    return accepted,self._publish(session)
+            except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+                session.open_input=None
+                return accepted,session.snapshot()
 
     def switch_route(self, session_id:str, request:ModelRouteSwitchRequest)->tuple[InteractiveEvent,EngineSnapshot]:
         session=self.get(session_id)
+        if session.stop_fence is not None and session.stop_fence.requested:
+            raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,'stopped session route changes disabled')
         with session.write_lock:
+            if session.stop_fence is not None and session.stop_fence.requested:
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,'stopped session route changes disabled')
             for item in session.route_history:
                 if item.idempotency_key == request.idempotency_key:
                     if item.to_route != request.model_route or item.to_model_map["probing"][1] != request.model or item.actor_id != request.actor_id:
@@ -189,15 +240,15 @@ class SessionRegistry:
             session_models.validate(target,request.model_route)
             if self._program_factory is default_program_factory:
                 from .application import InterviewApplication
-                candidate=InterviewApplication(session.session_id,session.task_id,session.request.idea,
-                    model_route=request.model_route,pinned_models=target)
+                candidate=self._prepare_program(session,lambda:InterviewApplication(session.session_id,session.task_id,session.request.idea,
+                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target))
                 # Read the same durable graph thread; never invoke a model during preflight.
                 checkpoint=candidate.graph.get_state(candidate.cfg)
                 if not checkpoint or not checkpoint.values:
                     raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"no durable graph checkpoint for the open input")
                 candidate.result=checkpoint.values
             elif hasattr(program,'candidate_for_route'):
-                candidate=program.candidate_for_route(request.model_route,target)
+                candidate=self._prepare_program(session,lambda:program.candidate_for_route(request.model_route,target))
             else:
                 raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,"program does not support model switching")
             candidate.open_input=session.open_input
@@ -208,31 +259,109 @@ class SessionRegistry:
             payload=RouteChangePayload(actor_id=request.actor_id,from_route=program.model_route,
                 to_route=request.model_route,from_model_map=program.model_map,to_model_map=target,
                 route_version=version,session_sequence=session.sequence+1,idempotency_key=request.idempotency_key)
-            previous=(session.program,session.route_version,session.sequence)
-            session.program=candidate;session.route_version=version;session.sequence+=1;session.route_history.append(payload)
-            try:self._save(session)
-            except Exception:
-                session.route_history.pop();session.program,session.route_version,session.sequence=previous
-                raise
-            event=self._event(session,EventType.ROUTE_CHANGED,route_change=payload)
-            self._publish(session)
-            log.info('model.route.changed session=%s task=%s from=%s to=%s from_map=%s to_map=%s route_version=%s',
-                session.session_id,session.task_id,payload.from_route,payload.to_route,json.dumps(payload.from_model_map),json.dumps(payload.to_model_map),version)
-            return event,session.published
+            try:
+                with self._control_commit(session):
+                    previous=(session.program,session.route_version,session.sequence)
+                    session.program=candidate;session.route_version=version;session.sequence+=1;session.route_history.append(payload)
+                    try:self._save(session)
+                    except Exception:
+                        session.route_history.pop();session.program,session.route_version,session.sequence=previous
+                        raise
+                    event=self._event(session,EventType.ROUTE_CHANGED,route_change=payload)
+                    self._publish(session)
+                    log.info('model.route.changed session=%s task=%s from=%s to=%s from_map=%s to_map=%s route_version=%s',
+                        session.session_id,session.task_id,payload.from_route,payload.to_route,json.dumps(payload.from_model_map),json.dumps(payload.to_model_map),version)
+                    return event,session.published
+            except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+                raise ProtocolFailure(ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,'stopped session route changes disabled')
 
     def progress(self, session_id: str, after: int = 0, limit: int = 100):
         # Never acquire the registry's long-lived graph/control lock here.
         from .progress_journal import ProgressJournal
+        self._state_path(session_id)  # validate cloud UUID before any journal path
         root = self._state_dir
         if root is None or not (root / session_id / "interview" / "progress.sqlite").exists():
             raise KeyError(session_id)
         from vmodel_contracts.progress_signal import ProgressPage
         return ProgressJournal(root, session_id, "", create=False).read(after, limit)
 
+    def _ensure_stop_fence(self,session):
+        if session.stop_fence is None and self._state_dir is not None:
+            from .stop_fence import StopFence
+            path=self._state_path(session.session_id).with_name('stop-request.json')
+            session.stop_fence=StopFence(path)
+
+    @staticmethod
+    @contextmanager
+    def _control_commit(session):
+        # Short marker lock, never held over model execution. A result that
+        # returned before Stop still cannot commit after the marker lands.
+        if session.stop_fence is None:
+            yield
+            return
+        with session.stop_fence.marker_guard():
+            session.stop_fence.check(session.stop_fence.generation)
+            yield
+
+    @staticmethod
+    def _prepare_program(session,build):
+        # Constructors/preflight can touch per-session files. Count them as
+        # live writers so Delete never unlocks while they are still running.
+        if session.stop_fence is None:return build()
+        with session.stop_fence.running() as generation:
+            program=build()
+            session.stop_fence.check(generation)
+            return program
+
+    def _advance(self,session,response=None):
+        if session.stop_fence is None:return session.program.advance() if response is None else session.program.advance(response)
+        with session.stop_fence.running() as generation:
+            result=session.program.advance() if response is None else session.program.advance(response)
+            session.stop_fence.check(generation)
+            return result
+
+    def stop(self,session_id):
+        session=self.get(session_id);self._ensure_stop_fence(session)
+        if session.stop_fence is None:
+            raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'durable session storage is required for Stop')
+        with session.stop_fence.marker_guard():
+            session.stop_fence.request_stop()
+            # Stop may arrive during construction, before the first committed
+            # HTTP identity exists. Persist only identity/control snapshot for
+            # stopped recovery; loading it never constructs or resumes a graph.
+            path=self._state_path(session.session_id)
+            if path is not None and not path.exists():self._save_unfenced(session)
+        # No long execution lock or graph access. Snapshot overlays the marker.
+        return session.snapshot()
+
+    def reconcile_stopped(self,session_id):
+        # Explicit same-host recovery check, never a timeout-based guess. The
+        # writer lock covers accepted provider threads through actual exit.
+        session=self.get(session_id);fence=session.stop_fence
+        if fence is None or not fence.state:
+            raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'durable stop request required')
+        from .stop_fence import StopRequested
+        try:fence.confirm_quiescent_after_recovery(no_live_worker=True)
+        except StopRequested:return session.snapshot()
+        return session.snapshot()
+
     def _state_path(self,session_id:str)->Path|None:
+        from .tenant_worker import _owner
+        if _owner.get() is not None:
+            try:
+                if str(UUID(session_id))!=session_id:raise ValueError()
+            except (ValueError,TypeError,AttributeError):
+                raise KeyError(session_id)
         return self._state_dir/session_id/'interview'/'http-session.json' if self._state_dir is not None else None
 
     def _save(self,session:EngineSession)->None:
+        if session.stop_fence is not None:
+            with session.stop_fence.marker_guard():
+                if session.stop_fence.requested:return
+                return self._save_unfenced(session)
+        return self._save_unfenced(session)
+
+    def _save_unfenced(self,session:EngineSession)->None:
         path=self._state_path(session.session_id)
         if path is None:return
         path.parent.mkdir(parents=True,exist_ok=True)
@@ -247,11 +376,18 @@ class SessionRegistry:
         path=self._state_path(session_id)
         if path is None or not path.exists():return None
         payload=json.loads(path.read_text());request=StartSessionRequest.model_validate(payload["request"])
+        from .tenant_worker import _owner
+        if _owner.get() is not None and (payload['session_id']!=session_id or str(request.session_id)!=session_id or payload['task_id']!=request.task_id):
+            raise KeyError('persisted session binding mismatch')
         session=EngineSession(session_id=payload["session_id"],task_id=payload["task_id"],phase_id=payload["phase_id"],sequence=payload["sequence"],
             status=ProcessStatus(payload["status"]),next_step=NextStep(payload["next_step"]),
             open_input=InputRequest.model_validate(payload["open_input"]) if payload["open_input"] else None,request=request,
             route_version=payload.get("route_version",0),route_history=[RouteChangePayload.model_validate(item) for item in payload.get("route_history",[])])
         session.responses={response.input_id:response for response in (InputResponse.model_validate(item) for item in payload["responses"])}
+        self._ensure_stop_fence(session)
+        if session.stop_fence is not None and session.stop_fence.requested:
+            session.open_input=None
+            return session  # No restore, graph construction or implicit resume.
         if self._program_factory is default_program_factory:
             from . import session_models
             pinned=payload.get("model_map")
@@ -313,7 +449,7 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             raise HTTPException(401,"invalid interview engine service token")
 
 
-    if sessions._state_dir is not None and not os.environ.get("INTERVIEW_ENGINE_QUESTION_QUALITY_CONFIG"):
+    if isinstance(sessions,SessionRegistry) and sessions._state_dir is not None and not os.environ.get("INTERVIEW_ENGINE_QUESTION_QUALITY_CONFIG"):
         from . import question_config
         question_config.set_store(question_config.ConfigStore(sessions._state_dir/"question_quality.json"))
 
@@ -391,10 +527,28 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
                 log.warning("model.route.snapshot.reject session=%s reason=%s",session_id,exc.render().replace("\n"," | "))
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
 
+    @app.post("/v1/sessions/{session_id}/stop",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
+    def stop_session(session_id:UUID):
+        # Trusted service-token boundary, owner-scoped by tenant middleware.
+        # No graph lock, cancellation, deletion or implicit resume.
+        try:return sessions.stop(str(session_id))
+        except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        except ProtocolFailure as failure:
+            raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+
+    @app.post("/v1/sessions/{session_id}/stop/reconcile",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
+    def reconcile_stop(session_id:UUID):
+        try:return sessions.reconcile_stopped(str(session_id))
+        except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        except ProtocolFailure as failure:
+            raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+
     @app.post("/v1/sessions/{session_id}/model-route",response_model=ModelRouteSwitchResponse,dependencies=[Depends(authenticate)])
     def switch_model_route(session_id:str,request:ModelRouteSwitchRequest):
         try:event,state=sessions.switch_route(session_id,request)
         except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+            raise HTTPException(409,ProtocolError(code=ProtocolErrorCode.ROUTE_SWITCH_CONFLICT,detail="session stop requested; route change discarded").model_dump(mode="json"))
         except ProtocolFailure as failure:
             log.warning('model.route.switch.reject session=%s reason=%s',session_id,failure.detail)
             raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
@@ -426,14 +580,23 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
 
 def default_program_factory(session_id,request):
     from .application import InterviewApplication
-    path=artifacts_root()/session_id/'interview'/'http-session.json'
+    from .tenant_worker import worker_root,_owner
+    root=worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))
+    path=root/session_id/'interview'/'http-session.json'
     pinned=None
     if path.exists():
         payload=json.loads(path.read_text());pinned=payload.get('model_map')
         if not pinned:raise UserFacingError('legacy session has no pinned model route.','It predates per-session routing.','Keep its existing artifacts; start a new session rather than resuming under a different model.')
-    program=InterviewApplication(session_id,request.task_id,request.idea,model_route=request.model_route,pinned_models=pinned,initial_model=request.initial_model)
+    program=InterviewApplication(session_id,request.task_id,request.idea,artifact_root=str(root),model_route=request.model_route,pinned_models=pinned,initial_model=request.initial_model)
     log.info("model.route.effective session=%s task=%s selected=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(program.model_map))
     return program
 
 from vmodel_contracts.runtime import artifacts_root
-app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
+if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
+    if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
+        raise RuntimeError('Tenant engine requires a configured private service token')
+    from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
+    app=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root()))
+    app.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
+else:
+    app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))

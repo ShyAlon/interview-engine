@@ -1016,7 +1016,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     retained.append({**finding,'path':[field,index],'original':item});break
         semantic=make_review(candidate['session_id'],'intent',candidate,retained).model_dump(mode='json') if retained else None
         if semantic and raw_output_dir:
-            (Path(raw_output_dir).parent/'semantic-review.json').write_text(_json.dumps(semantic,indent=2))
+            __import__('interview_engine.stop_fence',fromlist=['guarded_publish']).guarded_publish(lambda:(Path(raw_output_dir).parent/'semantic-review.json').write_text(_json.dumps(semantic,indent=2)))
         return {"semantic_review":semantic,"semantic_review_resolved":not bool(retained),
                 "intent_model": candidate, "requirement_preview": preview,
                 "distill_warnings": warnings_tp}
@@ -1084,10 +1084,10 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
 
         raw_paths: dict[str, str] = {}
         def call_json(system_text: str, body: str, label: str, detail: str,
-                      validate=None) -> dict | list:
+                      validate=None, item_completed=None, item_total=None) -> dict | list:
             """Contract-last structured call with one parse/shape feedback retry."""
             if progress is not None:
-                progress.emit(ProgressEvent("conops", label, "started", _time.time(), None, detail))
+                progress.emit(ProgressEvent("conops", label, "started", _time.time(), None, detail,item_completed,item_total))
             last_exc = None
             last_path = None
             for attempt in (1, 2):
@@ -1115,6 +1115,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                 except Exception as exc:
                     last_exc = exc
                     if attempt == 1:
+                        if progress is not None:
+                            progress.emit(ProgressEvent("conops",label,"heartbeat",_time.time(),None,
+                                "Contract repair 1/1; item count unchanged",item_completed,item_total))
                         model_config._console_line(
                             f"  boundary=contract-repair stage=conops label={label} attempt=1 "
                             f"decision=retry reason={type(exc).__name__}:{str(exc)[:160]}")
@@ -1125,11 +1128,16 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         "inspect the raw response at " + (str(last_path) if last_path else "the configured debug output")
                         + ", then rerun with the same --session id; completed intent work is checkpointed.") from exc
                 if progress is not None:
-                    progress.emit(ProgressEvent("conops", label, "completed", _time.time(), _time.time()-t0, detail))
+                    progress.emit(ProgressEvent("conops", label, "completed", _time.time(), _time.time()-t0, detail,item_completed,item_total))
                 return value
             raise AssertionError("bounded CONOPS retry exhausted without result")
 
         def generate_item(kind: str, identity: dict, model_cls, prompt: str, index: int, total: int) -> dict:
+            item_started=_time.time()
+            group_label={"stakeholder":"Stakeholder contexts","scenario":"Operational scenarios","concept option":"Concept options"}[kind]
+            if progress is not None:
+                progress.emit(ProgressEvent("conops",group_label,"item_started",item_started,None,
+                    f"item {index} of {total}; elapsed includes bounded field repairs",index-1,total))
             derived_fields = identity.pop("_derived_fields", [])
             candidate = normalize_model_item(identity, model_cls)
             candidate.update({k:v for k,v in identity.items() if k in model_cls.model_fields})
@@ -1150,7 +1158,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     soft = kind == "scenario" and field_name == "exceptions"  # shallow answers are retried and reported, never fatal
                     if not isinstance(value, dict) or value.get(field_name) is None or (not soft and value.get(field_name) in ("", [])):
                         raise ValueError(f"expected object with non-empty field {field_name!r}, got {str(value)[:250]}")
-                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}", field_contract)
+                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}", field_contract,item_completed=index-1,item_total=total)
                 try:
                     # A field call is cleaned against a synthetic missing-field
                     # error contract: normalize wrapper, whitelist, take only it.
@@ -1202,6 +1210,9 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             if progress is not None and derived_fields:
                 progress.emit(ProgressEvent("conops",f"Derived CONOPS {kind} {index}/{total}","completed",
                     _time.time(),0.0,"code-derived from validated intent: "+", ".join(derived_fields)))
+            if progress is not None:
+                progress.emit(ProgressEvent("conops",group_label,"item_completed",_time.time(),_time.time()-item_started,
+                    f"validated item {index} of {total}; elapsed includes bounded field repairs",index,total))
             return item.model_dump(mode="json")
 
         from vmodel_contracts import ConceptOption, OperationalScenario, StakeholderContext

@@ -33,6 +33,8 @@ class ProgressEvent:
     ts: float
     elapsed_s: float | None = None
     detail: str | None = None
+    completed: int | None = None
+    total: int | None = None
 
 
 class ProgressBus:

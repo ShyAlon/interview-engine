@@ -250,10 +250,14 @@ def _start_heartbeat(label: str):
             elapsed=time.monotonic() - t0
             _console_line(f"  ... still working - {label}, {elapsed:.0f}s elapsed")
             if sink is not None:
-                try:sink(label, label, elapsed)
+                try:
+                    from .stop_fence import guarded_publish
+                    guarded_publish(lambda:sink(label, label, elapsed))
                 except Exception:pass
 
-    threading.Thread(target=_beat, daemon=True).start()
+    import contextvars
+    context=contextvars.copy_context()
+    threading.Thread(target=lambda:context.run(_beat), daemon=True).start()
     return stop.set
 
 
@@ -304,8 +308,14 @@ def _rerun_guidance(stage: str) -> str:
 def _guard_enter(stage: str) -> None:
     """One LLM call is starting: charge it against the run budget."""
     global _CALLS_USED
-    _CALLS_USED += 1
-    if _CALLS_USED > _guard_limits()[2]:
+    from .session_runtime import current
+    runtime=current()
+    if runtime is not None:
+        with runtime.lock:
+            runtime.calls+=1;calls=runtime.calls
+    else:
+        _CALLS_USED+=1;calls=_CALLS_USED
+    if calls > _guard_limits()[2]:
         cfg = for_stage(stage)
         from .errors import UserFacingError
 
@@ -344,7 +354,12 @@ def _run_with_deadline(fn, timeout_s: int, stage: str):
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     context = contextvars.copy_context()
-    future = pool.submit(context.run, fn)
+    from .stop_fence import track_inflight_worker
+    release=track_inflight_worker()
+    try:future = pool.submit(context.run, fn)
+    except BaseException:
+        release();pool.shutdown(wait=False,cancel_futures=True);raise
+    future.add_done_callback(lambda done:release())
     try:
         return future.result(timeout=timeout_s)
     except concurrent.futures.TimeoutError:
@@ -459,7 +474,7 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
     cfg = for_stage(stage)
     call_timeout = _guard_limits()[0]
     for attempt in (1, 2):
-        adaptive_deadline, stage_median = _ADAPTIVE_WATCHDOG.deadline(stage)
+        adaptive_deadline, stage_median = _watchdog().deadline(stage)
         effective_timeout = min(call_timeout, adaptive_deadline)
         _guard_enter(stage)
         base = {"provider": cfg.provider, "model": cfg.model, "stage": stage,
@@ -470,9 +485,9 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
         t0 = time.monotonic()
         try:
             _set_model_timeout(chat_model, effective_timeout)
-            resp = _run_with_deadline(lambda: chat_model.invoke(messages), effective_timeout, stage)
+            resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
             elapsed = time.monotonic() - t0
-            _ADAPTIVE_WATCHDOG.complete(stage, elapsed)
+            _watchdog().complete(stage, elapsed)
             _check_truncated(resp, stage, cfg)
             content = getattr(resp, "content", None)
             if isinstance(content, str) and not content.strip():
@@ -502,7 +517,7 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
                 basis = f"{ratio:.1f}x stage median" if ratio is not None else "cold-start floor"
                 _console_line(f"  WARNING boundary=watchdog stage={stage} item={item or '(none)'} "
                               f"elapsed={elapsed:.1f}s median={stage_median if stage_median is not None else 'none'}s "
-                              f"multiplier={getattr(_ADAPTIVE_WATCHDOG, 'multiplier', 8):g} floor={getattr(_ADAPTIVE_WATCHDOG, 'floor_s', 240):g}s "
+                              f"multiplier={getattr(_watchdog(), 'multiplier', 8):g} floor={getattr(_ADAPTIVE_WATCHDOG, 'floor_s', 240):g}s "
                               f"absolute_cap={call_timeout}s deadline={effective_timeout:.1f}s "
                               f"decision=kill-retry reason={basis}")
                 continue
@@ -642,6 +657,8 @@ def build_chat_model(stage: str, schema: dict | None = None):
     interface. The post-parse checks remain the safety net, not the formatter.
     """
     cfg = for_stage(stage)
+    from .wire_binding import validate_provider
+    validate_provider(cfg.provider)
     _preflight(cfg, stage)
     if cfg.provider in ("deepseek", "openai", "ollama"):
         from langchain_openai import ChatOpenAI
@@ -664,7 +681,10 @@ def build_chat_model(stage: str, schema: dict | None = None):
             else:
                 extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
                                          {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
-        if cfg.provider in ("deepseek", "openai"):
+        from .wire_binding import model_clients,register_model
+        installed_clients=model_clients(stage=stage,provider=cfg.provider,model=cfg.model)
+        if installed_clients is not None:extra.update(installed_clients)
+        if cfg.provider in ("deepseek", "openai") and installed_clients is None:
             from vmodel_contracts.runtime import debug_http_client
             client = debug_http_client(llm_log=_llm_log_sink(), mask=_mask_secrets)
             if client is not None:
@@ -676,22 +696,24 @@ def build_chat_model(stage: str, schema: dict | None = None):
         model = ChatOpenAI(
             model=cfg.model,
             temperature=cfg.temperature,
-            timeout=_guard_limits()[0],  # the socket dies with the guardrail deadline
+            timeout=_guard_limits()[0],
+            **({"max_retries":0} if installed_clients is not None or os.environ.get("VMODEL_TENANT_OWNER") is not None or os.environ.get("INTERVIEW_ENGINE_TENANTS")=="1" else {}),  # the socket dies with the guardrail deadline
             max_tokens=_max_tokens_limit(cfg.max_tokens),
             base_url=_BASE_URLS[cfg.provider],
             api_key=(_env(env) or "" if env else "") or "ollama",
             **extra,
         )
         if cfg.provider == "deepseek" and schema is not None:
-            return _DeepSeekToolOutputAdapter(model, schema, f"return_{stage}_artifact")
-        return model
+            model=_DeepSeekToolOutputAdapter(model, schema, f"return_{stage}_artifact")
+        return register_model(model,stage=stage,provider=cfg.provider,model=cfg.model)
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         model = ChatAnthropic(
             model=cfg.model,
             temperature=cfg.temperature,
-            timeout=_guard_limits()[0],  # the socket dies with the guardrail deadline
+            timeout=_guard_limits()[0],
+            **({"max_retries":0} if os.environ.get("VMODEL_TENANT_OWNER") is not None or os.environ.get("INTERVIEW_ENGINE_TENANTS")=="1" else {}),  # the socket dies with the guardrail deadline
             max_tokens=_max_tokens_limit(cfg.max_tokens),
             api_key=_env(_API_KEY_ENV["anthropic"]) or "",
         )
@@ -700,3 +722,9 @@ def build_chat_model(stage: str, schema: dict | None = None):
         return model
     raise ValueError(f"unsupported provider {cfg.provider!r}")
 
+
+
+def _watchdog():
+    from .session_runtime import current
+    runtime=current()
+    return runtime.watchdog if runtime is not None else _ADAPTIVE_WATCHDOG

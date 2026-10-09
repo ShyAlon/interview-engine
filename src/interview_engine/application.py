@@ -25,6 +25,8 @@ class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
     def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None):
         self.session_id,self.task_id=session_id,task_id
+        from .session_runtime import SessionRuntime
+        self.runtime=SessionRuntime()
         self.model_route=model_route
         self.model_map=pinned_models if pinned_models is not None else session_models.resolve(model_route,initial_model) if model_route else None
         if self.model_map is not None:session_models.validate(self.model_map,model_route,preflight=pinned_models is None)
@@ -33,7 +35,13 @@ class InterviewApplication:
         self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
         self.schema_binding=self.evidence.bind_session(session_id)
         db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
-        saver=SqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
+        from .stop_fence import check_execution,guarded_publish
+        class FencedSqliteSaver(SqliteSaver):
+            def put(self,*args,**kwargs):
+                return guarded_publish(lambda:super(FencedSqliteSaver,self).put(*args,**kwargs))
+            def put_writes(self,*args,**kwargs):
+                return guarded_publish(lambda:super(FencedSqliteSaver,self).put_writes(*args,**kwargs))
+        saver=FencedSqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
         self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
@@ -43,7 +51,7 @@ class InterviewApplication:
             # The interview graph emits intent and ConOps stages through one bus.
             phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
             self.progress_journal.append(phase_key=phase,stage=ev.stage,label=ev.label,
-                status=ev.status if ev.status in ("started","completed","failed","heartbeat") else "heartbeat",detail=ev.detail)
+                status=ev.status if ev.status in ("started","completed","failed","heartbeat","item_started","item_completed") else "heartbeat",detail=ev.detail,completed=ev.completed,total=ev.total)
         progress.subscribe(journal_signal)
         def heartbeat_signal(stage, label, elapsed):
             self.progress_journal.append(phase_key="conops" if "conops" in stage.lower() else "intent",
@@ -63,14 +71,27 @@ class InterviewApplication:
     def _runtime_context(self):
         token=model_config._session_llm_log.set(str(self.outdir/'llm-calls.jsonl'))
         heartbeat_token=model_config._progress_heartbeat.set(self._heartbeat_signal)
+        from .stop_fence import _stopped_usage
+        def stopped_usage(response,*,stage,provider,model):
+            usage=getattr(response,'usage_metadata',None)
+            if not isinstance(usage,dict):
+                # Missing usage must remain explicit operator evidence, not 0.
+                model_config._log_llm({'event':'stopped_usage_unknown','stage':stage,'provider':provider,'model':model})
+                return
+            self.usage_log.record(stage,provider,model,usage)
+        usage_token=_stopped_usage.set(stopped_usage)
         try:
-            with session_models.use(self.model_map) if self.model_map is not None else nullcontext():
+            from .session_runtime import use
+            with use(self.runtime), session_models.use(self.model_map) if self.model_map is not None else nullcontext():
                 yield
         finally:
+            _stopped_usage.reset(usage_token)
             model_config._progress_heartbeat.reset(heartbeat_token)
             model_config._session_llm_log.reset(token)
 
     def advance(self,response:InputResponse|None=None):
+        from .stop_fence import check_execution
+        check_execution()
         rework_backup=None;rework_input=None
         if response is not None:
             if self.open_input is None or response.input_id!=self.open_input.input_id:raise ValueError('stale input')
@@ -84,7 +105,7 @@ class InterviewApplication:
                 if any(d.actor!=response.actor_id for d in reviewed.decisions):raise ValueError('semantic decision actor mismatch')
                 resolved=reviewed.resolved_candidate(IntentModel.model_validate)
                 self.graph.update_state(self.cfg,{'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True})
-                (self.outdir/'semantic-review.json').write_text(reviewed.model_dump_json(indent=2))
+                __import__('interview_engine.stop_fence',fromlist=['guarded_publish']).guarded_publish(lambda:(self.outdir/'semantic-review.json').write_text(reviewed.model_dump_json(indent=2)))
                 self.result={**self.result,'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True}
                 self.open_input=None;self.state={}
             if self.open_input is not None and self.open_input.kind==InputKind.APPROVAL:
@@ -101,9 +122,10 @@ class InterviewApplication:
                     # Archive before changing the checkpoint. Rework ConOps only;
                     # the reviewed intent and its source transcript remain intact.
                     archive=self.outdir/'review-history';archive.mkdir(exist_ok=True)
-                    (archive/f'{self.open_input.input_id}.json').write_text(json.dumps(
+                    from .stop_fence import guarded_publish
+                    guarded_publish(lambda:(archive/f'{self.open_input.input_id}.json').write_text(json.dumps(
                         {'intent_model':self.result['intent_model'],'conops':self.result['conops'],
-                         'guidance':response.rationale or ''},ensure_ascii=False,indent=2))
+                         'guidance':response.rationale or ''},ensure_ascii=False,indent=2)))
                     rework_backup=dict(self.result);rework_input=self.open_input
                     self.graph.update_state(self.cfg,{'conops':None,'conops_draft':None,'conops_decision_attempts':0})
                     self.state={'messages':[HumanMessage(content=response.rationale or 'Regenerate the ConOps concepts for review.')]}
@@ -118,7 +140,9 @@ class InterviewApplication:
             try:
                 with self._runtime_context():
                     self.result=self.graph.invoke(self.state,self.cfg)
+                    check_execution()
             except Exception:
+                check_execution()  # Stop must never restore a previous actionable input.
                 if rework_backup is not None:
                     # Registry restores the old approval on failure. Restore its
                     # checkpoint too, so a retry/restart cannot accept a cleared
@@ -184,6 +208,10 @@ class InterviewApplication:
                 'evidence_revision':hashlib.sha256(raw.encode('utf-8')).hexdigest(),'evidence':evidence}
 
     def _finish(self):
+        from .stop_fence import guarded_publish
+        return guarded_publish(self._finish_outputs)
+
+    def _finish_outputs(self):
         intent=IntentModel.model_validate(self.result['intent_model']);conops=ConOpsDocument.model_validate(self.result['conops'])
         if intent.founder_register:
             (self.outdir/'founder-decisions.json').write_text(intent.founder_register.model_dump_json(indent=2))
