@@ -56,7 +56,8 @@ def test_threaded_checked_invoke_fails_closed_and_context_reaches_gateway(cloud,
             self.calls+=1
             return SimpleNamespace(content='ok',usage_metadata={'input_tokens':1,'output_tokens':1})
     fake=Fake()
-    with pytest.raises(admission.AdmissionUnavailable):module.invoke_checked(fake,['input'],'needs')
+    from interview_engine.errors import UserFacingError
+    with pytest.raises(UserFacingError,match='admission/accounting'):module.invoke_checked(fake,['input'],'needs')
     assert fake.calls==0
     gateway=Gateway()
     with admission.admission_gateway(gateway):assert module.invoke_checked(fake,['input'],'needs').content=='ok'
