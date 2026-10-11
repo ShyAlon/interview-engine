@@ -43,5 +43,7 @@ else
   "$chosen" -m venv .venv
 fi
 PYTHON=.venv/bin/python
+# Install the checked-in exact private contract wheel before resolving extras.
+"$PYTHON" -m pip install vendor/vmodel_contracts-0.28.0-py3-none-any.whl
 "$PYTHON" -m pip install -e '.[dev]'
 "$PYTHON" -m pytest -q
