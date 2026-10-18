@@ -50,6 +50,29 @@ def wire_model(chat_model,*,stage,provider,model):
     return True
 
 
+def per_job_model(factory):
+    """A chat model that is built for the worker job that uses it.
+
+    Every job installs its own wire_clients binding with its own gateway, and wire_model() accepts only a model registered in that
+    binding. A model built once (when the interview program is prepared) is therefore refused by the next job. This builds the model on
+    first use under the current binding and builds a new one when the binding changes. Nothing is ever shared between jobs, so a
+    model never sends through another job's gateway. With no binding (local runs) it builds once, up front, as before.
+    """
+    import threading
+    lock=threading.Lock()
+    state={'built':False,'registry':None,'model':None}
+    def get():
+        binding=_binding.get()
+        registry=None if binding is None else binding[2]
+        with lock:
+            if state['built'] and state['registry'] is registry:return state['model']
+            model=factory()
+            state.update(built=True,registry=registry,model=model)
+            return model
+    if _binding.get() is None:get()
+    return get
+
+
 def validate_provider(provider):
     if _binding.get() is not None and provider not in ('deepseek','openai'):
         raise AdmissionUnavailable('provider has no reviewed SDK wire installation')
