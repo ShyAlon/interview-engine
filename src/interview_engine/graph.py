@@ -105,11 +105,13 @@ def _clean_single_question(text: str) -> str | None:
 def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None, evidence_lake=None, verification_log=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
-    probing_model = model_config.build_chat_model("probing", schema=turn_output_schema())
-    categorization_model = model_config.build_chat_model("probing")
-    distill_model = model_config.build_chat_model("distillation")
-    conops_model = model_config.build_chat_model("conops") if conops_enabled else None
-    tiebreak_model = model_config.build_chat_model("scope_tiebreak")
+    # Models are resolved inside the worker job that uses them (see wire_binding.per_job_model), not once here.
+    from .wire_binding import per_job_model
+    probing_model = per_job_model(lambda: model_config.build_chat_model("probing", schema=turn_output_schema()))
+    categorization_model = per_job_model(lambda: model_config.build_chat_model("probing"))
+    distill_model = per_job_model(lambda: model_config.build_chat_model("distillation"))
+    conops_model = per_job_model(lambda: model_config.build_chat_model("conops")) if conops_enabled else None
+    tiebreak_model = per_job_model(lambda: model_config.build_chat_model("scope_tiebreak"))
     if categorizer is None:
         from pathlib import Path
         from .categorization import FunctionProvider, TypeSafeProvider, build_categorizer, jsonl_audit_sink
@@ -125,18 +127,18 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             "scope": {
                 "jev": jev,
                 "llm": FunctionProvider("llm", model_config.for_stage("scope_tiebreak").model,
-                                        lambda request: scope_gate.llm_provider(_submission(request), tiebreak_model, usage_log, raw_log)),
+                                        lambda request: scope_gate.llm_provider(_submission(request), tiebreak_model(), usage_log, raw_log)),
                 "rules": FunctionProvider("rules", "scope-signals-v1",
                                           lambda request: scope_gate.rules_provider(_submission(request))),
             },
             "coverage": {
                 "jev": jev,
-                "llm": FunctionProvider("llm", probing_cfg.model, lambda request: llm_answers(request, categorization_model, usage_log)),
+                "llm": FunctionProvider("llm", probing_cfg.model, lambda request: llm_answers(request, categorization_model(), usage_log)),
                 "rules": FunctionProvider("rules", "none", unavailable_rules),
             },
             "intent": {
                 "jev": jev,
-                "llm": FunctionProvider("llm", probing_cfg.model, lambda request: llm_answers(request, categorization_model, usage_log)),
+                "llm": FunctionProvider("llm", probing_cfg.model, lambda request: llm_answers(request, categorization_model(), usage_log)),
                 "rules": FunctionProvider("rules", "founder-control-v1", intent_rules),
             },
         }
@@ -423,7 +425,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
             _t0 = _time.time()
             request_messages = [SystemMessage(content=system), *history,
                                 HumanMessage(content="FINAL RESPONSE CONTRACT: " + STRUCTURED_TURN_FORMAT)]
-            resp = model_config.invoke_checked(probing_model, request_messages, "probing")
+            resp = model_config.invoke_checked(probing_model(), request_messages, "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider, model_config.for_stage("probing").model,
                              (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
 
@@ -459,7 +461,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                           HumanMessage(content="Your reply was not valid JSON. Reply with ONLY the JSON object, "
                                                "no prose: " + STRUCTURED_TURN_FORMAT)]
             _t0 = _time.time()
-            resp2 = model_config.invoke_checked(probing_model, retry_msgs, "probing")
+            resp2 = model_config.invoke_checked(probing_model(), retry_msgs, "probing")
             usage_log.record("probing", model_config.for_stage("probing").provider,
                              model_config.for_stage("probing").model,
                              (getattr(resp2, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
@@ -532,7 +534,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                             "Reply ONLY with the JSON object: " + STRUCTURED_TURN_FORMAT)
                 _t0 = _time.time()
                 resp_v = model_config.invoke_checked(
-                    probing_model, [*request_messages, AIMessage(content=resp.content), HumanMessage(content=feedback)], "probing")
+                    probing_model(), [*request_messages, AIMessage(content=resp.content), HumanMessage(content=feedback)], "probing")
                 usage_log.record("probing", model_config.for_stage("probing").provider,
                                  model_config.for_stage("probing").model,
                                  (getattr(resp_v, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
@@ -665,7 +667,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                                          if "Output" in system else
                                          "FINAL RESPONSE CONTRACT: Return only the requested JSON value; no prose or markdown fences."))
             _t0 = _time.time()
-            resp = model_config.invoke_checked(distill_model, messages, "distillation")
+            resp = model_config.invoke_checked(distill_model(), messages, "distillation")
             usage_log.record("distillation", model_config.for_stage("distillation").provider,
                              model_config.for_stage("distillation").model,
                              (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time() - _t0)
@@ -1100,7 +1102,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         "Correct it and return only the requested JSON value."))
                 messages.append(HumanMessage(content=reminder))
                 t0 = _time.time()
-                resp = model_config.invoke_checked(conops_model, messages, "conops")
+                resp = model_config.invoke_checked(conops_model(), messages, "conops")
                 usage_log.record("conops", model_config.for_stage("conops").provider,
                                  model_config.for_stage("conops").model,
                                  (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time()-t0)
