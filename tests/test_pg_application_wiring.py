@@ -12,6 +12,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG application wiring tests skip')
+from conftest import managed_pg_server
 
 import psycopg
 import psycopg.rows
@@ -48,7 +49,7 @@ def _cleanup_pg():
 
 
 def make_conn(tmp_path, name='pgdata', init=True):
-    server = pgserver.get_server(str(tmp_path / name))
+    server = managed_pg_server(str(tmp_path / name))
     _OPEN['servers'].append(server)
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     if init:

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: parity test skips')
+from conftest import managed_pg_server
 psycopg = pytest.importorskip('psycopg', reason='psycopg not installed')
 pgcp = pytest.importorskip('langgraph.checkpoint.postgres', reason='langgraph-checkpoint-postgres not installed')
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -30,7 +31,7 @@ def _dump(conn):
 
 def test_checkpoint_schema_matches_pinned_library(tmp_path):
     # Library-final schema on a scratch server, built by the pinned package.
-    server = pgserver.get_server(str(tmp_path / 'libpg'))
+    server = managed_pg_server(str(tmp_path / 'libpg'))
     lib = psycopg.connect(server.get_uri(), autocommit=True)
     PostgresSaver(lib).setup()
     lib_cols, lib_idx = _dump(lib)

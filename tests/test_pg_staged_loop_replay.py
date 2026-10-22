@@ -8,6 +8,7 @@ crashed call pauses with attempt evidence."""
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
+from conftest import managed_pg_server
 import psycopg
 import psycopg.rows
 from typing import Annotated
@@ -34,7 +35,7 @@ class S(TypedDict):
 
 
 def make_store(tmp_path):
-    server = pgserver.get_server(str(tmp_path / 'pgdata'))
+    server = managed_pg_server(str(tmp_path / 'pgdata'))
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_STAGING_DDL)

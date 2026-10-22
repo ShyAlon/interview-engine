@@ -2,6 +2,7 @@ import time
 import pytest
 
 pgserver=pytest.importorskip('pgserver',reason='pgserver not installed: PG checkpoint tests skip')
+from conftest import managed_pg_server
 pgcp=pytest.importorskip('langgraph.checkpoint.postgres',reason='langgraph-checkpoint-postgres not installed')
 
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -12,7 +13,7 @@ from interview_engine.stop_fence import StopRequested
 from test_pg_session_store import MIRRORED_REGISTRY_DDL as LEASE_DDL
 
 def server(tmp_path):
-    return pgserver.get_server(str(tmp_path/'pgdata'))
+    return managed_pg_server(str(tmp_path/'pgdata'))
 
 def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
     ctx=PostgresSaver.from_conn_string(uri)

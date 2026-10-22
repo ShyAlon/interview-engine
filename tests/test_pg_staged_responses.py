@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from contextlib import contextmanager
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
+from conftest import managed_pg_server
 from interview_engine.pg_session_store import PgSessionStore, PublicationConflict
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_STAGING_DDL
 
@@ -21,7 +22,7 @@ OWNER_A = '00000000-0000-0000-0000-000000000001'
 
 @pytest.fixture
 def store(tmp_path):
-    server = pgserver.get_server(str(tmp_path / 'pgdata'))
+    server = managed_pg_server(str(tmp_path / 'pgdata'))
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_STAGING_DDL)

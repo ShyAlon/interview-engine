@@ -22,9 +22,10 @@ def make_registry(request,tmp_path):
             r=SessionRegistry(*a,**k);regs.append(r);return r
         yield mk
         return
+    from conftest import managed_pg_server
     from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
     from interview_engine.pg_session_store import PgSessionStore
-    server=pgserver.get_server(str(tmp_path/'pgdata'))
+    server=managed_pg_server(str(tmp_path/'pgdata'))
     conn=psycopg.connect(server.get_uri(),autocommit=False,row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
     n=[0]
@@ -50,9 +51,10 @@ def make_persistent_registry(request,tmp_path):
         mk.tmpdir=tmp_path
         yield mk
         return
+    from conftest import managed_pg_server
     from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
     from interview_engine.pg_session_store import PgSessionStore
-    server=pgserver.get_server(str(tmp_path/'pgdata'))
+    server=managed_pg_server(str(tmp_path/'pgdata'))
     conn=psycopg.connect(server.get_uri(),autocommit=False,row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
     n=[0]

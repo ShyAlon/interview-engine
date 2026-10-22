@@ -516,29 +516,49 @@ class StagingContext:
         self.anchor = str(anchor) if anchor else 'bootstrap'
         self.step = step
 
+    # The super-step and node identity rely on LangGraph private internals,
+    # pinned and probed: langgraph 1.1.10 / langchain-core 1.6.3 (uv.lock).
+    # tests/test_pg_staged_loop_replay.py proves the contract against real graph
+    # executions; re-run it before any version bump. A missing/malformed
+    # scratchpad IN GRAPH is a loud failure - a fallback counter would silently
+    # re-key paid-call identity.
+    @staticmethod
+    def _runnable_config() -> dict:
+        from langchain_core.runnables.config import var_child_runnable_config
+        return var_child_runnable_config.get(None) or {}
+
     def current_step(self) -> int:
         """The current super-step from LangGraph's runnable config; the seeded
-        fallback outside graph execution."""
-        try:
-            from langchain_core.runnables.config import var_child_runnable_config
-            cfg = var_child_runnable_config.get(None) or {}
-            scratchpad = (cfg.get('configurable') or {}).get('__pregel_scratchpad')
-            step = getattr(scratchpad, 'step', None)
-            return step if isinstance(step, int) else self.step
-        except Exception:
-            return self.step
+        value only for calls made entirely outside graph execution."""
+        configurable = self._runnable_config().get('configurable') or {}
+        if not configurable:
+            return self.step  # outside graph execution (direct test drives)
+        scratchpad = configurable.get('__pregel_scratchpad')
+        step = getattr(scratchpad, 'step', None)
+        if not isinstance(step, int) or step < 0:
+            raise RuntimeError(
+                'LangGraph super-step unreadable: in-graph provider call without '
+                f'a valid __pregel_scratchpad.step (scratchpad={scratchpad!r}). '
+                'Pinned/probed at langgraph 1.1.10 + langchain-core 1.6.3; '
+                're-probe the private API before any upgrade - no fallback is '
+                'safe for paid-call identity.')
+        return step
 
     @staticmethod
     def current_node() -> str:
         """The issuing graph node from LangGraph's runnable config contextvar
-        (checkpoint_ns prefix). '' outside graph execution (direct calls)."""
-        try:
-            from langchain_core.runnables.config import var_child_runnable_config
-            cfg = var_child_runnable_config.get(None) or {}
-            ns = (cfg.get('configurable') or {}).get('checkpoint_ns') or ''
-            return ns.split(':')[0] if ns else ''
-        except Exception:
-            return ''
+        (checkpoint_ns prefix). '' only outside graph execution."""
+        configurable = StagingContext._runnable_config().get('configurable') or {}
+        if not configurable:
+            return ''  # outside graph execution (direct calls)
+        ns = configurable.get('checkpoint_ns') or ''
+        node = ns.split(':')[0] if ns else ''
+        if not node:
+            raise RuntimeError(
+                'LangGraph node identity unreadable: in-graph provider call '
+                'without checkpoint_ns. Pinned/probed at langgraph 1.1.10 + '
+                'langchain-core 1.6.3; re-probe before any upgrade.')
+        return node
 
     def next_cursor(self, node: str, stage: str, item: str):
         key = (self.execution_point, node, stage, item)

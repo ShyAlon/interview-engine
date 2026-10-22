@@ -4,6 +4,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG journal tests skip')
+from conftest import managed_pg_server
 
 import psycopg
 import psycopg.rows
@@ -18,7 +19,7 @@ OWNER = '00000000-0000-0000-0000-000000000001'
 
 
 def make_store(tmp_path):
-    server = pgserver.get_server(str(tmp_path / 'pgdata'))
+    server = managed_pg_server(str(tmp_path / 'pgdata'))
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_JOURNAL_DDL)
