@@ -177,3 +177,15 @@ def test_http_cross_owner_session_invisible(tmp_path):
     client = authed(create_app(make_registry(conn), service_token=TOKEN))  # serves OWNER
     r = client.get('/v1/sessions/s-foreign')
     assert r.status_code == 404, r.text
+    r = client.get('/v1/sessions/s-foreign/progress')
+    assert r.status_code == 404, r.text
+
+
+def test_http_unpublished_row_never_leaks(tmp_path):
+    # A row that was created but has no published step must not leak through
+    # the ordinary session or progress APIs.
+    conn = make_conn(tmp_path)
+    PgSessionStore(conn).create('s-draft', 'task-d', OWNER)
+    client = authed(create_app(make_registry(conn), service_token=TOKEN))
+    assert client.get('/v1/sessions/s-draft').status_code == 404
+    assert client.get('/v1/sessions/s-draft/progress').status_code == 404
