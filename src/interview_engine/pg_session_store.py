@@ -92,7 +92,7 @@ class PgSessionStore:
             "UPDATE engine_sessions"
             " SET lease_epoch = CASE WHEN lease_expires_at <= %(now)s THEN lease_epoch + 1 ELSE lease_epoch END,"
             "     placement_instance = %(instance)s, lease_expires_at = %(expiry)s, updated_at = %(now)s"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
             "   AND (lease_expires_at <= %(now)s OR placement_instance = %(instance)s)"
             " RETURNING generation, lease_epoch",
             {"sid": session_id, "owner": owner_id, "instance": instance,
@@ -107,7 +107,7 @@ class PgSessionStore:
         now = time.time()
         row = self.conn.execute(
             "UPDATE engine_sessions SET lease_expires_at = %(expiry)s, updated_at = %(now)s"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s AND generation = %(gen)s"
+            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
             "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
             "   AND lease_expires_at > %(now)s"
             " RETURNING 1",
@@ -127,7 +127,7 @@ class PgSessionStore:
             " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
             "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
             "     updated_at = %(now)s"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s AND generation = %(gen)s"
+            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
             "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
             " RETURNING 1",
             {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
@@ -156,7 +156,7 @@ class PgSessionStore:
         row = self.conn.execute(
             "UPDATE engine_sessions SET generation = generation + 1, lease_expires_at = 0,"
             " control = COALESCE(%(control)s::jsonb, control, '{}'::jsonb) || %(stopped_marker)s::jsonb,"
-            " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+            " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
             " RETURNING generation",
             {"sid": session_id, "owner": owner_id,
              "control": json.dumps(control) if control is not None else None,
@@ -172,7 +172,7 @@ class PgSessionStore:
         row = self.conn.execute(
             "SELECT task_id, generation, control, published_thread_id,"
             "       published_checkpoint_ns, published_checkpoint_id"
-            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s",
+            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid",
             {"sid": session_id, "owner": owner_id}).fetchone()
         if row is None:
             return None
@@ -189,7 +189,7 @@ class PgSessionStore:
         row = self.conn.execute(
             "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
             " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s AND generation = %(gen)s"
+            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
             "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
             " FOR UPDATE"
             " ON CONFLICT (session_id, cursor) DO NOTHING"
@@ -201,7 +201,7 @@ class PgSessionStore:
         # fence failure separately so a stale writer never passes silently.
         if row is None:
             guard = self.conn.execute(
-                "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+                "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
                 " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s",
                 {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
                  "epoch": claim.epoch, "now": time.time()}).fetchone()
@@ -217,7 +217,7 @@ class PgSessionStore:
         rows = self.conn.execute(
             "SELECT j.cursor, j.page FROM engine_session_journal j"
             " JOIN engine_sessions s ON s.session_id = j.session_id"
-            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s AND j.cursor > %(after)s"
+            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid AND j.cursor > %(after)s"
             " ORDER BY j.cursor LIMIT %(limit)s",
             {"sid": session_id, "owner": owner_id, "after": after, "limit": limit}).fetchall()
         return [{"cursor": r["cursor"], "page": r["page"]} for r in rows]
@@ -252,7 +252,7 @@ class PgSessionStore:
                   "epoch": claim.epoch, "now": time.time()}
         row = self.conn.execute(
             "SELECT control, published_thread_id, published_checkpoint_ns, published_checkpoint_id"
-            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
             " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
             " FOR UPDATE",
             params).fetchone()
@@ -329,6 +329,6 @@ class PgSessionStore:
         row = self.conn.execute(
             "SELECT COALESCE(MAX(j.cursor),0) AS head FROM engine_session_journal j"
             " JOIN engine_sessions s ON s.session_id = j.session_id"
-            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s",
+            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid",
             {"sid": session_id, "owner": owner_id}).fetchone()
         return row["head"] if isinstance(row, dict) else row[0]

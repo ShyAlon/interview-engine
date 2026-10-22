@@ -20,7 +20,7 @@ from interview_engine.http_service import SessionRegistry, ProtocolFailure
 from interview_engine.pg_session_store import PgSessionStore
 from test_pg_session_store import MIRRORED_REGISTRY_DDL
 
-OWNER = 'owner-a'
+OWNER = '00000000-0000-0000-0000-000000000001'
 
 
 # Every connection and registry a test opens is closed during teardown, BEFORE
@@ -143,7 +143,7 @@ def test_cross_owner_stop_and_read_are_invisible(tmp_path):
     registry = make_registry(conn)  # owner-a
     session, _ = start(registry)
     foreign = SessionRegistry(lambda *a: Program(), session_store=PgSessionStore(conn),
-                              owner_id='owner-b', instance_id='test#9', lease_ttl=60.0)
+                              owner_id='00000000-0000-0000-0000-000000000002', instance_id='test#9', lease_ttl=60.0)
     with pytest.raises(KeyError):
         foreign.stop(session.session_id)
     with pytest.raises(KeyError):

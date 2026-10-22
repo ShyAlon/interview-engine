@@ -21,7 +21,7 @@ def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
     saver.conn.execute(LEASE_DDL)
     saver.conn.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (session,'owner-a','task1',generation,time.time(),epoch,time.time()+expire))
+        (session,'00000000-0000-0000-0000-000000000001','task1',generation,time.time(),epoch,time.time()+expire))
     fenced=FencedPostgresSaver(saver.conn,lease=LeaseFence(session,generation,epoch),
         serde=JsonPlusSerializer())
     return ctx,fenced

@@ -116,6 +116,22 @@ class FencedPostgresSaver(PostgresSaver):
     def close(self):
         self._write_conn.close()
 
+    def setup(self) -> None:
+        # When the schema is migration-owned (delivery-api pre-records the
+        # final langgraph migration index), there is nothing to do: the
+        # library's setup always executes its first DDL statement, which the
+        # runtime database role must not be allowed to run. Fall back to the
+        # library only on schemas the migration has not fully prepared.
+        try:
+            row = self.conn.execute("SELECT max(v) AS v FROM checkpoint_migrations").fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            version = row.get('v') if isinstance(row, dict) else row[0]
+            if version is not None and version >= len(self.MIGRATIONS) - 1:
+                return
+        super().setup()
+
     def _fenced(self, sql: str, params: dict):
         merged = dict(params)
         merged.update(self._lease.params())

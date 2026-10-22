@@ -21,8 +21,8 @@ from interview_engine.stop_fence import StopRequested
 # (engine_sessions) + 20261022090000_session_placement_leases.sql, without the
 # auth/tasks foreign keys. Keep column names, types and defaults identical.
 MIRRORED_REGISTRY_DDL = """CREATE TABLE engine_sessions(
- session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT NOT NULL,
- generation BIGINT NOT NULL CHECK(generation > 0), created_at DOUBLE PRECISION NOT NULL,
+ session_id TEXT PRIMARY KEY, owner_id UUID NOT NULL, task_id TEXT NOT NULL,
+ generation INTEGER NOT NULL CHECK(generation > 0), created_at DOUBLE PRECISION NOT NULL,
  placement_instance TEXT, lease_epoch BIGINT NOT NULL DEFAULT 0,
  lease_expires_at DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at DOUBLE PRECISION,
  control JSONB, published_thread_id TEXT,
@@ -34,8 +34,8 @@ MIRRORED_JOURNAL_DDL = """CREATE TABLE engine_session_journal(
  cursor BIGINT NOT NULL, page JSONB NOT NULL, created_at DOUBLE PRECISION NOT NULL,
  PRIMARY KEY(session_id, cursor))"""
 
-OWNER_A = 'owner-a'
-OWNER_B = 'owner-b'
+OWNER_A = '00000000-0000-0000-0000-000000000001'
+OWNER_B = '00000000-0000-0000-0000-000000000002'
 
 
 def make_store(tmp_path):

@@ -14,7 +14,7 @@ from interview_engine.http_service import SessionRegistry
 from interview_engine.stop_fence import StopRequested
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
 
-OWNER = 'owner-a'
+OWNER = '00000000-0000-0000-0000-000000000001'
 
 
 def make_store(tmp_path):
@@ -70,7 +70,7 @@ def test_cross_owner_journal_read_is_invisible(tmp_path):
     store.create('s1', 'task1', OWNER)
     claim = store.claim('s1', OWNER, 'host#1', ttl=60)
     store.append_journal(claim, 1, signal('s1', 1, 'private'))
-    assert store.read_journal('s1', 'owner-b', after=0, limit=10) == []
+    assert store.read_journal('s1', '00000000-0000-0000-0000-000000000002', after=0, limit=10) == []
 
 
 def test_registry_progress_reads_journal_in_db_mode(tmp_path, request):

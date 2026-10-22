@@ -28,7 +28,7 @@ from interview_engine.pg_session_store import PgSessionStore
 from interview_engine.stop_fence import StopRequested
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
 
-OWNER = 'owner-a'
+OWNER = '00000000-0000-0000-0000-000000000001'
 SID = '11111111-1111-4111-8111-111111111111'
 _OPEN = {'conns': [], 'registries': [], 'servers': []}
 
@@ -385,4 +385,4 @@ def test_stale_lease_caller_stop_and_cross_owner_rejection(tmp_path, fake_ollama
     # A foreign owner cannot stop - or even detect - the session.
     foreign = PgSessionStore(conn_b)
     with pytest.raises(KeyError):
-        foreign.stop(SID, 'owner-b')
+        foreign.stop(SID, '00000000-0000-0000-0000-000000000002')

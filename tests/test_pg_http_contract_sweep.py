@@ -25,7 +25,7 @@ from interview_engine.pg_session_store import PgSessionStore
 from test_http_service import TOKEN, FakeProgram, FailOnceProgram, authed
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
 
-OWNER = 'owner-a'
+OWNER = '00000000-0000-0000-0000-000000000001'
 _OPEN = {'conns': [], 'registries': [], 'servers': []}
 
 
