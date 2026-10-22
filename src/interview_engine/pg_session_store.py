@@ -60,6 +60,14 @@ class PgSessionStore:
     def __init__(self, conn: psycopg.Connection):
         self.conn = conn
 
+    def spawn(self) -> "PgSessionStore":
+        # A second store on its own connection: a psycopg connection is not
+        # thread-safe, so a background heartbeat must never share the serving
+        # thread's connection.
+        import psycopg.rows
+        return PgSessionStore(psycopg.connect(self.conn.info.dsn, autocommit=False,
+                                              row_factory=psycopg.rows.dict_row))
+
     def create(self, session_id: str, task_id: str, owner_id: str) -> None:
         now = time.time()
         self.conn.execute(

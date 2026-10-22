@@ -65,6 +65,7 @@ def test_live_lease_blocks_second_instance_then_takeover_after_expiry(tmp_path):
     second = make_registry(conn, instance='test#2', ttl=60.0)
     with pytest.raises(KeyError):
         second.get(session.session_id)  # live lease: no claim, no serve
+    first.close()  # simulated instance death: heartbeats halt, lease can expire
     import time; time.sleep(0.25)
     restored = second.get(session.session_id)  # expired: takeover + restore
     assert restored.pg_claim.instance == 'test#2'
@@ -77,6 +78,7 @@ def test_takeover_keeps_prior_epoch_control_and_stale_saves_fail_closed(tmp_path
     first = make_registry(conn, instance='test#1', ttl=0.2)
     session, _ = start(first)
     stale_claim = session.pg_claim
+    first.close()  # simulated instance death before takeover
     import time; time.sleep(0.25)
     second = make_registry(conn, instance='test#2', ttl=60.0)
     restored = second.get(session.session_id)
@@ -137,3 +139,43 @@ def test_session_id_reused_after_commit_rejected(tmp_path):
     other = make_registry(conn, instance='test#2', ttl=0.0)
     with pytest.raises(ProtocolFailure):
         start(other, sid)  # row exists; no overwrite even after lease expiry
+
+
+def test_heartbeat_holds_lease_through_long_advance(tmp_path):
+    import time
+    entered = threading.Event(); release = threading.Event()
+    class Slow:
+        finished = False
+        def advance(self, response=None):
+            if response is not None: entered.set(); release.wait(3)
+            return InputRequest(input_id=uuid4(), kind=InputKind.TEXT, prompt='late')
+    conn = make_conn(tmp_path)
+    first = make_registry(conn, program=lambda *a: Slow(), instance='test#1', ttl=0.4)
+    session, _ = start(first)
+    answer = InputResponse(input_id=session.open_input.input_id, value='fake', actor_id='fake')
+    with ThreadPoolExecutor() as pool:
+        future = pool.submit(first.respond, session.session_id, answer)
+        assert entered.wait(2)
+        time.sleep(0.9)  # over 2x the lease ttl; only heartbeats keep it alive
+        second = make_registry(conn, instance='test#2', ttl=60.0)
+        with pytest.raises(KeyError):
+            second.get(session.session_id)  # still served by the first instance
+        release.set(); future.result(timeout=5)
+
+
+def test_lost_heartbeat_marks_session_stopped_and_fails_closed(tmp_path):
+    import time
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    first = make_registry(conn, instance='test#1', ttl=0.3)
+    session, _ = start(first)
+    store.stop(session.session_id, OWNER)  # owner Stop lands from outside
+    deadline = time.time() + 5
+    while not session.pg_stopped and time.time() < deadline:
+        time.sleep(0.05)
+    assert session.pg_stopped is True  # heartbeat observed the loss
+    # Later fenced writes from this instance are rejected; the session stays stopped.
+    assert store.heartbeat(session.pg_claim, ttl=60) is False
+    fresh = make_registry(conn, instance='test#2', ttl=60.0)
+    restored = fresh.get(session.session_id)
+    assert restored.pg_stopped is True

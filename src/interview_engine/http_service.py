@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 import json
+import threading
+import time
 from pathlib import Path
 import hmac
 import logging
@@ -49,6 +51,7 @@ class EngineSession:
     stop_fence: object | None = field(default=None, repr=False, compare=False)
     pg_claim: object | None = field(default=None, repr=False, compare=False)
     pg_stopped: bool = field(default=False, repr=False, compare=False)
+    pg_heartbeat_halt: object | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> EngineSnapshot:
         stopped=self.stop_fence.state if self.stop_fence is not None else ('STOP_REQUESTED' if self.pg_stopped else None)
@@ -74,6 +77,43 @@ class SessionRegistry:
         self._instance=instance_id   # execution-instance lease identity, never a bare hostname
         self._lease_ttl=lease_ttl
         self._lock=RLock()
+
+    def _start_heartbeat(self,session:EngineSession)->None:
+        # While this process serves a session, keep its lease alive so a long
+        # advance cannot be taken over mid-flight. A lost heartbeat (stop or
+        # takeover) marks the session stopped: every later fenced write then
+        # fails closed at the database. Own connection per thread (psycopg
+        # connections are not thread-safe).
+        if self._store is None or session.pg_claim is None:return
+        store=self._store.spawn()
+        claim=session.pg_claim
+        halt=threading.Event()
+        session.pg_heartbeat_halt=halt
+        interval=max(self._lease_ttl/3.0,0.05)
+        def beat():
+            failures=0
+            while not session.pg_stopped and not halt.is_set():
+                time.sleep(interval)
+                if session.pg_stopped or halt.is_set():return
+                try:alive=store.heartbeat(claim,self._lease_ttl)
+                except Exception:
+                    failures+=1
+                    log.warning('session lease heartbeat failed session=%s failures=%d',claim.session_id,failures,exc_info=True)
+                    if failures>=5:return   # lease expires on its own; fences close
+                    continue
+                failures=0
+                if not alive:
+                    session.pg_stopped=True
+                    return
+        threading.Thread(target=beat,daemon=True,name=f"lease-heartbeat-{claim.session_id}").start()
+
+    def close(self)->None:
+        # Stop serving: heartbeats halt, leases expire on their own, and a live
+        # session can then be claimed by another instance. Fences close every
+        # later write from this process even before expiry.
+        with self._lock:sessions=list(self._sessions.values())
+        for session in sessions:
+            if session.pg_heartbeat_halt is not None:session.pg_heartbeat_halt.set()
 
     def _pg_owner(self)->str:
         # Owner identity comes from the authenticated tenant context (or the
@@ -126,6 +166,7 @@ class SessionRegistry:
                 with self._lock:self._sessions.pop(session.session_id,None)
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session lease held by another live instance")
             session.pg_claim=claim
+            self._start_heartbeat(session)
         self._ensure_stop_fence(session)
         started=self._event(session,EventType.RUN_STARTED)
         try:
@@ -482,6 +523,7 @@ class SessionRegistry:
             session.pg_stopped=True
             session.open_input=None
             return session  # Stopped sessions never construct or resume a graph.
+        self._start_heartbeat(session)
         return self._restore_program(session,payload)
 
     def _restore_payload(self,payload:dict,session_id:str)->EngineSession:
