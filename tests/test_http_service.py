@@ -1,4 +1,5 @@
 from uuid import uuid4
+import psycopg,pgserver,pytest
 from fastapi.testclient import TestClient
 from vmodel_contracts.interactive import (
     EventType,InputKind,InputOption,InputRequest,NextStep,ProcessStatus,ProtocolErrorCode,
@@ -6,11 +7,65 @@ from vmodel_contracts.interactive import (
 from interview_engine.http_service import SessionRegistry,create_app
 
 TOKEN='test-service-token'
+PG_OWNER='00000000-0000-0000-0000-000000000001'
 def authed(app):return TestClient(app,headers={'X-Interview-Engine-Token':TOKEN})
 
 
-def test_start_session_returns_typed_http_contract():
-    client=authed(create_app(service_token=TOKEN));r=client.post('/v1/sessions',json={
+@pytest.fixture(params=['memory','pg'])
+def make_registry(request,tmp_path):
+    # Run the original session/HTTP contract tests against both backends:
+    # the in-memory/file default and database persistence. One pgserver
+    # database per test; each registry gets its own store over it.
+    regs=[]
+    if request.param=='memory':
+        def mk(*a,**k):
+            r=SessionRegistry(*a,**k);regs.append(r);return r
+        yield mk
+        return
+    from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
+    from interview_engine.pg_session_store import PgSessionStore
+    server=pgserver.get_server(str(tmp_path/'pgdata'))
+    conn=psycopg.connect(server.get_uri(),autocommit=False,row_factory=psycopg.rows.dict_row)
+    conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
+    n=[0]
+    def mk(*a,**k):
+        n[0]+=1
+        k.setdefault('session_store',PgSessionStore(conn));k.setdefault('owner_id',PG_OWNER)
+        k.setdefault('instance_id',f't#{n[0]}');k.setdefault('lease_ttl',60.0)
+        r=SessionRegistry(*a,**k);regs.append(r);return r
+    yield mk
+    for r in regs:r.close()
+    conn.close()
+
+
+@pytest.fixture(params=['file','pg'])
+def make_persistent_registry(request,tmp_path):
+    # Restart-persistence tests: file mode and database mode.
+    regs=[]
+    if request.param=='file':
+        def mk(*a,**k):
+            k['state_dir']=tmp_path
+            r=SessionRegistry(*a,**k);regs.append(r);return r
+        yield mk
+        return
+    from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
+    from interview_engine.pg_session_store import PgSessionStore
+    server=pgserver.get_server(str(tmp_path/'pgdata'))
+    conn=psycopg.connect(server.get_uri(),autocommit=False,row_factory=psycopg.rows.dict_row)
+    conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
+    n=[0]
+    def mk(*a,**k):
+        n[0]+=1
+        k.setdefault('session_store',PgSessionStore(conn));k.setdefault('owner_id',PG_OWNER)
+        k.setdefault('instance_id',f't#{n[0]}');k.setdefault('lease_ttl',60.0)
+        r=SessionRegistry(*a,**k);regs.append(r);return r
+    yield mk
+    for r in regs:r.close()
+    conn.close()
+
+
+def test_start_session_returns_typed_http_contract(make_registry):
+    client=authed(create_app(make_registry(),service_token=TOKEN));r=client.post('/v1/sessions',json={
         'protocol_version':1,'task_id':'task-1','idea':'A virtual dungeon master','model_route':'deepseek'})
     assert r.status_code==201
     body=r.json();assert body['accepted_event']['event_type']==EventType.RUN_STARTED
@@ -18,8 +73,8 @@ def test_start_session_returns_typed_http_contract():
     assert body['snapshot']['next_step']==NextStep.RUN
 
 
-def test_approval_is_single_idempotent_input_boundary():
-    registry=SessionRegistry();client=authed(create_app(registry,service_token=TOKEN));started=client.post('/v1/sessions',json={
+def test_approval_is_single_idempotent_input_boundary(make_registry):
+    registry=make_registry();client=authed(create_app(registry,service_token=TOKEN));started=client.post('/v1/sessions',json={
         'protocol_version':1,'task_id':'task-1','idea':'idea','model_route':'local'}).json();sid=started['snapshot']['session_id']
     pending=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Approve intent?',options=[
         InputOption(value=1,label='Approve'),InputOption(value=0,label='Reject')])
@@ -32,8 +87,8 @@ def test_approval_is_single_idempotent_input_boundary():
     assert replay.status_code==200
 
 
-def test_stale_input_uses_error_enum_and_http_conflict():
-    registry=SessionRegistry();client=authed(create_app(registry,service_token=TOKEN));sid=client.post('/v1/sessions',json={
+def test_stale_input_uses_error_enum_and_http_conflict(make_registry):
+    registry=make_registry();client=authed(create_app(registry,service_token=TOKEN));sid=client.post('/v1/sessions',json={
         'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json()['snapshot']['session_id']
     current=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='Who uses it?')
     registry.publish(sid,EventType.INPUT_REQUESTED,phase_id=10,status=ProcessStatus.WAITING_INPUT,
@@ -49,8 +104,8 @@ class FakeProgram:
         if response is None:return self.pending
         self.finished=True;return None
 
-def test_http_session_drives_program_to_typed_input_and_completion():
-    program=FakeProgram();registry=SessionRegistry(lambda session_id,request:program);client=authed(create_app(registry,service_token=TOKEN))
+def test_http_session_drives_program_to_typed_input_and_completion(make_registry):
+    program=FakeProgram();registry=make_registry(lambda session_id,request:program);client=authed(create_app(registry,service_token=TOKEN))
     started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json()
     assert started['snapshot']['process_status']==ProcessStatus.WAITING_INPUT
     pending=started['snapshot']['open_input'];reply={'protocol_version':1,'input_id':pending['input_id'],'value':'players','actor_id':'founder'}
@@ -72,8 +127,8 @@ class FailOnceProgram(FakeProgram):
         if self.calls==1:raise RuntimeError('model unavailable')
         self.finished=True;return None
 
-def test_failed_program_advance_keeps_typed_input_retryable():
-    program=FailOnceProgram();registry=SessionRegistry(lambda session_id,request:program)
+def test_failed_program_advance_keeps_typed_input_retryable(make_registry):
+    program=FailOnceProgram();registry=make_registry(lambda session_id,request:program)
     session,_=registry.start(__import__('vmodel_contracts.interactive',fromlist=['StartSessionRequest']).StartSessionRequest(task_id='t',idea='i',model_route='m'))
     pending=session.open_input;response=__import__('vmodel_contracts.interactive',fromlist=['InputResponse']).InputResponse(input_id=pending.input_id,value='players',actor_id='founder')
     import pytest
@@ -85,8 +140,8 @@ def test_failed_program_advance_keeps_typed_input_retryable():
     assert snapshot.process_status==ProcessStatus.COMPLETED
 
 
-def test_failed_advance_returns_typed_retryable_service_error():
-    program=FailOnceProgram();client=authed(create_app(SessionRegistry(lambda session_id,request:program),service_token=TOKEN))
+def test_failed_advance_returns_typed_retryable_service_error(make_registry):
+    program=FailOnceProgram();client=authed(create_app(make_registry(lambda session_id,request:program),service_token=TOKEN))
     started=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}).json();pending=started['snapshot']['open_input']
     response={'protocol_version':1,'input_id':pending['input_id'],'value':'players','actor_id':'founder'}
     failed=client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}",json=response)
@@ -95,11 +150,16 @@ def test_failed_advance_returns_typed_retryable_service_error():
     assert retried.status_code==200 and retried.json()['snapshot']['process_status']==ProcessStatus.COMPLETED
 
 
-def test_registry_restores_open_input_after_engine_restart(tmp_path):
-    first_program=FakeProgram();first=SessionRegistry(lambda session_id,request:first_program,state_dir=tmp_path)
+def test_registry_restores_open_input_after_engine_restart(make_persistent_registry):
+    first_program=FakeProgram();first=make_persistent_registry(lambda session_id,request:first_program,lease_ttl=1.0)
     request=__import__('vmodel_contracts.interactive',fromlist=['StartSessionRequest']).StartSessionRequest(task_id='t',idea='i',model_route='m')
     session,_=first.start(request);pending=session.open_input
-    second_program=FakeProgram();restarted=SessionRegistry(lambda session_id,request:second_program,state_dir=tmp_path)
+    first.close()
+    if first._store is not None:
+        # Leases expire on their own after close(); the restarted instance
+        # claims the session once the old lease lapses.
+        import time;time.sleep(1.2)
+    second_program=FakeProgram();restarted=make_persistent_registry(lambda session_id,request:second_program,lease_ttl=1.0)
     restored=restarted.get(session.session_id)
     assert restored.open_input==pending and restored.status==ProcessStatus.WAITING_INPUT
     response=__import__('vmodel_contracts.interactive',fromlist=['InputResponse']).InputResponse(input_id=pending.input_id,value='players',actor_id='founder')
