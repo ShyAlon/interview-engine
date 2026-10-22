@@ -208,3 +208,48 @@ class PgSessionStore:
             " ORDER BY j.cursor LIMIT %(limit)s",
             {"sid": session_id, "owner": owner_id, "after": after, "limit": limit}).fetchall()
         return [{"cursor": r["cursor"], "page": r["page"]} for r in rows]
+
+    def publish_step(self, claim: SessionClaim, control: dict, *,
+                     journal_cursor: int | None = None,
+                     journal_page: dict | None = None,
+                     published_thread_id: str | None = None,
+                     published_checkpoint_ns: str = "",
+                     published_checkpoint_id: str | None = None) -> None:
+        """One transaction per published step: journal page, control state and
+        the checkpoint pointer commit together under the lease fence.
+
+        Readers only ever see committed steps: a crash or a failed fence leaves
+        NONE of the three behind. The guard locks the lease row FOR UPDATE in
+        the same transaction, so a stop or takeover bump serializes against the
+        whole publication. The journal page keeps immutable-cursor semantics
+        (duplicate cursor keeps the original) so a retried publication after an
+        uncertain commit stays idempotent instead of diverging.
+        """
+        params = {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                  "epoch": claim.epoch, "now": time.time()}
+        guard = self.conn.execute(
+            "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+            " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+            " FOR UPDATE",
+            params).fetchone()
+        if guard is None:
+            self.conn.rollback()
+            raise StopRequested("session lease fence rejected the publication")
+        if journal_page is not None:
+            if journal_cursor is None:
+                self.conn.rollback()
+                raise ValueError("journal page requires its cursor")
+            self.conn.execute(
+                "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+                " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
+                " ON CONFLICT (session_id, cursor) DO NOTHING",
+                {**params, "cursor": journal_cursor, "page": json.dumps(journal_page)})
+        self.conn.execute(
+            "UPDATE engine_sessions"
+            " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
+            "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
+            "     updated_at = %(now)s"
+            " WHERE session_id = %(sid)s",
+            {**params, "control": json.dumps(control), "tid": published_thread_id,
+             "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
+        self.conn.commit()

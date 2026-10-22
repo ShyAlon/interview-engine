@@ -23,18 +23,39 @@ from test_pg_session_store import MIRRORED_REGISTRY_DDL
 OWNER = 'owner-a'
 
 
+# Every connection and registry a test opens is closed during teardown, BEFORE
+# the throwaway server goes away: no heartbeat thread or socket outlives its
+# Postgres.
+_OPEN = {'servers': [], 'conns': [], 'registries': []}
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_pg():
+    yield
+    for r in _OPEN['registries']:
+        r.close()
+    for c in _OPEN['conns']:
+        try: c.close()
+        except Exception: pass
+    _OPEN['registries'].clear(); _OPEN['conns'].clear(); _OPEN['servers'].clear()
+
+
 def make_conn(tmp_path, name='pgdata'):
     server = pgserver.get_server(str(tmp_path / name))
+    _OPEN['servers'].append(server)
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.commit()
+    _OPEN['conns'].append(conn)
     return conn
 
 
 def make_registry(conn, program=None, instance='test#1', ttl=60.0):
-    return SessionRegistry(program or (lambda *a: Program()),
-                           session_store=PgSessionStore(conn), owner_id=OWNER,
-                           instance_id=instance, lease_ttl=ttl)
+    registry = SessionRegistry(program or (lambda *a: Program()),
+                               session_store=PgSessionStore(conn), owner_id=OWNER,
+                               instance_id=instance, lease_ttl=ttl)
+    _OPEN['registries'].append(registry)
+    return registry
 
 
 class Program:
@@ -179,3 +200,16 @@ def test_lost_heartbeat_marks_session_stopped_and_fails_closed(tmp_path):
     fresh = make_registry(conn, instance='test#2', ttl=60.0)
     restored = fresh.get(session.session_id)
     assert restored.pg_stopped is True
+
+
+def test_close_halts_and_joins_heartbeats_before_takeover(tmp_path):
+    import time
+    conn = make_conn(tmp_path)
+    first = make_registry(conn, instance='test#1', ttl=0.3)
+    session, _ = start(first)
+    first.close()
+    thread = session.pg_heartbeat_thread
+    assert thread is not None and not thread.is_alive()  # bounded join, no straggler
+    time.sleep(0.35)  # lease lapses only after heartbeats actually stopped
+    second = make_registry(conn, instance='test#2', ttl=60.0)
+    assert second.get(session.session_id).pg_claim.instance == 'test#2'

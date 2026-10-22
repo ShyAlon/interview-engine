@@ -73,7 +73,7 @@ def test_cross_owner_journal_read_is_invisible(tmp_path):
     assert store.read_journal('s1', 'owner-b', after=0, limit=10) == []
 
 
-def test_registry_progress_reads_journal_in_db_mode(tmp_path):
+def test_registry_progress_reads_journal_in_db_mode(tmp_path, request):
     from uuid import uuid4
     from vmodel_contracts.interactive import StartSessionRequest, InputRequest, InputKind
     class Program:
@@ -83,7 +83,46 @@ def test_registry_progress_reads_journal_in_db_mode(tmp_path):
     store = make_store(tmp_path)
     registry = SessionRegistry(lambda *a: Program(), session_store=store, owner_id=OWNER,
                                instance_id='test#1', lease_ttl=60.0)
+    request.addfinalizer(registry.close)
     session, _ = registry.start(StartSessionRequest(task_id='fake', idea='fake', model_route='local'))
     store.append_journal(session.pg_claim, 1, signal(session.session_id, 1, 'step'))
     page = registry.progress(session.session_id, after=0, limit=10)
     assert [e.label for e in page.events] == ['step'] and page.next_cursor == 1
+
+
+def test_publish_step_commits_journal_control_and_pointer_atomically(tmp_path):
+    store = make_store(tmp_path)
+    store.create('s1', 'task1', OWNER)
+    claim = store.claim('s1', OWNER, 'host#1', ttl=60)
+    store.publish_step(claim, {'status': 'step-1'}, journal_cursor=1, journal_page=signal('s1', 1, 'one'),
+                       published_thread_id='s1', published_checkpoint_id='cp-1')
+    published = store.load_published('s1', OWNER)
+    assert published['control'] == {'status': 'step-1'} and published['published_checkpoint_id'] == 'cp-1'
+    assert [r['cursor'] for r in store.read_journal('s1', OWNER, 0, 10)] == [1]
+
+
+def test_publish_step_fence_failure_leaves_nothing_behind(tmp_path):
+    store = make_store(tmp_path)
+    store.create('s1', 'task1', OWNER)
+    stale = store.claim('s1', OWNER, 'host#1', ttl=0.05)
+    time.sleep(0.1)
+    store.claim('s1', OWNER, 'host#2', ttl=60)
+    with pytest.raises(StopRequested):
+        store.publish_step(stale, {'status': 'stale'}, journal_cursor=1, journal_page=signal('s1', 1, 'x'),
+                           published_thread_id='s1', published_checkpoint_id='cp-x')
+    published = store.load_published('s1', OWNER)
+    assert published['control'] is None and published['published_checkpoint_id'] is None
+    assert store.read_journal('s1', OWNER, 0, 10) == []
+
+
+def test_publish_step_retried_after_uncertain_commit_stays_idempotent(tmp_path):
+    store = make_store(tmp_path)
+    store.create('s1', 'task1', OWNER)
+    claim = store.claim('s1', OWNER, 'host#1', ttl=60)
+    store.publish_step(claim, {'status': 'step-1'}, journal_cursor=1, journal_page=signal('s1', 1, 'original'),
+                       published_thread_id='s1', published_checkpoint_id='cp-1')
+    # The uncertain retry re-publishes the same step: journal page is kept,
+    # control and pointer advance to the retry's (identical-step) values.
+    store.publish_step(claim, {'status': 'step-1'}, journal_cursor=1, journal_page=signal('s1', 1, 'forged'),
+                       published_thread_id='s1', published_checkpoint_id='cp-1')
+    assert store.read_journal('s1', OWNER, 0, 10)[0]['page']['label'] == 'original'

@@ -52,6 +52,7 @@ class EngineSession:
     pg_claim: object | None = field(default=None, repr=False, compare=False)
     pg_stopped: bool = field(default=False, repr=False, compare=False)
     pg_heartbeat_halt: object | None = field(default=None, repr=False, compare=False)
+    pg_heartbeat_thread: object | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> EngineSnapshot:
         stopped=self.stop_fence.state if self.stop_fence is not None else ('STOP_REQUESTED' if self.pg_stopped else None)
@@ -91,29 +92,46 @@ class SessionRegistry:
         session.pg_heartbeat_halt=halt
         interval=max(self._lease_ttl/3.0,0.05)
         def beat():
+            # The lease expiry in every fence statement is the authority: this
+            # loop only extends a live lease. Retries never revive an expired
+            # one (the heartbeat's WHERE clause requires it unexpired), and a
+            # blocked loop lets it lapse - writes then fail closed regardless
+            # of what this thread believed.
             failures=0
-            while not session.pg_stopped and not halt.is_set():
-                time.sleep(interval)
-                if session.pg_stopped or halt.is_set():return
-                try:alive=store.heartbeat(claim,self._lease_ttl)
-                except Exception:
-                    failures+=1
-                    log.warning('session lease heartbeat failed session=%s failures=%d',claim.session_id,failures,exc_info=True)
-                    if failures>=5:return   # lease expires on its own; fences close
-                    continue
-                failures=0
-                if not alive:
-                    session.pg_stopped=True
-                    return
-        threading.Thread(target=beat,daemon=True,name=f"lease-heartbeat-{claim.session_id}").start()
+            try:
+                while not session.pg_stopped and not halt.is_set():
+                    if halt.wait(interval):return   # wakes immediately on close()
+                    if session.pg_stopped:return
+                    try:alive=store.heartbeat(claim,self._lease_ttl)
+                    except Exception:
+                        failures+=1
+                        log.warning('session lease heartbeat failed session=%s failures=%d',claim.session_id,failures,exc_info=True)
+                        if failures>=5:return   # lease expires on its own; fences close
+                        continue
+                    failures=0
+                    if not alive:
+                        session.pg_stopped=True
+                        return
+            finally:
+                store.conn.close()
+        session.pg_heartbeat_thread=threading.Thread(target=beat,daemon=True,name=f"lease-heartbeat-{claim.session_id}")
+        session.pg_heartbeat_thread.start()
 
     def close(self)->None:
-        # Stop serving: heartbeats halt, leases expire on their own, and a live
-        # session can then be claimed by another instance. Fences close every
-        # later write from this process even before expiry.
+        # Stop serving: halt every heartbeat, join each thread with a bounded
+        # wait, and leave no connection in use. Leases expire on their own; a
+        # live session can then be claimed by another instance. Fences close
+        # every later write from this process even before expiry.
         with self._lock:sessions=list(self._sessions.values())
+        deadline=time.monotonic()+max(2*self._lease_ttl,1.0)
         for session in sessions:
             if session.pg_heartbeat_halt is not None:session.pg_heartbeat_halt.set()
+        for session in sessions:
+            thread=session.pg_heartbeat_thread
+            if thread is not None:
+                remaining=deadline-time.monotonic()
+                thread.join(timeout=max(remaining,0.05))
+                if thread.is_alive():log.warning('lease heartbeat did not join session=%s',session.session_id)
 
     def _pg_owner(self)->str:
         # Owner identity comes from the authenticated tenant context (or the
