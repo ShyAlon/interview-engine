@@ -25,6 +25,7 @@ from interview_engine.http_service import SessionRegistry, default_program_facto
 from interview_engine.pg_checkpoint import FencedPostgresSaver
 from interview_engine.pg_journal import BufferedJournal
 from interview_engine.pg_session_store import PgSessionStore
+from interview_engine.stop_fence import StopRequested
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
 
 OWNER = 'owner-a'
@@ -155,3 +156,74 @@ def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_pa
     assert state.values.get('submission'), 'restored graph resumes with the published gate state'
     # No provider dispatch on restore: construction with pinned models never
     # preflights, and get_state is a local read.
+
+
+def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_ollama, fake_models):
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=1.0)
+    _OPEN['registries'].append(registry)
+    session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                    model_route='ollama', initial_model='phi4'))
+    committed = store.load_published(SID, OWNER)['control']['sequence']
+
+    # Stop after a completed advance: the quiesced republish is a newer step,
+    # the generation bump fences every later write from this process.
+    registry.stop(SID)
+    assert session.pg_stopped
+    row = store.load_published(SID, OWNER)
+    assert row['control']['stopped'] is True and row['control']['open_input'] is None
+    assert row['control']['sequence'] > committed
+    with pytest.raises(StopRequested):
+        store.publish_step(session.pg_claim, dict(row['control'], sequence=row['control']['sequence'] + 1))
+
+    # Takeover after expiry: the stopped marker is honored, no graph is built.
+    registry.close()
+    time.sleep(1.2)
+    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
+    _OPEN['registries'].append(registry2)
+    restored = registry2.get(SID)
+    assert restored.pg_stopped and restored.open_input is None and restored.program is None
+
+
+def test_pg_application_publish_rolls_back_all_or_nothing(tmp_path, fake_ollama, fake_models, monkeypatch):
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=60.0)
+    _OPEN['registries'].append(registry)
+    session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                    model_route='ollama', initial_model='phi4'))
+    before = store.load_published(SID, OWNER)
+    head_before = store.journal_head(SID, OWNER)
+
+    # Buffer a signal, then inject a failure AFTER the journal insert and
+    # BEFORE the pointer commit, through the registry's own publish path.
+    journal = session.program.progress_journal
+    journal.append(phase_key='intent', stage='interview_turn', label='late', status='started')
+    real = store.publish_step
+
+    def boom(claim, control, **kwargs):
+        kwargs['fault_hook'] = lambda: (_ for _ in ()).throw(RuntimeError('injected mid-transaction failure'))
+        return real(claim, control, **kwargs)
+
+    monkeypatch.setattr(store, 'publish_step', boom)
+    session.sequence += 1
+    with pytest.raises(RuntimeError, match='injected'):
+        registry._save(session)
+
+    # Nothing committed: control, pointer and journal head are exactly the
+    # pre-attempt state, and the buffered page was NOT acknowledged.
+    assert store.load_published(SID, OWNER) == before
+    assert store.journal_head(SID, OWNER) == head_before
+    assert len(journal.pending()) == 1
+
+    # The retry commits the same step cleanly: no partial page, no conflict.
+    monkeypatch.setattr(store, 'publish_step', real)
+    registry._save(session)
+    after = store.load_published(SID, OWNER)
+    assert after['control']['sequence'] == before['control']['sequence'] + 1
+    assert store.journal_head(SID, OWNER) == head_before + 1
+    assert journal.pending() == []

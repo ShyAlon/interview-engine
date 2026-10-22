@@ -276,38 +276,43 @@ class PgSessionStore:
             raise PublicationConflict(
                 f"stale or conflicting publication for {claim.session_id}: "
                 f"sequence {new_seq} <= committed {prior_seq}")
-        pages = list(journal_pages or [])
-        if journal_page is not None:
-            if journal_cursor is None:
-                self.conn.rollback()
-                raise ValueError("journal page requires its cursor")
-            pages.append((journal_cursor, journal_page))
-        for cursor, page in pages:
-            inserted = self.conn.execute(
-                "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
-                " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
-                " ON CONFLICT (session_id, cursor) DO NOTHING RETURNING 1",
-                {**params, "cursor": cursor, "page": json.dumps(page)}).fetchone()
-            if inserted is None:
-                existing = self.conn.execute(
-                    "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
-                    {**params, "cursor": cursor}).fetchone()
-                self.conn.rollback()
-                if existing is None or existing["page"] != page:
+        # All-or-nothing: any failure after the guard lock rolls the whole
+        # step back - journal pages, control and pointer move together or not
+        # at all, and the connection is never left in an aborted transaction.
+        try:
+            pages = list(journal_pages or [])
+            if journal_page is not None:
+                if journal_cursor is None:
+                    raise ValueError("journal page requires its cursor")
+                pages.append((journal_cursor, journal_page))
+            for cursor, page in pages:
+                inserted = self.conn.execute(
+                    "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+                    " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
+                    " ON CONFLICT (session_id, cursor) DO NOTHING RETURNING 1",
+                    {**params, "cursor": cursor, "page": json.dumps(page)}).fetchone()
+                if inserted is None:
+                    existing = self.conn.execute(
+                        "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
+                        {**params, "cursor": cursor}).fetchone()
+                    if existing is None or existing["page"] != page:
+                        raise PublicationConflict(
+                            f"journal cursor {cursor} for {claim.session_id} already holds a different page")
                     raise PublicationConflict(
-                        f"journal cursor {cursor} for {claim.session_id} already holds a different page")
-                raise PublicationConflict(
-                    f"journal cursor {cursor} for {claim.session_id} belongs to an earlier step")
-        if fault_hook is not None:
-            fault_hook()   # test-only: inject a failure between journal insert and pointer commit
-        self.conn.execute(
-            "UPDATE engine_sessions"
-            " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
-            "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
-            "     updated_at = %(now)s"
-            " WHERE session_id = %(sid)s",
-            {**params, "control": json.dumps(control), "tid": published_thread_id,
-             "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
+                        f"journal cursor {cursor} for {claim.session_id} belongs to an earlier step")
+            if fault_hook is not None:
+                fault_hook()   # test-only: inject a failure between journal insert and pointer commit
+            self.conn.execute(
+                "UPDATE engine_sessions"
+                " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
+                "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
+                "     updated_at = %(now)s"
+                " WHERE session_id = %(sid)s",
+                {**params, "control": json.dumps(control), "tid": published_thread_id,
+                 "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
+        except BaseException:
+            self.conn.rollback()
+            raise
         self.conn.commit()
 
     def journal_head(self, session_id: str, owner_id: str) -> int:
