@@ -25,7 +25,8 @@ def admission_gateway(gateway,*,required=False):
 def _cloud():
     return _required.get() or os.environ.get('VMODEL_TENANT_OWNER') is not None or os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1'
 
-def _reserve(stage,provider,model,messages,max_output_tokens):
+def _resolve_gateway():
+    """The request-bound admission gateway for this execution context, or None."""
     gateway=_gateway.get()
     # A multi-owner HTTP service must never use an ambient process-wide FD.
     # Its authority must be installed for this exact request/job context.
@@ -42,6 +43,11 @@ def _reserve(stage,provider,model,messages,max_output_tokens):
                 _socket_fd=os.environ['VMODEL_ADMISSION_FD']
             except Exception as exc:raise AdmissionUnavailable('invalid inherited admission descriptor') from exc
         gateway=_socket_gateway
+    return gateway
+
+
+def _reserve(stage,provider,model,messages,max_output_tokens):
+    gateway=_resolve_gateway()
     if gateway is None:raise AdmissionUnavailable('cloud provider admission is unavailable')
     # Gateway computes/rejects exact serialized input bound and pinned price.
     attempt=gateway.reserve(attempt_id=uuid.uuid4().hex,stage=stage,provider=provider,
@@ -69,9 +75,11 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
     from . import model_config
     staging=model_config._response_staging.get()
     if staging is not None:
-        key=(stage,item or '')
-        log=staging.store.staged_log(staging.session_id,staging.generation,stage=stage,item=key[1])
-        idx=staging.cursors.get(key,0)
+        node=model_config.StagingContext.current_node()
+        point=staging.execution_point
+        key,idx=staging.next_cursor(node,stage,item or '')
+        log=staging.store.staged_log(staging.session_id,staging.generation,
+            execution_point=point,node=node,stage=stage,item=key[3])
         if idx<len(log):
             staging.cursors[key]=idx+1
             row=log[idx]
@@ -79,12 +87,30 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
             fingerprint=model_config._staging_request_sha(
                 type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item)
             if row['request_sha256']!=fingerprint:
-                # The deterministic replay diverged (e.g. code changed mid-session):
+                # The replay diverged (e.g. code changed mid-session):
                 # never mix old staged results into a new execution path.
                 raise UserFacingError(f"stage '{stage}': the staged provider result does not match this request.",
                     "the session's execution path changed between the crash and the resume.",
                     "Resume the session with the original build or start a new session.")
             if row['response'] is not None:
+                # Replaying a completed result: its billing must be settled BEFORE
+                # the graph consumes it. If the process died after complete/before
+                # settle, settle now from the STAGED trusted usage (attempt-keyed
+                # idempotent on the ledger: settled is a no-op, conflicting usage
+                # raises). No usable result while billing is unreconciled.
+                if row['attempt_id']:
+                    gw=_resolve_gateway()
+                    settle=getattr(gw,'settle_staged',None) if gw is not None else None
+                    if settle is None:
+                        raise UserFacingError(f"stage '{stage}': a staged result's billing state cannot be verified.",
+                            "the admission gateway cannot settle the recorded attempt for the replayed result.",
+                            "Reconcile attempt " + str(row['attempt_id']) + " before resuming.")
+                    try:
+                        settle(row['attempt_id'],row['usage'])
+                    except Exception as exc:
+                        raise UserFacingError(f"stage '{stage}': the staged result's billing is unreconciled.",
+                            "settling the recorded attempt for the replayed result failed: " + str(exc),
+                            "Reconcile attempt " + str(row['attempt_id']) + " against the provider ledger before resuming.")
                 from langchain_core.load import loads
                 model_config._log_llm({"event":"llm_call_staged_replay","provider":provider,"model":model,"stage":stage,**( {"item":item} if item else {})})
                 return loads(__import__('json').dumps(row['response']))
@@ -97,10 +123,10 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
         ordinal=len(log)
         request_sha=model_config._staging_request_sha(
             type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item)
-        staging.store.record_dispatch(staging.claim,stage=stage,item=key[1],ordinal=ordinal,
+        staging.store.record_dispatch(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
             request_sha256=request_sha,provider=provider,model=model)
         gateway,attempt=_reserve(stage,provider,model,messages,max_output_tokens)
-        staging.store.bind_attempt(staging.claim,stage=stage,item=key[1],ordinal=ordinal,
+        staging.store.bind_attempt(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
             attempt_id=getattr(attempt,'attempt_id',None) or str(attempt))
         try:
             response=call()
@@ -112,7 +138,7 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
                     "Reconcile the billed attempt before retrying.")
             # Raw result + measured usage durable BEFORE the settle handoff and any
             # interpretation: crash windows after this point replay, never rebill.
-            staging.store.complete_staged(staging.claim,stage=stage,item=key[1],ordinal=ordinal,
+            staging.store.complete_staged(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
                 response=payload,usage=model_config._usage_of(response))
             # Missing usage is the gateway's responsibility: hold, never assume zero.
             gateway.settle(attempt,response)

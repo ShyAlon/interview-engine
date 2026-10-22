@@ -473,19 +473,53 @@ _response_staging = _contextvars.ContextVar("response_staging", default=None)
 
 
 class StagingContext:
-    """Per-application-instance staging state. `cursors` maps (stage,item) to the next
-    ordinal to consume from the durable replay log. A fresh instance after a crash
-    starts at 0 and replays the log; within one process the cursor advances, so an
-    intentional repeat of an identical prompt is a NEW logical call (new paid call),
-    never a replay. Identity = (session, generation, stage, item, ordinal) - durable,
-    not a prompt cache."""
+    """Per-application-instance staging state.
+
+    Logical call identity = (session, generation, execution_point, node, stage,
+    item, ordinal). `execution_point` is the DURABLE checkpoint id the graph
+    execution resumed from ('bootstrap' before the first checkpoint): the
+    application sets it from its pinned config before each advance, and the
+    checkpoint saver advances it as super-steps commit, so a crash-resume pins
+    the same published checkpoint and re-executes the interrupted node under the
+    SAME point (its calls replay), while a new turn resumes from a NEW committed
+    checkpoint (identical prompts are new paid calls, never replays). `node` is
+    the issuing graph node from the LangGraph runnable config, so two parallel
+    nodes under one execution point cannot collide. `ordinal` is the position of
+    the call within that node execution's (stage,item) sequence: `cursors` maps
+    (execution_point, node, stage, item) to the next ordinal. A fresh instance
+    after a crash starts its cursors at 0 and replays the durable log under the
+    pinned execution point; nothing about the identity is process-local."""
 
     def __init__(self, session_id: str, store, claim):
         self.session_id = session_id
         self.store = store
         self.claim = claim
         self.generation = claim.generation
+        self.execution_point = 'bootstrap'
         self.cursors: dict = {}
+
+    def set_execution_point(self, checkpoint_id):
+        """Advance the durable execution position. Called by the application
+        before each graph advance (from the pinned resume config) and by the
+        checkpoint saver after each super-step commit."""
+        self.execution_point = str(checkpoint_id) if checkpoint_id else 'bootstrap'
+
+    @staticmethod
+    def current_node() -> str:
+        """The issuing graph node from LangGraph's runnable config contextvar
+        (checkpoint_ns prefix). '' outside graph execution (direct calls)."""
+        try:
+            from langchain_core.runnables.config import var_child_runnable_config
+            cfg = var_child_runnable_config.get(None) or {}
+            ns = (cfg.get('configurable') or {}).get('checkpoint_ns') or ''
+            return ns.split(':')[0] if ns else ''
+        except Exception:
+            return ''
+
+    def next_cursor(self, node: str, stage: str, item: str):
+        key = (self.execution_point, node, stage, item)
+        idx = self.cursors.get(key, 0)
+        return key, idx
 
 
 def _staging_request_sha(cfg, messages, stage: str, item) -> str:
@@ -493,9 +527,18 @@ def _staging_request_sha(cfg, messages, stage: str, item) -> str:
     serialized messages. A replay matches only the identical paid call."""
     import hashlib, json
     from langchain_core.messages import BaseMessage, message_to_dict
+    def _wire(message):
+        # Semantic request content only: the provider never sees the locally
+        # generated message id, and a crash-resume rebuilds messages with fresh
+        # ids - including it would fingerprint-pause a legitimate replay.
+        if not isinstance(message, BaseMessage):
+            return str(message)
+        d = message_to_dict(message)
+        d.get('data', d).pop('id', None)
+        return d
     body = json.dumps({"provider": cfg.provider, "model": cfg.model, "stage": stage,
                        "item": item, "max_tokens": _max_tokens_limit(cfg.max_tokens),
-                       "messages": [message_to_dict(m) if isinstance(m, BaseMessage) else str(m) for m in messages]},
+                       "messages": [_wire(m) for m in messages]},
                       sort_keys=True)
     return hashlib.sha256(body.encode()).hexdigest()
 

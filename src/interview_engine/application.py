@@ -40,6 +40,8 @@ class InterviewApplication:
             import psycopg
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
             pg_conn=psycopg.connect(pg_store.conn.info.dsn,autocommit=True)
+            from . import model_config as _mc
+            self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
             saver=FencedPostgresSaver(pg_conn,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
                 serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
@@ -63,6 +65,7 @@ class InterviewApplication:
             from .progress_journal import ProgressJournal
             self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
         self._pg_store=pg_store;self._pg_claim=pg_claim
+        if not hasattr(self,'_staging'):self._staging=None
         def journal_signal(ev):
             # The interview graph emits intent and ConOps stages through one bus.
             phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
@@ -89,9 +92,8 @@ class InterviewApplication:
         # PR B staged provider responses: DB-backed sessions stage every usable
         # provider response durably before interpretation (replay, never rebill).
         staging_token=None
-        if self._pg_store is not None:
-            staging_token=model_config._response_staging.set(
-                model_config.StagingContext(self.session_id,self._pg_store,self._pg_claim))
+        if self._staging is not None:
+            staging_token=model_config._response_staging.set(self._staging)
         heartbeat_token=model_config._progress_heartbeat.set(self._heartbeat_signal)
         from .stop_fence import _stopped_usage
         def stopped_usage(response,*,stage,provider,model):
@@ -162,6 +164,20 @@ class InterviewApplication:
         while not self.finished:
             try:
                 with self._runtime_context():
+                    if self._staging is not None:
+                        # Resume point for this advance: the pinned checkpoint when
+                        # this program was restored, otherwise the session's
+                        # published checkpoint pointer ('bootstrap' before the
+                        # first). Every call of the advance stages under THIS point:
+                        # unpublished mid-advance checkpoints are never served on
+                        # restore, so a crash anywhere in the advance resumes from
+                        # the same published point and replays the whole advance's
+                        # call sequence in order.
+                        point = self.cfg['configurable'].get('checkpoint_id')
+                        if point is None:
+                            published = self._pg_store.load_published(self.session_id, self._pg_claim.owner_id)
+                            point = published['published_checkpoint_id'] if published else None
+                        self._staging.set_execution_point(point)
                     self.result=self.graph.invoke(self.state,self.cfg)
                     check_execution()
             except Exception:
