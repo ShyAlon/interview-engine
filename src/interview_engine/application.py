@@ -90,7 +90,8 @@ class InterviewApplication:
         # provider response durably before interpretation (replay, never rebill).
         staging_token=None
         if self._pg_store is not None:
-            staging_token=model_config._response_staging.set((self.session_id,self._pg_store,self._pg_claim))
+            staging_token=model_config._response_staging.set(
+                model_config.StagingContext(self.session_id,self._pg_store,self._pg_claim))
         heartbeat_token=model_config._progress_heartbeat.set(self._heartbeat_signal)
         from .stop_fence import _stopped_usage
         def stopped_usage(response,*,stage,provider,model):

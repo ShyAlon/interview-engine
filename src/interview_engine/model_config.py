@@ -466,10 +466,26 @@ def describe_models() -> str:
 import contextvars as _contextvars
 
 # PR B staged provider responses: set by the application when a DB-backed session
-# runs. (session_id, PgSessionStore, SessionClaim) - when unset, behavior is exactly
-# the pre-staging path. The dispatch guard (_db_dispatch_block) is unchanged; staging
-# is what will make lifting it safe, under a separate approved enable.
+# runs. Holds a StagingContext; when unset, behavior is exactly the pre-staging path.
+# The dispatch guard (_db_dispatch_block) is unchanged; staging is what will make
+# lifting it safe, under a separate approved enable.
 _response_staging = _contextvars.ContextVar("response_staging", default=None)
+
+
+class StagingContext:
+    """Per-application-instance staging state. `cursors` maps (stage,item) to the next
+    ordinal to consume from the durable replay log. A fresh instance after a crash
+    starts at 0 and replays the log; within one process the cursor advances, so an
+    intentional repeat of an identical prompt is a NEW logical call (new paid call),
+    never a replay. Identity = (session, generation, stage, item, ordinal) - durable,
+    not a prompt cache."""
+
+    def __init__(self, session_id: str, store, claim):
+        self.session_id = session_id
+        self.store = store
+        self.claim = claim
+        self.generation = claim.generation
+        self.cursors: dict = {}
 
 
 def _staging_request_sha(cfg, messages, stage: str, item) -> str:
@@ -496,16 +512,6 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
 
     cfg = for_stage(stage)
     call_timeout = _guard_limits()[0]
-    staging = _response_staging.get()
-    request_sha = _staging_request_sha(cfg, messages, stage, item) if staging else None
-    if staging is not None:
-        session_id, store, claim = staging
-        staged = store.load_staged_response(session_id, claim.owner_id, stage=stage, request_sha256=request_sha)
-        if staged is not None:
-            from langchain_core.load import loads
-            _log_llm({"event": "llm_call_staged_replay", "provider": cfg.provider, "model": cfg.model,
-                      "stage": stage, **({"item": item} if item else {})})
-            return loads(__import__("json").dumps(staged["response"]))
     for attempt in (1, 2):
         adaptive_deadline, stage_median = _watchdog().deadline(stage)
         effective_timeout = min(call_timeout, adaptive_deadline)
@@ -518,7 +524,7 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
         t0 = time.monotonic()
         try:
             _set_model_timeout(chat_model, effective_timeout)
-            resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
+            resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,item=item,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
             elapsed = time.monotonic() - t0
             _watchdog().complete(stage, elapsed)
             _check_truncated(resp, stage, cfg)
@@ -538,16 +544,6 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
                     "are recorded in llm-calls.jsonl.", guidance)
             _log_llm({"event": "llm_call_end", **base, "latency_s": round(time.monotonic() - t0, 2),
                       "usage": _usage_of(resp)})
-            if staging is not None:
-                from langchain_core.load import dumpd
-                session_id, store, claim = staging
-                # Durably stage the usable response BEFORE the graph interprets it: a
-                # crash from here on replays these bytes instead of re-billing. The
-                # in-memory window between provider completion and this insert is the
-                # remaining exposure - closed only by provider-side idempotency keys.
-                store.stage_response(claim, stage=stage, item=item, request_sha256=request_sha,
-                                     payload=dumpd(resp), usage=_usage_of(resp),
-                                     provider=cfg.provider, model=cfg.model, attempt=attempt)
             return resp
         except TimeoutError:
             elapsed = time.monotonic() - t0

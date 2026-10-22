@@ -37,11 +37,12 @@ MIRRORED_JOURNAL_DDL = """CREATE TABLE engine_session_journal(
 # Mirror of 20261022160000_staged_provider_responses.sql (PR B staged provider
 # responses), without the auth FK/RLS. Provider calls in DB mode stage responses here.
 MIRRORED_STAGING_DDL = """CREATE TABLE staged_provider_responses(
- owner_id UUID NOT NULL, session_id TEXT NOT NULL, stage TEXT NOT NULL, item TEXT,
- request_sha256 TEXT NOT NULL, response JSONB NOT NULL, usage JSONB,
- provider TEXT NOT NULL, model TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
- created_at DOUBLE PRECISION NOT NULL,
- PRIMARY KEY (session_id, stage, request_sha256))"""
+ owner_id UUID NOT NULL, session_id TEXT NOT NULL, generation INTEGER NOT NULL,
+ stage TEXT NOT NULL, item TEXT NOT NULL DEFAULT '', ordinal INTEGER NOT NULL,
+ attempt_id TEXT, request_sha256 TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+ dispatched_at DOUBLE PRECISION NOT NULL, response JSONB, usage JSONB,
+ completed_at DOUBLE PRECISION,
+ PRIMARY KEY (session_id, generation, stage, item, ordinal))"""
 
 OWNER_A = '00000000-0000-0000-0000-000000000001'
 OWNER_B = '00000000-0000-0000-0000-000000000002'
