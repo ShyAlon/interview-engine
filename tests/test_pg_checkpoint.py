@@ -1,0 +1,136 @@
+import time
+import pytest
+
+pgserver=pytest.importorskip('pgserver',reason='pgserver not installed: PG checkpoint tests skip')
+pgcp=pytest.importorskip('langgraph.checkpoint.postgres',reason='langgraph-checkpoint-postgres not installed')
+
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from interview_engine.pg_checkpoint import FencedPostgresSaver,LeaseFence
+from interview_engine.stop_fence import StopRequested
+
+LEASE_DDL="""CREATE TABLE engine_sessions(
+ session_id TEXT PRIMARY KEY, generation BIGINT NOT NULL,
+ lease_epoch BIGINT NOT NULL, lease_expires_at DOUBLE PRECISION NOT NULL)"""
+
+def server(tmp_path):
+    return pgserver.get_server(str(tmp_path/'pgdata'))
+
+def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
+    ctx=PostgresSaver.from_conn_string(uri)
+    saver=ctx.__enter__()
+    saver.setup()
+    saver.conn.execute(LEASE_DDL)
+    saver.conn.execute("INSERT INTO engine_sessions VALUES (%s,%s,%s,%s)",
+        (session,generation,epoch,time.time()+expire))
+    fenced=FencedPostgresSaver(saver.conn,lease=LeaseFence(session,generation,epoch),
+        serde=JsonPlusSerializer())
+    return ctx,fenced
+
+def cp(i):
+    return {'v':4,'ts':f'2026-10-22T08:0{i}:00+00:00','id':f'00000000-0000-4000-8000-{i:012d}',
+            'channel_values':{'messages':[f'm{i}']},'channel_versions':{'messages':str(i)},
+            'versions_seen':{},'updated_channels':['messages']}
+META={'source':'update','step':1,'parents':{}}
+def cfg(tid,cid=''):
+    return {'configurable':{'thread_id':tid,'checkpoint_ns':'','checkpoint_id':cid}}
+
+def test_fenced_writes_round_trip(tmp_path):
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.put_writes(c1,[('messages','w1')],'taskA')
+        got=saver.get_tuple(c1)
+        assert got is not None and [w[2] for w in got.pending_writes]==['w1']
+    finally:ctx.__exit__(None,None,None)
+
+def test_stale_generation_raises_and_persists_nothing(tmp_path):
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.conn.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
+        with pytest.raises(StopRequested):
+            saver.put_writes(c1,[('messages','stale')],'taskB')
+        rows=saver.conn.execute("SELECT count(*) AS n FROM checkpoint_writes WHERE task_id='taskB'").fetchone()
+        assert rows['n']==0
+    finally:ctx.__exit__(None,None,None)
+
+def test_same_key_collision_first_writer_wins(tmp_path):
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.put_writes(c1,[('messages','legit')],'taskA')
+        saver.put_writes(c1,[('messages','overwrite-attempt')],'taskA')
+        got=saver.get_tuple(c1)
+        assert [w[2] for w in got.pending_writes]==['legit']
+    finally:ctx.__exit__(None,None,None)
+
+def test_reserved_channel_guarded_upsert(tmp_path):
+    from langgraph.checkpoint.base import INTERRUPT
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.put_writes(c1,[(INTERRUPT,'first')],'taskA')
+        saver.put_writes(c1,[(INTERRUPT,'updated')],'taskA')
+        got=saver.get_tuple(c1)
+        assert [w[2] for w in got.pending_writes if w[1]==INTERRUPT]==['updated']
+    finally:ctx.__exit__(None,None,None)
+
+def test_reserved_upsert_still_fenced(tmp_path):
+    from langgraph.checkpoint.base import INTERRUPT
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.put_writes(c1,[(INTERRUPT,'first')],'taskA')
+        saver.conn.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
+        with pytest.raises(StopRequested):
+            saver.put_writes(c1,[(INTERRUPT,'stale-update')],'taskA')
+        got=saver.get_tuple(c1)
+        assert [w[2] for w in got.pending_writes if w[1]==INTERRUPT]==['first']
+    finally:ctx.__exit__(None,None,None)
+
+def test_takeover_keeps_prior_epoch_work(tmp_path):
+    srv=server(tmp_path);ctx,saver=make_saver(srv.get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.put_writes(c1,[('messages','epoch1-result')],'taskA')
+        # takeover: bump + new lease identity, new saver handle
+        saver.conn.execute("UPDATE engine_sessions SET generation=2,lease_epoch=2 WHERE session_id='s1'")
+        take=FencedPostgresSaver(saver.conn,lease=LeaseFence('s1',2,2),serde=JsonPlusSerializer())
+        take.put_writes(c1,[('messages','epoch2-result')],'taskB')
+        got=take.get_tuple(c1)
+        vals={w[0]:w[2] for w in got.pending_writes}
+        assert vals=={'taskA':'epoch1-result','taskB':'epoch2-result'}
+    finally:ctx.__exit__(None,None,None)
+
+def test_expired_lease_raises(tmp_path):
+    ctx,saver=make_saver(server(tmp_path).get_uri(),expire=-1)
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        with pytest.raises(StopRequested):
+            saver.put_writes(c1,[('messages','x')],'taskA')
+    finally:ctx.__exit__(None,None,None)
+
+def test_graph_resume_through_fenced_saver(tmp_path):
+    from typing_extensions import TypedDict
+    from langgraph.graph import StateGraph,START,END
+    from langgraph.types import interrupt
+    class S(TypedDict):steps:list[str]
+    def first(s):return {'steps':s['steps']+['first']}
+    def second(s):
+        answer=interrupt({'ask':'name?'})
+        return {'steps':s['steps']+['second:'+answer]}
+    g=StateGraph(S);g.add_node('first',first);g.add_node('second',second)
+    g.add_edge(START,'first');g.add_edge('first','second');g.add_edge('second',END)
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        graph=g.compile(checkpointer=saver)
+        c=cfg('session-x')
+        hit=graph.invoke({'steps':[]},c)
+        assert '__interrupt__' in hit
+        from langgraph.types import Command
+        done=graph.invoke(Command(resume='shy'),c)
+        assert done['steps']==['first','second:shy']
+        latest=saver.get_tuple(c)  # completed thread keeps its fenced history
+        assert latest is not None
+    finally:ctx.__exit__(None,None,None)
