@@ -104,11 +104,14 @@ def test_takeover_keeps_prior_epoch_work(tmp_path):
     finally:ctx.__exit__(None,None,None)
 
 def test_expired_lease_raises(tmp_path):
-    ctx,saver=make_saver(server(tmp_path).get_uri(),expire=-1)
+    ctx,saver=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.conn.execute("UPDATE engine_sessions SET lease_expires_at=%s WHERE session_id='s1'",(time.time()-1,))
         with pytest.raises(StopRequested):
             saver.put_writes(c1,[('messages','x')],'taskA')
+        with pytest.raises(StopRequested):
+            saver.put(cfg('t'),cp(2),META,{'messages':2})
     finally:ctx.__exit__(None,None,None)
 
 def test_graph_resume_through_fenced_saver(tmp_path):
@@ -133,4 +136,17 @@ def test_graph_resume_through_fenced_saver(tmp_path):
         assert done['steps']==['first','second:shy']
         latest=saver.get_tuple(c)  # completed thread keeps its fenced history
         assert latest is not None
+    finally:ctx.__exit__(None,None,None)
+
+def test_stale_same_id_reput_cannot_mutate_metadata_or_payload(tmp_path):
+    ctx,saver=make_saver(server(tmp_path).get_uri())
+    try:
+        c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
+        saver.conn.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
+        forged=dict(cp(1));forged['ts']='2030-01-01T00:00:00+00:00'
+        with pytest.raises(StopRequested):
+            saver.put(cfg('t'),forged,{'source':'update','step':9,'parents':{'x':'y'}},{'messages':1})
+        got=PostgresSaver(saver.conn,serde=JsonPlusSerializer()).get_tuple(c1)
+        assert got.checkpoint['ts']=='2026-10-22T08:01:00+00:00'
+        assert got.metadata==META
     finally:ctx.__exit__(None,None,None)

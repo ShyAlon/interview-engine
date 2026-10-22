@@ -8,12 +8,13 @@ unexpired lease; a stop/generation bump updates the same row, so bump and
 write serialize on the row lock with no epsilon window. A failed guard raises
 StopRequested - nothing is silently dropped.
 
-put() is deliberately NOT row-fenced: checkpoint and blob payloads are
-immutable under the library's own upsert semantics (verified against
-langgraph-checkpoint-postgres 3.1.2), so a stale writer can only create
-orphaned, never-referenced checkpoints. Publication is fenced separately by
-the owning service's guarded transaction. put_writes is the one mutation that
-can target an already-published checkpoint id, so it is the fenced path.
+put() is fenced too: the library's checkpoints upsert is ON CONFLICT DO
+UPDATE, so a same-id re-put OVERWRITES the checkpoint payload and metadata
+(blob bytes are safe - blobs are DO NOTHING and channel values live there).
+A stale writer that knows a published checkpoint id could otherwise rewrite
+its metadata/structure. The guard is the first statement of an explicit
+transaction holding the lease row lock to commit, so a stop/takeover bump
+serializes against the whole put.
 
 Channel semantics mirror the base saver exactly: reserved channels (those in
 WRITES_IDX_MAP - error/interrupt/resume) guarded-UPSERT, regular task writes
@@ -124,6 +125,68 @@ class FencedPostgresSaver(PostgresSaver):
             self._write_conn.rollback()
             raise StopRequested('session lease lost (stop or takeover)')
         return row
+
+    def _guard_lock(self):
+        row = self._write_conn.execute(
+            f"SELECT 1 FROM {self._lease_table} WHERE session_id = %(fence_session)s"
+            " AND generation = %(fence_generation)s AND lease_epoch = %(fence_epoch)s"
+            " AND lease_expires_at > %(fence_now)s FOR UPDATE",
+            self._lease.params()).fetchone()
+        guard = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row is not None else 0
+        if guard == 0:
+            self._write_conn.rollback()
+            raise StopRequested('session lease lost (stop or takeover)')
+
+    def put(self, config, checkpoint, metadata, new_versions):
+        # Fenced put, mirroring the base saver byte-for-byte: primitive channel
+        # values inline in the checkpoints row, everything else in
+        # checkpoint_blobs (DO NOTHING - immutable), checkpoints upsert (DO
+        # UPDATE). The lease row lock is held for the whole transaction, so a
+        # stop/takeover bump serializes against every row of the put.
+        from langgraph.checkpoint.serde.types import _DeltaSnapshot
+        from langgraph.checkpoint.base import get_serializable_checkpoint_metadata
+        from psycopg.types.json import Jsonb
+        configurable = config['configurable'].copy()
+        thread_id = configurable.pop('thread_id')
+        checkpoint_ns = configurable.pop('checkpoint_ns')
+        checkpoint_id = configurable.pop('checkpoint_id', None)
+        copy = checkpoint.copy()
+        copy['channel_values'] = copy['channel_values'].copy()
+        blob_values = {}
+        for k, v in checkpoint['channel_values'].items():
+            if isinstance(v, _DeltaSnapshot):
+                blob_values[k] = copy['channel_values'].pop(k)
+                copy['channel_values'][k] = True
+            elif v is None or isinstance(v, (str, int, float, bool)):
+                pass
+            else:
+                blob_values[k] = copy['channel_values'].pop(k)
+        blob_versions = {k: v for k, v in new_versions.items() if k in blob_values}
+        with self._write_lock:
+            try:
+                self._guard_lock()
+                with self._write_conn.cursor() as cur:
+                    if blob_versions:
+                        cur.executemany(
+                            "INSERT INTO checkpoint_blobs (thread_id, checkpoint_ns, channel, version, type, blob)"
+                            " VALUES (%s,%s,%s,%s,%s,%s)"
+                            " ON CONFLICT (thread_id, checkpoint_ns, channel, version) DO NOTHING",
+                            [(thread_id, checkpoint_ns, k, str(blob_versions[k]),
+                              *self.serde.dumps_typed(blob_values[k])) for k in blob_versions])
+                    cur.execute(
+                        "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id,"
+                        " parent_checkpoint_id, checkpoint, metadata) VALUES (%s,%s,%s,%s,%s,%s)"
+                        " ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET"
+                        " checkpoint = EXCLUDED.checkpoint, metadata = EXCLUDED.metadata",
+                        (thread_id, checkpoint_ns, checkpoint['id'], checkpoint_id,
+                         Jsonb(copy), Jsonb(get_serializable_checkpoint_metadata(config, metadata))))
+            except BaseException:
+                self._write_conn.rollback()
+                raise
+            else:
+                self._write_conn.commit()
+        return {'configurable': {'thread_id': thread_id, 'checkpoint_ns': checkpoint_ns,
+                                 'checkpoint_id': checkpoint['id']}}
 
     def put_writes(self, config, writes, task_id, task_path=''):
         # Same contract as the base saver, each write its own guarded insert so
