@@ -7,8 +7,10 @@ text. Control decisions use protocol enums and identifiers exclusively.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
+import threading
+import time
 from pathlib import Path
 import hmac
 import logging
@@ -47,9 +49,13 @@ class EngineSession:
     write_lock: RLock = field(default_factory=RLock, repr=False, compare=False)
     published: EngineSnapshot | None = field(default=None, repr=False, compare=False)
     stop_fence: object | None = field(default=None, repr=False, compare=False)
+    pg_claim: object | None = field(default=None, repr=False, compare=False)
+    pg_stopped: bool = field(default=False, repr=False, compare=False)
+    pg_heartbeat_halt: object | None = field(default=None, repr=False, compare=False)
+    pg_heartbeat_thread: object | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> EngineSnapshot:
-        stopped=self.stop_fence.state if self.stop_fence is not None else None
+        stopped=self.stop_fence.state if self.stop_fence is not None else ('STOP_REQUESTED' if self.pg_stopped else None)
         return EngineSnapshot(session_id=self.session_id,task_id=self.task_id,sequence=self.sequence,
             process_status=ProcessStatus[stopped] if stopped else self.status,next_step=NextStep.STOP if stopped else self.next_step,open_input=None if stopped else self.open_input,
             model_route=getattr(self.program,"model_route",None) or (self.request.model_route if self.request else None),
@@ -58,11 +64,100 @@ class EngineSession:
 
 class SessionRegistry:
     """Thread-safe application port behind the HTTP adapter."""
-    def __init__(self,program_factory=None,state_dir:Path|str|None=None):
+    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=30.0,allow_db_provider_dispatch:bool=False):
+        if state_dir is not None and session_store is not None:
+            raise ValueError('choose file or database session persistence, not both')
+        if session_store is not None and program_factory is default_program_factory and not allow_db_provider_dispatch:
+            # PR A invariant: the database persistence path never dispatches to
+            # a provider before staged responses land (PR B). The production
+            # factory preflights and calls real models, so the combination is
+            # refused at construction - before any preflight or model call can
+            # run. Tests opt in explicitly; no config/env/HTTP route enables
+            # database persistence at all (constructor-only wiring).
+            raise ValueError('database session persistence cannot use the production program factory until staged responses land (PR B); pass an explicit isolated program_factory')
+        self._allow_db_dispatch=allow_db_provider_dispatch
         self._sessions: dict[str,EngineSession]={}
         self._program_factory=program_factory
         self._state_dir=Path(state_dir) if state_dir is not None else None
+        self._store=session_store
+        self._owner_id=owner_id
+        if instance_id is None:
+            import socket
+            instance_id=f"{socket.gethostname()}#{os.getpid()}#{uuid4().hex[:8]}"
+        self._instance=instance_id   # execution-instance lease identity, never a bare hostname
+        self._lease_ttl=lease_ttl
         self._lock=RLock()
+
+    def _start_heartbeat(self,session:EngineSession)->None:
+        # While this process serves a session, keep its lease alive so a long
+        # advance cannot be taken over mid-flight. A lost heartbeat (stop or
+        # takeover) marks the session stopped: every later fenced write then
+        # fails closed at the database. Own connection per thread (psycopg
+        # connections are not thread-safe).
+        if self._store is None or session.pg_claim is None:return
+        store=self._store.spawn()
+        claim=session.pg_claim
+        halt=threading.Event()
+        session.pg_heartbeat_halt=halt
+        interval=max(self._lease_ttl/3.0,0.05)
+        def beat():
+            # The lease expiry in every fence statement is the authority: this
+            # loop only extends a live lease. Retries never revive an expired
+            # one (the heartbeat's WHERE clause requires it unexpired), and a
+            # blocked loop lets it lapse - writes then fail closed regardless
+            # of what this thread believed.
+            failures=0
+            try:
+                while not session.pg_stopped and not halt.is_set():
+                    if halt.wait(interval):return   # wakes immediately on close()
+                    if session.pg_stopped:return
+                    try:alive=store.heartbeat(claim,self._lease_ttl)
+                    except Exception:
+                        failures+=1
+                        log.warning('session lease heartbeat failed session=%s failures=%d',claim.session_id,failures,exc_info=True)
+                        if failures>=5:return   # lease expires on its own; fences close
+                        continue
+                    failures=0
+                    if not alive:
+                        session.pg_stopped=True
+                        return
+            finally:
+                store.conn.close()
+        session.pg_heartbeat_thread=threading.Thread(target=beat,daemon=True,name=f"lease-heartbeat-{claim.session_id}")
+        session.pg_heartbeat_thread.start()
+
+    def close(self)->None:
+        # Stop serving: halt every heartbeat, join each thread with a bounded
+        # wait, and leave no connection in use. Leases expire on their own; a
+        # live session can then be claimed by another instance. Fences close
+        # every later write from this process even before expiry.
+        with self._lock:sessions=list(self._sessions.values())
+        deadline=time.monotonic()+max(2*self._lease_ttl,1.0)
+        for session in sessions:
+            if session.pg_heartbeat_halt is not None:session.pg_heartbeat_halt.set()
+        for session in sessions:
+            thread=session.pg_heartbeat_thread
+            if thread is not None:
+                remaining=deadline-time.monotonic()
+                thread.join(timeout=max(remaining,0.05))
+                if thread.is_alive():log.warning('lease heartbeat did not join session=%s',session.session_id)
+        for session in sessions:
+            # Close program-held database connections: no socket outlives the
+            # registry that owns it.
+            saver=getattr(session.program,'saver',None)
+            if saver is not None:
+                try:
+                    if hasattr(saver,'close'):saver.close()
+                    conn=getattr(saver,'conn',None)
+                    if conn is not None:conn.close()
+                except Exception:log.warning('program saver close failed session=%s',session.session_id,exc_info=True)
+
+    def _pg_owner(self)->str:
+        # Owner identity comes from the authenticated tenant context (or the
+        # registry's configured local owner) - never from a client-supplied id.
+        owner=_tenant_owner() or self._owner_id
+        if owner is None:raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'database session persistence requires an owner scope')
+        return str(owner)
 
     @staticmethod
     def _publish(session:EngineSession)->EngineSnapshot:
@@ -76,6 +171,7 @@ class SessionRegistry:
         session=self.get(session_id)
         if session.published is None:raise KeyError(session_id)
         if session.stop_fence is not None and session.stop_fence.state:return session.snapshot()
+        if session.pg_stopped:return session.snapshot()
         return session.published.model_copy(deep=True)
 
     def start(self, request: StartSessionRequest) -> tuple[EngineSession,InteractiveEvent]:
@@ -94,6 +190,20 @@ class SessionRegistry:
             if session.session_id in self._sessions or (self._state_path(session.session_id) is not None and self._state_path(session.session_id).exists()):
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session ID already exists")
             self._sessions[session.session_id]=session
+        if self._store is not None:
+            owner=self._pg_owner()
+            try:self._store.create(session.session_id,session.task_id,owner)
+            except Exception as exc:
+                with self._lock:self._sessions.pop(session.session_id,None)
+                if 'UniqueViolation' in type(exc).__name__ or 'duplicate key' in str(exc):
+                    raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session ID already exists")
+                raise
+            claim=self._store.claim(session.session_id,owner,self._instance,self._lease_ttl)
+            if claim is None:
+                with self._lock:self._sessions.pop(session.session_id,None)
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session lease held by another live instance")
+            session.pg_claim=claim
+            self._start_heartbeat(session)
         self._ensure_stop_fence(session)
         started=self._event(session,EventType.RUN_STARTED)
         try:
@@ -106,7 +216,11 @@ class SessionRegistry:
                 # constructing or invoking the potentially slow program.
                 self._publish(session)
                 if self._program_factory is not None:
-                    session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
+                    with self._dispatch_guard():
+                        if self._store is not None and self._program_factory is default_program_factory:
+                            session.program=self._prepare_program(session,lambda:self._default_pg_program(session,request))
+                        else:
+                            session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
                     log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
                     self._save(session)  # factory/pinned model is now ready, before long advance
                     pending=self._advance(session)
@@ -139,7 +253,7 @@ class SessionRegistry:
                 session=self._load(session_id)
                 if session is not None:self._sessions[session_id]=session
             if session is None: raise KeyError(session_id)
-            if session.published is None and self._state_path(session_id) is not None and self._state_path(session_id).exists():
+            if session.published is None and (self._store is not None or (self._state_path(session_id) is not None and self._state_path(session_id).exists())):
                 self._publish(session)
             return session
 
@@ -151,15 +265,18 @@ class SessionRegistry:
             with self._control_commit(session):
                 session.sequence+=1;session.phase_id=phase_id
                 session.status=status;session.next_step=next_step;session.open_input=input_request;self._save(session)
+                if session.pg_stopped:
+                    from .stop_fence import StopRequested
+                    raise StopRequested('session stop requested; publish rejected')
                 self._publish(session)
                 return self._event(session,event_type,input_request=input_request)
 
     def respond(self, session_id: str, response: InputResponse) -> tuple[InteractiveEvent,EngineSnapshot]:
         session=self.get(session_id)
-        if session.stop_fence is not None and session.stop_fence.requested:
+        if (session.stop_fence is not None and session.stop_fence.requested) or session.pg_stopped:
             raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'session stop requested; inputs are disabled')
         with session.write_lock:
-            if session.stop_fence is not None and session.stop_fence.requested:
+            if (session.stop_fence is not None and session.stop_fence.requested) or session.pg_stopped:
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'session stop requested; inputs are disabled')
             if response.input_id in session.responses:
                 if session.responses[response.input_id] == response:
@@ -207,6 +324,9 @@ class SessionRegistry:
                         else:
                             session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
                     self._save(session)
+                    if session.pg_stopped:
+                        session.open_input=None
+                        return accepted,session.snapshot()
                     return accepted,self._publish(session)
             except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
                 session.open_input=None
@@ -241,7 +361,8 @@ class SessionRegistry:
             if self._program_factory is default_program_factory:
                 from .application import InterviewApplication
                 candidate=self._prepare_program(session,lambda:InterviewApplication(session.session_id,session.task_id,session.request.idea,
-                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target))
+                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target,
+                    pg_store=self._store,pg_claim=session.pg_claim))
                 # Read the same durable graph thread; never invoke a model during preflight.
                 checkpoint=candidate.graph.get_state(candidate.cfg)
                 if not checkpoint or not checkpoint.values:
@@ -277,6 +398,16 @@ class SessionRegistry:
 
     def progress(self, session_id: str, after: int = 0, limit: int = 100):
         # Never acquire the registry's long-lived graph/control lock here.
+        if self._store is not None:
+            from vmodel_contracts.progress_signal import ProgressPage, ProgressSignal
+            published=self._store.load_published(session_id,self._pg_owner())
+            if published is None or published['control'] is None:
+                # Unpublished and foreign rows are indistinguishable: no
+                # existence oracle through the progress API.
+                raise KeyError(session_id)
+            rows=self._store.read_journal(session_id,self._pg_owner(),after,limit)
+            events=[ProgressSignal.model_validate(r['page']) for r in rows]
+            return ProgressPage(events=events, next_cursor=events[-1].cursor if events else after)
         from .progress_journal import ProgressJournal
         self._state_path(session_id)  # validate cloud UUID before any journal path
         root = self._state_dir
@@ -303,6 +434,17 @@ class SessionRegistry:
             session.stop_fence.check(session.stop_fence.generation)
             yield
 
+    def _dispatch_guard(self):
+        # Database persistence never dispatches providers before PR B, no
+        # matter which program factory was injected. The default production
+        # factory is refused at construction outright; this guard catches any
+        # other factory's program the moment it tries to preflight, build a
+        # chat model, or invoke one. The internal test opt-in disables it.
+        if self._store is not None and not self._allow_db_dispatch:
+            from .model_config import db_provider_dispatch_blocked
+            return db_provider_dispatch_blocked()
+        return nullcontext()
+
     @staticmethod
     def _prepare_program(session,build):
         # Constructors/preflight can touch per-session files. Count them as
@@ -314,13 +456,54 @@ class SessionRegistry:
             return program
 
     def _advance(self,session,response=None):
-        if session.stop_fence is None:return session.program.advance() if response is None else session.program.advance(response)
+        with self._dispatch_guard():
+            return self._advance_guarded(session,response)
+
+    def _advance_guarded(self,session,response=None):
+        if session.stop_fence is None:
+            try:return session.program.advance() if response is None else session.program.advance(response)
+            except Exception as exc:
+                # A graph write that dies at the database fence means this
+                # session lost its lease (stop or takeover): say so on the
+                # session instead of leaving it looking live.
+                from .stop_fence import StopRequested
+                if self._store is not None and isinstance(exc,StopRequested):session.pg_stopped=True
+                raise
         with session.stop_fence.running() as generation:
             result=session.program.advance() if response is None else session.program.advance(response)
             session.stop_fence.check(generation)
             return result
 
     def stop(self,session_id):
+        if self._store is not None:
+            owner=self._pg_owner()
+            # One owner-authorized transaction: the quiesced control (when this
+            # process serves the session) and the generation bump commit
+            # together. No execution lease is needed, no worker advance is
+            # awaited, and a failed worker-side publication cannot prevent the
+            # stop. After the bump every fenced write from the old generation
+            # fails, so a takeover never resumes a stopped session.
+            with self._lock:session=self._sessions.get(session_id)
+            control=None
+            if session is not None:
+                # Quiescing is a new step: clearing the open input changes the
+                # control payload, so it carries a NEWER sequence. The CAS
+                # publish rejects a same-sequence payload change as a
+                # conflicting replay.
+                session.sequence+=1
+                session.open_input=None
+                control=self._serialize(session)
+            self._store.stop(session_id,owner,control=control)
+            if session is not None:
+                session.pg_stopped=True
+                return session.snapshot()
+            row=self._store.load_published(session_id,owner)
+            if row is None or row.get('control') is None:
+                return EngineSnapshot(session_id=session_id,task_id='',sequence=0,
+                    process_status=ProcessStatus.STOP_REQUESTED,next_step=NextStep.STOP)
+            stopped_session=self._restore_payload(dict(row['control']),session_id)
+            stopped_session.pg_stopped=True;stopped_session.open_input=None
+            return stopped_session.snapshot()
         session=self.get(session_id);self._ensure_stop_fence(session)
         if session.stop_fence is None:
             raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'durable session storage is required for Stop')
@@ -337,6 +520,11 @@ class SessionRegistry:
     def reconcile_stopped(self,session_id):
         # Explicit same-host recovery check, never a timeout-based guess. The
         # writer lock covers accepted provider threads through actual exit.
+        if self._store is not None:
+            session=self.get(session_id)
+            if not session.pg_stopped:
+                raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'durable stop request required')
+            return session.snapshot()
         session=self.get(session_id);fence=session.stop_fence
         if fence is None or not fence.state:
             raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,'durable stop request required')
@@ -361,21 +549,85 @@ class SessionRegistry:
                 return self._save_unfenced(session)
         return self._save_unfenced(session)
 
-    def _save_unfenced(self,session:EngineSession)->None:
-        path=self._state_path(session.session_id)
-        if path is None:return
-        path.parent.mkdir(parents=True,exist_ok=True)
-        payload={"session_id":session.session_id,"task_id":session.task_id,"phase_id":session.phase_id,"sequence":session.sequence,
+    @staticmethod
+    def _serialize(session:EngineSession)->dict:
+        return {"session_id":session.session_id,"task_id":session.task_id,"phase_id":session.phase_id,"sequence":session.sequence,
             "status":int(session.status),"next_step":int(session.next_step),"open_input":session.open_input.model_dump(mode="json") if session.open_input else None,
             "responses":[response.model_dump(mode="json") for response in session.responses.values()],"request":session.request.model_dump(mode="json") if session.request else None,
             "model_map":getattr(session.program,"model_map",None),"route_version":session.route_version,
             "route_history":[item.model_dump(mode="json") for item in session.route_history]}
+
+    def _save_unfenced(self,session:EngineSession)->None:
+        if self._store is not None:
+            # One publish transaction per step: control state, the advance's
+            # buffered journal pages and the graph checkpoint pointer commit
+            # together. A stop or takeover that already landed rejects the
+            # write, and the save becomes the same no-op the file fence
+            # produces after its marker.
+            from .stop_fence import StopRequested
+            program=session.program
+            journal=getattr(program,'progress_journal',None)
+            pages=journal.pending() if hasattr(journal,'pending') else None
+            checkpoint_id=None
+            graph=getattr(program,'graph',None)
+            if graph is not None:
+                state=graph.get_state(program.cfg)
+                if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
+            try:
+                self._store.publish_step(session.pg_claim,self._serialize(session),
+                    journal_pages=pages,
+                    published_thread_id=session.session_id,
+                    published_checkpoint_id=checkpoint_id)
+                if pages is not None:journal.acknowledge(len(pages))
+            except StopRequested:session.pg_stopped=True
+            return
+        path=self._state_path(session.session_id)
+        if path is None:return
+        path.parent.mkdir(parents=True,exist_ok=True)
+        payload=self._serialize(session)
         temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(payload));temporary.replace(path)
 
     def _load(self,session_id:str)->EngineSession|None:
+        if self._store is not None:return self._load_pg(session_id)
         path=self._state_path(session_id)
         if path is None or not path.exists():return None
-        payload=json.loads(path.read_text());request=StartSessionRequest.model_validate(payload["request"])
+        payload=json.loads(path.read_text())
+        session=self._restore_payload(payload,session_id)
+        self._ensure_stop_fence(session)
+        if session.stop_fence is not None and session.stop_fence.requested:
+            session.open_input=None
+            return session  # No restore, graph construction or implicit resume.
+        return self._restore_program(session,payload)
+
+    def _load_pg(self,session_id:str)->EngineSession|None:
+        # Claim-before-serve: no claim, no restore. The winner restores only
+        # from the staged publication (control payload + pointer), never from
+        # saver-latest checkpoint rows.
+        owner=self._pg_owner()
+        claim=self._store.claim(session_id,owner,self._instance,self._lease_ttl)
+        if claim is None:return None
+        row=self._store.load_published(session_id,owner)
+        if row is None or row.get('control') is None:return None
+        payload=dict(row['control'])
+        session=self._restore_payload(payload,session_id)
+        session.pg_claim=claim
+        if payload.get('stopped'):
+            session.pg_stopped=True
+            session.open_input=None
+            return session  # Stopped sessions never construct or resume a graph.
+        self._start_heartbeat(session)
+        return self._restore_program(session,payload,published_checkpoint_id=row.get('published_checkpoint_id'))
+
+    def _default_pg_program(self,session,request,pinned=None):
+        if not self._allow_db_dispatch:
+            raise UserFacingError("database session cannot dispatch providers yet.","Staged responses land in PR B.","Run this session in file persistence mode.")
+        from .application import InterviewApplication
+        return InterviewApplication(session.session_id,request.task_id,request.idea,
+            artifact_root=None,model_route=request.model_route,pinned_models=pinned,
+            initial_model=request.initial_model,pg_store=self._store,pg_claim=session.pg_claim)
+
+    def _restore_payload(self,payload:dict,session_id:str)->EngineSession:
+        request=StartSessionRequest.model_validate(payload["request"])
         from .tenant_worker import _owner
         if _owner.get() is not None and (payload['session_id']!=session_id or str(request.session_id)!=session_id or payload['task_id']!=request.task_id):
             raise KeyError('persisted session binding mismatch')
@@ -384,10 +636,10 @@ class SessionRegistry:
             open_input=InputRequest.model_validate(payload["open_input"]) if payload["open_input"] else None,request=request,
             route_version=payload.get("route_version",0),route_history=[RouteChangePayload.model_validate(item) for item in payload.get("route_history",[])])
         session.responses={response.input_id:response for response in (InputResponse.model_validate(item) for item in payload["responses"])}
-        self._ensure_stop_fence(session)
-        if session.stop_fence is not None and session.stop_fence.requested:
-            session.open_input=None
-            return session  # No restore, graph construction or implicit resume.
+        return session
+
+    def _restore_program(self,session:EngineSession,payload:dict,published_checkpoint_id:str|None=None)->EngineSession:
+        session_id=session.session_id;request=session.request
         if self._program_factory is default_program_factory:
             from . import session_models
             pinned=payload.get("model_map")
@@ -399,7 +651,15 @@ class SessionRegistry:
                 raise
         if self._program_factory is not None:
             current_route=session.route_history[-1].to_route if session.route_history else request.model_route
-            session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
+            if self._store is not None and self._program_factory is default_program_factory:
+                with self._dispatch_guard():
+                    session.program=self._default_pg_program(session,request.model_copy(update={"model_route":current_route}),
+                        pinned=payload.get('model_map') or None)
+                # Resume from the published pointer, never saver-latest.
+                if published_checkpoint_id is not None:
+                    session.program.cfg={'configurable':{'thread_id':session.session_id,'checkpoint_ns':'','checkpoint_id':published_checkpoint_id}}
+            else:
+                session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
             session.program.open_input=session.open_input
             if session.open_input is not None and hasattr(session.program,'graph'):
                 checkpoint=session.program.graph.get_state(session.program.cfg)
