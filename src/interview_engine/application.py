@@ -44,7 +44,8 @@ class InterviewApplication:
             self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
             saver=FencedPostgresSaver(pg_conn,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
-                serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
+                serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
+                on_checkpoint_committed=lambda cid, step: self._staging.note_checkpoint_committed(step))
             saver.setup()
         else:
             db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
@@ -165,19 +166,23 @@ class InterviewApplication:
             try:
                 with self._runtime_context():
                     if self._staging is not None:
-                        # Resume point for this advance: the pinned checkpoint when
-                        # this program was restored, otherwise the session's
-                        # published checkpoint pointer ('bootstrap' before the
-                        # first). Every call of the advance stages under THIS point:
-                        # unpublished mid-advance checkpoints are never served on
-                        # restore, so a crash anywhere in the advance resumes from
-                        # the same published point and replays the whole advance's
-                        # call sequence in order.
-                        point = self.cfg['configurable'].get('checkpoint_id')
-                        if point is None:
+                        # Position for this advance: the durable anchor (pinned
+                        # checkpoint on restore, published pointer while serving,
+                        # 'bootstrap' first) plus the super-step about to run -
+                        # derived from the checkpoint the graph will ACTUALLY
+                        # resume from (the pin when pinned, else saver-latest).
+                        anchor = self.cfg['configurable'].get('checkpoint_id')
+                        if anchor is None:
                             published = self._pg_store.load_published(self.session_id, self._pg_claim.owner_id)
-                            point = published['published_checkpoint_id'] if published else None
-                        self._staging.set_execution_point(point)
+                            anchor = published['published_checkpoint_id'] if published else None
+                        resume_step = -1
+                        try:
+                            current = self.saver.get_tuple(self.cfg)
+                            if current is not None:
+                                resume_step = (current.metadata or {}).get('step', -1)
+                        except Exception:
+                            resume_step = -1
+                        self._staging.set_execution_point(anchor, resume_step + 1)
                     self.result=self.graph.invoke(self.state,self.cfg)
                     check_execution()
             except Exception:

@@ -105,7 +105,7 @@ def test_identical_intentional_calls_both_invoke(store, claim, monkeypatch):
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
     assert len(calls) == 2 and len(gw.reserved) == 2 and len(gw.settled) == 2
-    log = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='', stage='scope_tiebreak')
+    log = store.staged_log('s1', claim.generation, execution_point='bootstrap:0', node='', stage='scope_tiebreak')
     assert [r['ordinal'] for r in log] == [0, 1] and all(r['response'] is not None for r in log)
 
 
@@ -142,7 +142,7 @@ def test_dispatched_without_response_pauses_no_rerun(store, claim, monkeypatch):
     msgs = [HumanMessage(content='name the scope')]
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         fp = mc._staging_request_sha(type('C', (), {'provider': 'fake', 'model': 'fake-1', 'max_tokens': 100})(), msgs, 'scope_tiebreak', None)
-        store.record_dispatch(claim, execution_point='bootstrap', node='', stage='scope_tiebreak', item='', ordinal=0,
+        store.record_dispatch(claim, execution_point='bootstrap:0', node='', stage='scope_tiebreak', item='', ordinal=0,
                               request_sha256=fp, provider='fake', model='fake-1')
         store.conn.commit()
         from interview_engine.errors import UserFacingError
@@ -177,7 +177,7 @@ def test_billable_empty_response_is_staged_and_retry_is_new_attempt(store, claim
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, '   '))
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, '{"ok": true}'))
         store.conn.commit()
-    log = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='', stage='scope_tiebreak')
+    log = store.staged_log('s1', claim.generation, execution_point='bootstrap:0', node='', stage='scope_tiebreak')
     assert len(log) == 2 and log[0]['response'] is not None and log[1]['response'] is not None
     assert len(gw.reserved) == 2
 
@@ -202,10 +202,10 @@ def test_serialization_exactness_roundtrip(store, claim, monkeypatch):
 
 def test_completion_is_append_once(store, claim):
     c = claim
-    store.record_dispatch(c, execution_point='bootstrap', node='', stage='s', item='', ordinal=0, request_sha256='x', provider='p', model='m')
-    store.complete_staged(c, execution_point='bootstrap', node='', stage='s', item='', ordinal=0, response={'v': 1}, usage=None)
+    store.record_dispatch(c, execution_point='bootstrap:0', node='', stage='s', item='', ordinal=0, request_sha256='x', provider='p', model='m')
+    store.complete_staged(c, execution_point='bootstrap:0', node='', stage='s', item='', ordinal=0, response={'v': 1}, usage=None)
     with pytest.raises(PublicationConflict):
-        store.complete_staged(c, execution_point='bootstrap', node='', stage='s', item='', ordinal=0, response={'v': 2}, usage=None)
+        store.complete_staged(c, execution_point='bootstrap:0', node='', stage='s', item='', ordinal=0, response={'v': 2}, usage=None)
     store.conn.rollback()
 
 
@@ -256,11 +256,11 @@ def test_identical_prompt_under_new_execution_point_is_a_new_paid_call(store, cl
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
         store.conn.commit()
-        ctx.set_execution_point('checkpoint-2')  # the graph committed; a new turn begins
+        ctx.set_execution_point('checkpoint-2', 0)  # the step committed; a new turn begins
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
     assert len(calls) == 2 and len(gw.reserved) == 2
-    old = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='', stage='scope_tiebreak')
-    new = store.staged_log('s1', claim.generation, execution_point='checkpoint-2', node='', stage='scope_tiebreak')
+    old = store.staged_log('s1', claim.generation, execution_point='bootstrap:0', node='', stage='scope_tiebreak')
+    new = store.staged_log('s1', claim.generation, execution_point='checkpoint-2:0', node='', stage='scope_tiebreak')
     assert len(old) == 1 and len(new) == 1
 
 
@@ -274,8 +274,8 @@ def test_parallel_nodes_same_execution_point_do_not_collide(store, claim, monkey
         invoke([HumanMessage(content='from A')], transport_calls=lambda m, c: _transport(calls, m, c))
         monkeypatch.setattr('interview_engine.model_config.StagingContext.current_node', staticmethod(lambda: 'node_b'))
         invoke([HumanMessage(content='from B')], transport_calls=lambda m, c: _transport(calls, m, c))
-    a = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='node_a', stage='scope_tiebreak')
-    b = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='node_b', stage='scope_tiebreak')
+    a = store.staged_log('s1', claim.generation, execution_point='bootstrap:0', node='node_a', stage='scope_tiebreak')
+    b = store.staged_log('s1', claim.generation, execution_point='bootstrap:0', node='node_b', stage='scope_tiebreak')
     assert len(a) == 1 and len(b) == 1 and len(calls) == 2
 
 

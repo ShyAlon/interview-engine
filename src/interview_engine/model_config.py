@@ -495,14 +495,29 @@ class StagingContext:
         self.store = store
         self.claim = claim
         self.generation = claim.generation
-        self.execution_point = 'bootstrap'
+        self.anchor = 'bootstrap'
+        self.step = 0
         self.cursors: dict = {}
 
-    def set_execution_point(self, checkpoint_id):
-        """Advance the durable execution position. Called by the application
-        before each graph advance (from the pinned resume config) and by the
-        checkpoint saver after each super-step commit."""
-        self.execution_point = str(checkpoint_id) if checkpoint_id else 'bootstrap'
+    @property
+    def execution_point(self) -> str:
+        """anchor:super-step - both halves deterministic across re-execution:
+        the anchor is the advance's durable checkpoint anchor (pinned on restore,
+        published pointer while serving, 'bootstrap' first), and the step is
+        LangGraph's deterministic super-step counter (checkpoint ids themselves
+        are random per commit and cannot anchor a replay)."""
+        return f"{self.anchor}:{self.step}"
+
+    def set_execution_point(self, anchor, step: int):
+        """Seed the position for an advance: the durable anchor plus the
+        super-step about to run (resume checkpoint's step + 1)."""
+        self.anchor = str(anchor) if anchor else 'bootstrap'
+        self.step = step
+
+    def note_checkpoint_committed(self, step: int):
+        """The saver committed the super-step numbered `step`; calls after this
+        boundary belong to the next super-step."""
+        self.step = step + 1
 
     @staticmethod
     def current_node() -> str:
