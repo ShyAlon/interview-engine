@@ -356,6 +356,13 @@ class SessionRegistry:
                                 with self._lock:self._sessions.pop(session.session_id,None)
                                 reconciled=self.get(session.session_id)
                                 return accepted,reconciled.published or self._publish(reconciled)
+                            # The store disproves the in-memory step: the tail
+                            # already mutated responses/open_input/sequence, so
+                            # this session object can no longer serve idempotency
+                            # honestly. Evict; the next get reloads the durable
+                            # truth (answer unrecorded, question open) and the
+                            # client retry re-advances from the published pointer.
+                            with self._lock:self._sessions.pop(session.session_id,None)
                         raise
                     if session.pg_stopped:
                         session.open_input=None
