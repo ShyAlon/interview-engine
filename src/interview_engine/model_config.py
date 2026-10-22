@@ -501,23 +501,32 @@ class StagingContext:
 
     @property
     def execution_point(self) -> str:
-        """anchor:super-step - both halves deterministic across re-execution:
-        the anchor is the advance's durable checkpoint anchor (pinned on restore,
-        published pointer while serving, 'bootstrap' first), and the step is
-        LangGraph's deterministic super-step counter (checkpoint ids themselves
-        are random per commit and cannot anchor a replay)."""
-        return f"{self.anchor}:{self.step}"
+        """anchor:super-step - both halves deterministic across re-execution.
+        The anchor is the advance's durable checkpoint anchor (pinned on restore,
+        published pointer while serving, 'bootstrap' first). The step is
+        LangGraph's super-step counter read from the pregel scratchpad AT CALL
+        TIME (checkpoint commits complete asynchronously and race the next
+        super-step's calls; the scratchpad step does not). Resuming from the
+        same anchor re-derives the same steps."""
+        return f"{self.anchor}:{self.current_step()}"
 
-    def set_execution_point(self, anchor, step: int):
-        """Seed the position for an advance: the durable anchor plus the
-        super-step about to run (resume checkpoint's step + 1)."""
+    def set_execution_point(self, anchor, step: int = 0):
+        """Seed the durable anchor for an advance (and the fallback step for
+        calls made outside graph execution, e.g. direct test drives)."""
         self.anchor = str(anchor) if anchor else 'bootstrap'
         self.step = step
 
-    def note_checkpoint_committed(self, step: int):
-        """The saver committed the super-step numbered `step`; calls after this
-        boundary belong to the next super-step."""
-        self.step = step + 1
+    def current_step(self) -> int:
+        """The current super-step from LangGraph's runnable config; the seeded
+        fallback outside graph execution."""
+        try:
+            from langchain_core.runnables.config import var_child_runnable_config
+            cfg = var_child_runnable_config.get(None) or {}
+            scratchpad = (cfg.get('configurable') or {}).get('__pregel_scratchpad')
+            step = getattr(scratchpad, 'step', None)
+            return step if isinstance(step, int) else self.step
+        except Exception:
+            return self.step
 
     @staticmethod
     def current_node() -> str:

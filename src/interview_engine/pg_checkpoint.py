@@ -99,7 +99,7 @@ class FencedPostgresSaver(PostgresSaver):
     """PostgresSaver whose every mutation is fenced against the DB lease row."""
 
     def __init__(self, conn, *, lease: LeaseFence, pipe=None, serde=None,
-                 lease_table: str = LEASE_TABLE, on_checkpoint_committed=None):
+                 lease_table: str = LEASE_TABLE):
         super().__init__(conn, pipe=pipe, serde=serde)
         if not isinstance(lease, LeaseFence):
             raise ValueError('explicit lease fence required')
@@ -107,10 +107,6 @@ class FencedPostgresSaver(PostgresSaver):
             raise ValueError('trusted lease table name required')
         self._lease = lease
         self._lease_table = lease_table
-        # Called with (checkpoint_id, super-step) after each committed put: the
-        # staged provider-response context advances its deterministic super-step
-        # counter here (checkpoint ids are random per commit; the step is not).
-        self.on_checkpoint_committed = on_checkpoint_committed
         # Guarded writes use a dedicated connection: graph nodes run on worker
         # threads and the base saver drives its connection in pipeline mode,
         # so sharing it for fenced statements corrupts the pipeline.
@@ -209,8 +205,6 @@ class FencedPostgresSaver(PostgresSaver):
                 raise
             else:
                 self._write_conn.commit()
-        if self.on_checkpoint_committed is not None:
-            self.on_checkpoint_committed(checkpoint['id'], (metadata or {}).get('step', -1))
         return {'configurable': {'thread_id': thread_id, 'checkpoint_ns': checkpoint_ns,
                                  'checkpoint_id': checkpoint['id']}}
 
