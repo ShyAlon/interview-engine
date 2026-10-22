@@ -216,6 +216,7 @@ class PgSessionStore:
     def publish_step(self, claim: SessionClaim, control: dict, *,
                      journal_cursor: int | None = None,
                      journal_page: dict | None = None,
+                     journal_pages: list[tuple[int, dict]] | None = None,
                      published_thread_id: str | None = None,
                      published_checkpoint_ns: str = "",
                      published_checkpoint_id: str | None = None,
@@ -257,11 +258,17 @@ class PgSessionStore:
                      and row["published_thread_id"] == published_thread_id
                      and row["published_checkpoint_ns"] == published_checkpoint_ns
                      and row["published_checkpoint_id"] == published_checkpoint_id)
-            if exact and journal_page is not None:
-                existing = self.conn.execute(
-                    "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
-                    {**params, "cursor": journal_cursor}).fetchone()
-                exact = existing is not None and existing["page"] == journal_page
+            if exact:
+                replay_pages = list(journal_pages or [])
+                if journal_page is not None:
+                    replay_pages.append((journal_cursor, journal_page))
+                for cursor, page in replay_pages:
+                    existing = self.conn.execute(
+                        "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
+                        {**params, "cursor": cursor}).fetchone()
+                    exact = existing is not None and existing["page"] == page
+                    if not exact:
+                        break
             if exact:
                 self.conn.commit()   # exact replay of a committed step: no-op
                 return
@@ -269,25 +276,28 @@ class PgSessionStore:
             raise PublicationConflict(
                 f"stale or conflicting publication for {claim.session_id}: "
                 f"sequence {new_seq} <= committed {prior_seq}")
+        pages = list(journal_pages or [])
         if journal_page is not None:
             if journal_cursor is None:
                 self.conn.rollback()
                 raise ValueError("journal page requires its cursor")
+            pages.append((journal_cursor, journal_page))
+        for cursor, page in pages:
             inserted = self.conn.execute(
                 "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
                 " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
                 " ON CONFLICT (session_id, cursor) DO NOTHING RETURNING 1",
-                {**params, "cursor": journal_cursor, "page": json.dumps(journal_page)}).fetchone()
+                {**params, "cursor": cursor, "page": json.dumps(page)}).fetchone()
             if inserted is None:
                 existing = self.conn.execute(
                     "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
-                    {**params, "cursor": journal_cursor}).fetchone()
+                    {**params, "cursor": cursor}).fetchone()
                 self.conn.rollback()
-                if existing is None or existing["page"] != journal_page:
+                if existing is None or existing["page"] != page:
                     raise PublicationConflict(
-                        f"journal cursor {journal_cursor} for {claim.session_id} already holds a different page")
+                        f"journal cursor {cursor} for {claim.session_id} already holds a different page")
                 raise PublicationConflict(
-                    f"journal cursor {journal_cursor} for {claim.session_id} belongs to an earlier step")
+                    f"journal cursor {cursor} for {claim.session_id} belongs to an earlier step")
         if fault_hook is not None:
             fault_hook()   # test-only: inject a failure between journal insert and pointer commit
         self.conn.execute(
@@ -299,3 +309,12 @@ class PgSessionStore:
             {**params, "control": json.dumps(control), "tid": published_thread_id,
              "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
         self.conn.commit()
+
+    def journal_head(self, session_id: str, owner_id: str) -> int:
+        """Highest committed journal cursor (0 when empty) for cursor allocation."""
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(j.cursor),0) AS head FROM engine_session_journal j"
+            " JOIN engine_sessions s ON s.session_id = j.session_id"
+            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s",
+            {"sid": session_id, "owner": owner_id}).fetchone()
+        return row["head"] if isinstance(row, dict) else row[0]
