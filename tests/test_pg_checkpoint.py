@@ -9,9 +9,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from interview_engine.pg_checkpoint import FencedPostgresSaver,LeaseFence
 from interview_engine.stop_fence import StopRequested
 
-LEASE_DDL="""CREATE TABLE engine_sessions(
- session_id TEXT PRIMARY KEY, generation BIGINT NOT NULL,
- lease_epoch BIGINT NOT NULL, lease_expires_at DOUBLE PRECISION NOT NULL)"""
+from test_pg_session_store import MIRRORED_REGISTRY_DDL as LEASE_DDL
 
 def server(tmp_path):
     return pgserver.get_server(str(tmp_path/'pgdata'))
@@ -21,8 +19,9 @@ def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
     saver=ctx.__enter__()
     saver.setup()
     saver.conn.execute(LEASE_DDL)
-    saver.conn.execute("INSERT INTO engine_sessions VALUES (%s,%s,%s,%s)",
-        (session,generation,epoch,time.time()+expire))
+    saver.conn.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (session,'owner-a','task1',generation,time.time(),epoch,time.time()+expire))
     fenced=FencedPostgresSaver(saver.conn,lease=LeaseFence(session,generation,epoch),
         serde=JsonPlusSerializer())
     return ctx,fenced
