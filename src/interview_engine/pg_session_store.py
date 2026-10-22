@@ -44,6 +44,10 @@ import psycopg
 from .stop_fence import StopRequested
 
 
+class PublicationConflict(Exception):
+    """A replay or delayed write conflicts with a committed publication."""
+
+
 @dataclass(frozen=True)
 class SessionClaim:
     """A won lease: the fence identity for every mutation of this session."""
@@ -214,36 +218,78 @@ class PgSessionStore:
                      journal_page: dict | None = None,
                      published_thread_id: str | None = None,
                      published_checkpoint_ns: str = "",
-                     published_checkpoint_id: str | None = None) -> None:
+                     published_checkpoint_id: str | None = None,
+                     fault_hook=None) -> None:
         """One transaction per published step: journal page, control state and
         the checkpoint pointer commit together under the lease fence.
 
-        Readers only ever see committed steps: a crash or a failed fence leaves
-        NONE of the three behind. The guard locks the lease row FOR UPDATE in
-        the same transaction, so a stop or takeover bump serializes against the
-        whole publication. The journal page keeps immutable-cursor semantics
-        (duplicate cursor keeps the original) so a retried publication after an
-        uncertain commit stays idempotent instead of diverging.
+        Ordering within one lease (epoch/generation fences do not order valid
+        writes): the control payload's integer "sequence" is the step's
+        revision. The lease row is locked FOR UPDATE first, so the revision
+        check below is a real compare-and-swap:
+        - a NEWER sequence commits;
+        - the SAME sequence commits only as an exact replay (control, pointer
+          and journal page all identical to what is committed) and is a no-op;
+        - anything older, or a same-cursor journal page with different bytes,
+          is a conflicting replay: rollback and PublicationConflict.
+        Readers only ever see committed steps: a crash or failure leaves NONE
+        of the three behind (fault_hook exists only to inject a mid-transaction
+        failure in tests).
         """
+        if "sequence" not in control or not isinstance(control["sequence"], int):
+            raise ValueError('control payload must carry an integer "sequence" revision')
         params = {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
                   "epoch": claim.epoch, "now": time.time()}
-        guard = self.conn.execute(
-            "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+        row = self.conn.execute(
+            "SELECT control, published_thread_id, published_checkpoint_ns, published_checkpoint_id"
+            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s"
             " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
             " FOR UPDATE",
             params).fetchone()
-        if guard is None:
+        if row is None:
             self.conn.rollback()
             raise StopRequested("session lease fence rejected the publication")
+        prior = row["control"] or {}
+        prior_seq = prior.get("sequence", 0)
+        new_seq = control["sequence"]
+        if new_seq <= prior_seq:
+            exact = (prior == control
+                     and row["published_thread_id"] == published_thread_id
+                     and row["published_checkpoint_ns"] == published_checkpoint_ns
+                     and row["published_checkpoint_id"] == published_checkpoint_id)
+            if exact and journal_page is not None:
+                existing = self.conn.execute(
+                    "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
+                    {**params, "cursor": journal_cursor}).fetchone()
+                exact = existing is not None and existing["page"] == journal_page
+            if exact:
+                self.conn.commit()   # exact replay of a committed step: no-op
+                return
+            self.conn.rollback()
+            raise PublicationConflict(
+                f"stale or conflicting publication for {claim.session_id}: "
+                f"sequence {new_seq} <= committed {prior_seq}")
         if journal_page is not None:
             if journal_cursor is None:
                 self.conn.rollback()
                 raise ValueError("journal page requires its cursor")
-            self.conn.execute(
+            inserted = self.conn.execute(
                 "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
                 " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
-                " ON CONFLICT (session_id, cursor) DO NOTHING",
-                {**params, "cursor": journal_cursor, "page": json.dumps(journal_page)})
+                " ON CONFLICT (session_id, cursor) DO NOTHING RETURNING 1",
+                {**params, "cursor": journal_cursor, "page": json.dumps(journal_page)}).fetchone()
+            if inserted is None:
+                existing = self.conn.execute(
+                    "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
+                    {**params, "cursor": journal_cursor}).fetchone()
+                self.conn.rollback()
+                if existing is None or existing["page"] != journal_page:
+                    raise PublicationConflict(
+                        f"journal cursor {journal_cursor} for {claim.session_id} already holds a different page")
+                raise PublicationConflict(
+                    f"journal cursor {journal_cursor} for {claim.session_id} belongs to an earlier step")
+        if fault_hook is not None:
+            fault_hook()   # test-only: inject a failure between journal insert and pointer commit
         self.conn.execute(
             "UPDATE engine_sessions"
             " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
