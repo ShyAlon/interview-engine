@@ -277,3 +277,23 @@ def test_parallel_nodes_same_execution_point_do_not_collide(store, claim, monkey
     a = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='node_a', stage='scope_tiebreak')
     b = store.staged_log('s1', claim.generation, execution_point='bootstrap', node='node_b', stage='scope_tiebreak')
     assert len(a) == 1 and len(b) == 1 and len(calls) == 2
+
+
+def test_fingerprint_binds_generation_params_and_tool_call_ids(store, claim):
+    """The staged fingerprint must bind provider-significant content: generation
+    parameters and tool-call ids change it; locally random message ids do not."""
+    import interview_engine.model_config as mc
+    from langchain_core.messages import AIMessage, HumanMessage
+    cfg = type('C', (), {'provider': 'fake', 'model': 'fake-1', 'max_tokens': 100})()
+    msgs = [HumanMessage(content='q')]
+    base = mc._staging_request_sha(cfg, msgs, 'scope_tiebreak', None, params={'temperature': 0.5})
+    assert mc._staging_request_sha(cfg, msgs, 'scope_tiebreak', None, params={'temperature': 0.7}) != base
+    assert mc._staging_request_sha(cfg, msgs, 'scope_tiebreak', None, params={'temperature': 0.5}) == base
+    assert mc._staging_request_sha(cfg, msgs, 'scope_tiebreak', None, params={'temperature': 0.5, 'response_format': {'type': 'json_schema'}}) != base
+    # Tool-call ids are provider-significant; the random message id is not.
+    a = AIMessage(content='', tool_calls=[{'name': 'lookup', 'args': {'q': 'x'}, 'id': 'call_1'}], id='msg-1')
+    b = AIMessage(content='', tool_calls=[{'name': 'lookup', 'args': {'q': 'x'}, 'id': 'call_2'}], id='msg-1')
+    assert mc._staging_request_sha(cfg, [a], 'scope_tiebreak', None) != mc._staging_request_sha(cfg, [b], 'scope_tiebreak', None)
+    # A resume rebuilds the message with a fresh local id: same paid call.
+    a2 = AIMessage(content='', tool_calls=[{'name': 'lookup', 'args': {'q': 'x'}, 'id': 'call_1'}], id='msg-2')
+    assert mc._staging_request_sha(cfg, [a2], 'scope_tiebreak', None) == mc._staging_request_sha(cfg, [a], 'scope_tiebreak', None)

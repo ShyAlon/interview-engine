@@ -522,7 +522,7 @@ class StagingContext:
         return key, idx
 
 
-def _staging_request_sha(cfg, messages, stage: str, item) -> str:
+def _staging_request_sha(cfg, messages, stage: str, item, params: dict | None = None) -> str:
     """Hash the FULL effective request: provider, model, generation ceiling and the
     serialized messages. A replay matches only the identical paid call."""
     import hashlib, json
@@ -538,8 +538,13 @@ def _staging_request_sha(cfg, messages, stage: str, item) -> str:
         return d
     body = json.dumps({"provider": cfg.provider, "model": cfg.model, "stage": stage,
                        "item": item, "max_tokens": _max_tokens_limit(cfg.max_tokens),
+                       # Every provider-significant generation parameter the call
+                       # was built with (temperature, tools, response_format,
+                       # extra_body/provider route settings): a replay must match
+                       # the identical paid call, not merely the same prompt.
+                       "params": params or {},
                        "messages": [_wire(m) for m in messages]},
-                      sort_keys=True)
+                      sort_keys=True, default=str)
     return hashlib.sha256(body.encode()).hexdigest()
 
 

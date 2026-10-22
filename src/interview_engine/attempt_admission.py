@@ -61,7 +61,7 @@ def _reserve(stage,provider,model,messages,max_output_tokens):
 MAX_STAGED_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
-def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=None):
+def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=None,model_params=None):
     from .stop_fence import check_execution
     check_execution()
     if not _cloud():
@@ -85,7 +85,7 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
             row=log[idx]
             from .errors import UserFacingError
             fingerprint=model_config._staging_request_sha(
-                type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item)
+                type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item,params=model_params)
             if row['request_sha256']!=fingerprint:
                 # The replay diverged (e.g. code changed mid-session):
                 # never mix old staged results into a new execution path.
@@ -122,7 +122,7 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
         staging.cursors[key]=idx+1 if idx<len(log) else len(log)+1
         ordinal=len(log)
         request_sha=model_config._staging_request_sha(
-            type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item)
+            type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item,params=model_params)
         staging.store.record_dispatch(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
             request_sha256=request_sha,provider=provider,model=model)
         gateway,attempt=_reserve(stage,provider,model,messages,max_output_tokens)
@@ -171,6 +171,33 @@ def admitted_stream(call,*,stage,provider,model,messages,max_output_tokens):
         # Streaming aggregation/usage is not wired yet. Preserve the hold.
         gateway.uncertain(attempt)
 
+def _model_params_snapshot(chat_model, _depth=0):
+    """The provider-significant generation parameters carried by the built model:
+    sampling settings, tool bindings, response_format, provider-route extras.
+    Output adapters are unwrapped so their forced tool/schema is included.
+    Locally assigned ids never appear here; tool-call ids live in the messages."""
+    snap = {}
+    for attr in ('temperature', 'max_tokens', 'top_p', 'seed', 'stop',
+                 'frequency_penalty', 'presence_penalty', 'model_kwargs', 'extra_body'):
+        value = getattr(chat_model, attr, None)
+        if value is not None:
+            snap[attr] = value
+    kwargs = getattr(chat_model, 'kwargs', None)  # RunnableBinding (bind_tools etc.)
+    if isinstance(kwargs, dict):
+        for key in ('tools', 'response_format', 'tool_choice'):
+            if key in kwargs:
+                snap[key] = kwargs[key]
+    tool = getattr(chat_model, 'tool', None)  # forced-tool output adapters
+    if tool is not None:
+        snap['tool'] = tool
+    if _depth < 4:
+        inner = getattr(chat_model, 'model', None) or getattr(chat_model, 'runnable', None)
+        if inner is not None and inner is not chat_model:
+            for key, value in _model_params_snapshot(inner, _depth + 1).items():
+                snap.setdefault(key, value)
+    return snap
+
+
 def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_tokens,item=None):
     from .wire_binding import wire_model
     if wire_model(chat_model,stage=stage,provider=provider,model=model):
@@ -189,4 +216,5 @@ def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_t
         check_execution()
         return response
     return admitted_invoke(lambda:chat_model.invoke(messages),stage=stage,provider=provider,
-        model=model,messages=messages,max_output_tokens=max_output_tokens,item=item)
+        model=model,messages=messages,max_output_tokens=max_output_tokens,item=item,
+        model_params=_model_params_snapshot(chat_model))
