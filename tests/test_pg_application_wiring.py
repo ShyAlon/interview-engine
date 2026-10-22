@@ -121,7 +121,7 @@ def test_application_pg_builds_fenced_saver_and_buffered_journal(tmp_path, fake_
 def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
     store = PgSessionStore(conn)
-    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
     session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
@@ -145,7 +145,7 @@ def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_pa
     # program resumes at the published pointer, never at saver-latest.
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -162,7 +162,7 @@ def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_pa
 def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
     store = PgSessionStore(conn)
-    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
     session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
@@ -182,7 +182,7 @@ def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_
     # Takeover after expiry: the stopped marker is honored, no graph is built.
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -192,7 +192,7 @@ def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_
 def test_pg_application_publish_rolls_back_all_or_nothing(tmp_path, fake_ollama, fake_models, monkeypatch):
     conn = make_conn(tmp_path)
     store = PgSessionStore(conn)
-    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
     session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
@@ -233,7 +233,7 @@ def test_pg_application_publish_rolls_back_all_or_nothing(tmp_path, fake_ollama,
 def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
     store = PgSessionStore(conn)
-    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
     session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
@@ -251,7 +251,7 @@ def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, 
 
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -288,11 +288,11 @@ def test_remote_owner_stop_while_other_instance_blocked_mid_advance(tmp_path, fa
 
     conn_a = make_conn(tmp_path)
     conn_b = make_conn(tmp_path, init=False)
-    registry1 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn_a),
+    registry1 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn_a),
                                 owner_id=OWNER, instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry1)
     store_b = PgSessionStore(conn_b)
-    registry2 = SessionRegistry(default_program_factory, session_store=store_b,
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store_b,
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
 
@@ -338,7 +338,7 @@ def test_remote_owner_stop_while_other_instance_blocked_mid_advance(tmp_path, fa
 def test_stop_never_blocked_by_local_publication_failure(tmp_path, fake_ollama, fake_models, monkeypatch):
     conn = make_conn(tmp_path)
     store = PgSessionStore(conn)
-    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
     registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
@@ -361,14 +361,14 @@ def test_stale_lease_caller_stop_and_cross_owner_rejection(tmp_path, fake_ollama
 
     conn_a = make_conn(tmp_path)
     conn_b = make_conn(tmp_path, init=False)
-    registry1 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn_a),
+    registry1 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn_a),
                                 owner_id=OWNER, instance_id='w#1', lease_ttl=0.5)
     _OPEN['registries'].append(registry1)
     session, _ = registry1.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
                                                      model_route='ollama', initial_model='phi4'))
     registry1.close()  # heartbeats halted; the lease runs out
     _time.sleep(0.7)
-    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn_b),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn_b),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     registry2.get(SID)  # live holder now
@@ -386,3 +386,21 @@ def test_stale_lease_caller_stop_and_cross_owner_rejection(tmp_path, fake_ollama
     foreign = PgSessionStore(conn_b)
     with pytest.raises(KeyError):
         foreign.stop(SID, '00000000-0000-0000-0000-000000000002')
+
+
+def test_db_mode_rejects_production_factory_before_any_provider_call(tmp_path, monkeypatch):
+    # PR A invariant: database persistence + the production program factory is
+    # refused at construction, before any preflight or model call. Outbound is
+    # monkeypatched to prove zero provider traffic on the rejected path.
+    calls = []
+    def record(*a, **k):
+        calls.append((a, k))
+        raise AssertionError('outbound provider call attempted')
+    monkeypatch.setattr('httpx.get', record)
+    monkeypatch.setattr('httpx.post', record)
+    import socket
+    monkeypatch.setattr(socket.socket, 'connect', record)
+    store = PgSessionStore(make_conn(tmp_path))
+    with pytest.raises(ValueError, match='cannot use the production program factory'):
+        SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER, instance_id='g#1')
+    assert calls == []

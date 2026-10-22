@@ -160,3 +160,20 @@ def test_stop_blocks_inputs_and_persists(tmp_path):
     r = client.post(f"/v1/sessions/{sid}/inputs/{pending['input_id']}", json={
         'protocol_version': 1, 'input_id': pending['input_id'], 'value': 'players', 'actor_id': 'founder'})
     assert r.status_code == 422 and r.json()['detail']['code'] == ProtocolErrorCode.INVALID_RESPONSE
+
+
+def test_http_cross_owner_session_invisible(tmp_path):
+    # Full-entrypoint tenant boundary: a session row owned by another owner is
+    # invisible through the real HTTP app + auth route, not only registry calls.
+    OWNER_B = '00000000-0000-0000-0000-000000000002'
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    store.create('s-foreign', 'task-b', OWNER_B)
+    # Published for its owner: the 404 below is owner scoping, not an
+    # unpublished-row artifact.
+    claim = store.claim('s-foreign', OWNER_B, 'foreign#1', ttl=60)
+    assert claim is not None
+    store.publish_step(claim, {'session_id': 's-foreign', 'sequence': 1, 'status': 1})
+    client = authed(create_app(make_registry(conn), service_token=TOKEN))  # serves OWNER
+    r = client.get('/v1/sessions/s-foreign')
+    assert r.status_code == 404, r.text

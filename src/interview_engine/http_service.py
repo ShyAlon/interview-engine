@@ -64,9 +64,18 @@ class EngineSession:
 
 class SessionRegistry:
     """Thread-safe application port behind the HTTP adapter."""
-    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=30.0):
+    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=30.0,allow_db_provider_dispatch:bool=False):
         if state_dir is not None and session_store is not None:
             raise ValueError('choose file or database session persistence, not both')
+        if session_store is not None and program_factory is default_program_factory and not allow_db_provider_dispatch:
+            # PR A invariant: the database persistence path never dispatches to
+            # a provider before staged responses land (PR B). The production
+            # factory preflights and calls real models, so the combination is
+            # refused at construction - before any preflight or model call can
+            # run. Tests opt in explicitly; no config/env/HTTP route enables
+            # database persistence at all (constructor-only wiring).
+            raise ValueError('database session persistence cannot use the production program factory until staged responses land (PR B); pass an explicit isolated program_factory')
+        self._allow_db_dispatch=allow_db_provider_dispatch
         self._sessions: dict[str,EngineSession]={}
         self._program_factory=program_factory
         self._state_dir=Path(state_dir) if state_dir is not None else None
@@ -589,6 +598,8 @@ class SessionRegistry:
         return self._restore_program(session,payload,published_checkpoint_id=row.get('published_checkpoint_id'))
 
     def _default_pg_program(self,session,request,pinned=None):
+        if not self._allow_db_dispatch:
+            raise UserFacingError("database session cannot dispatch providers yet.","Staged responses land in PR B.","Run this session in file persistence mode.")
         from .application import InterviewApplication
         return InterviewApplication(session.session_id,request.task_id,request.idea,
             artifact_root=None,model_route=request.model_route,pinned_models=pinned,
