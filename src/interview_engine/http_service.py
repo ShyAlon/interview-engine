@@ -446,6 +446,11 @@ class SessionRegistry:
             # so a takeover never resumes a stopped session.
             with self._lock:session=self._sessions.get(session_id)
             if session is not None:
+                # Quiescing is a new step: clearing the open input changes the
+                # control payload, so it publishes under a NEWER sequence. The
+                # CAS publish rejects a same-sequence payload change as a
+                # conflicting replay.
+                session.sequence+=1
                 session.open_input=None
                 self._save(session)
             self._store.stop(session_id,owner)
