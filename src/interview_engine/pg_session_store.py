@@ -136,9 +136,11 @@ class PgSessionStore:
         """
         row = self.conn.execute(
             "UPDATE engine_sessions SET generation = generation + 1, lease_expires_at = 0,"
+            " control = COALESCE(control,'{}'::jsonb) || %(stopped_marker)s::jsonb,"
             " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s"
             " RETURNING generation",
-            {"sid": session_id, "owner": owner_id, "now": time.time()}).fetchone()
+            {"sid": session_id, "owner": owner_id, "stopped_marker": '{"stopped": true}',
+             "now": time.time()}).fetchone()
         self.conn.commit()
         if row is None:
             raise KeyError(session_id)
