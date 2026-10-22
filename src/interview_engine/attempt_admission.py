@@ -100,13 +100,16 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
                 # raises). No usable result while billing is unreconciled.
                 if row['attempt_id']:
                     gw=_resolve_gateway()
-                    settle=getattr(gw,'settle_staged',None) if gw is not None else None
-                    if settle is None:
+                    if gw is None:
                         raise UserFacingError(f"stage '{stage}': a staged result's billing state cannot be verified.",
-                            "the admission gateway cannot settle the recorded attempt for the replayed result.",
+                            "no admission gateway is bound to this execution context.",
                             "Reconcile attempt " + str(row['attempt_id']) + " before resuming.")
                     try:
-                        settle(row['attempt_id'],row['usage'])
+                        gw.settle_staged(row['attempt_id'],row['usage'])
+                    except AttributeError:
+                        raise UserFacingError(f"stage '{stage}': a staged result's billing state cannot be verified.",
+                            "the admission gateway predates staged settlement (settle_staged missing).",
+                            "Upgrade the producer before resuming; reconcile attempt " + str(row['attempt_id']) + ".")
                     except Exception as exc:
                         raise UserFacingError(f"stage '{stage}': the staged result's billing is unreconciled.",
                             "settling the recorded attempt for the replayed result failed: " + str(exc),
