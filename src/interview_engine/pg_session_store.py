@@ -139,19 +139,28 @@ class PgSessionStore:
             raise StopRequested("session lease fence rejected the save")
         self.conn.commit()
 
-    def stop(self, session_id: str, owner_id: str) -> int:
-        """Owner-bound Stop: bump generation and expire the lease. No lease held.
+    def stop(self, session_id: str, owner_id: str, control: dict | None = None) -> int:
+        """Owner-authorized atomic Stop: stopped control AND generation bump in
+        one transaction. No execution lease, no wait on any worker: a live
+        foreign lease, a blocked advance or a failed earlier publication cannot
+        prevent it. The row lock serializes the bump against any in-flight
+        worker publish - whichever commits second wins the row, and after this
+        transaction every fenced write from the old generation fails.
 
         The authorization decision belongs to the HTTP boundary; binding the
         bump to the owner id keeps a foreign tenant from stopping (or even
-        detecting) this session through the store.
+        detecting) this session through the store. When the caller serves the
+        session locally it passes the quiesced control (open input cleared,
+        newer sequence); otherwise the staged control is kept and only marked.
         """
         row = self.conn.execute(
             "UPDATE engine_sessions SET generation = generation + 1, lease_expires_at = 0,"
-            " control = COALESCE(control,'{}'::jsonb) || %(stopped_marker)s::jsonb,"
+            " control = COALESCE(%(control)s::jsonb, control, '{}'::jsonb) || %(stopped_marker)s::jsonb,"
             " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s"
             " RETURNING generation",
-            {"sid": session_id, "owner": owner_id, "stopped_marker": '{"stopped": true}',
+            {"sid": session_id, "owner": owner_id,
+             "control": json.dumps(control) if control is not None else None,
+             "stopped_marker": '{"stopped": true}',
              "now": time.time()}).fetchone()
         self.conn.commit()
         if row is None:

@@ -47,13 +47,14 @@ def _cleanup_pg():
         _OPEN[k].clear()
 
 
-def make_conn(tmp_path):
-    server = pgserver.get_server(str(tmp_path / 'pgdata'))
+def make_conn(tmp_path, name='pgdata', init=True):
+    server = pgserver.get_server(str(tmp_path / name))
     _OPEN['servers'].append(server)
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
-    conn.execute(MIRRORED_REGISTRY_DDL)
-    conn.execute(MIRRORED_JOURNAL_DDL)
-    conn.commit()
+    if init:
+        conn.execute(MIRRORED_REGISTRY_DDL)
+        conn.execute(MIRRORED_JOURNAL_DDL)
+        conn.commit()
     _OPEN['conns'].append(conn)
     return conn
 
@@ -83,7 +84,7 @@ class FakeModel:
 @pytest.fixture
 def fake_models(monkeypatch):
     scripts = {
-        'probing': ['{"question": "What does a booking look like for your customers?", "covered": [], "thin": [], "skipped": [], "complete": false}'],
+        'probing': ['{"question": "What does a booking look like for your customers?", "covered": [], "thin": [], "skipped": [], "complete": false}'] * 6,
         'scope_tiebreak': ['{"is_web_app": true, "archetype": "saas_crud", "confidence": 0.9, "reason": "booking app is interactive web software"}'] * 4,
     }
     box = {}
@@ -227,3 +228,161 @@ def test_pg_application_publish_rolls_back_all_or_nothing(tmp_path, fake_ollama,
     assert after['control']['sequence'] == before['control']['sequence'] + 1
     assert store.journal_head(SID, OWNER) == head_before + 1
     assert journal.pending() == []
+
+
+def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, fake_ollama, fake_models):
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=1.0)
+    _OPEN['registries'].append(registry)
+    session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                    model_route='ollama', initial_model='phi4'))
+    published = store.load_published(SID, OWNER)['published_checkpoint_id']
+
+    # The worker runs the founder's answer; the graph checkpoints the new leg
+    # into Postgres - and the process dies BEFORE the step publishes. The
+    # saver now holds checkpoints newer than the published pointer.
+    app = session.program
+    from langchain_core.messages import HumanMessage
+    app.graph.invoke({'messages': [HumanMessage(content='customers book online from a phone')]}, app.cfg)
+    latest = app.saver.get_tuple(app.cfg)
+    assert latest is not None and latest.config['configurable']['checkpoint_id'] != published
+
+    registry.close()
+    time.sleep(1.2)
+    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
+    _OPEN['registries'].append(registry2)
+    restored = registry2.get(SID)
+    cfg = restored.program.cfg['configurable']
+    assert cfg.get('checkpoint_id') == published, 'restore pins the published pointer, never saver-latest'
+    values = restored.program.graph.get_state(restored.program.cfg).values
+    text = str(values.get('messages', ''))
+    assert 'customers book online from a phone' not in text, 'unpublished work is not served after a crash'
+
+
+def test_remote_owner_stop_while_other_instance_blocked_mid_advance(tmp_path, fake_ollama, monkeypatch):
+    import threading
+
+    # Instance w#1 serves the session and is blocked inside a model call.
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingFake(FakeModel):
+        def invoke(self, messages):
+            entered.set()
+            release.wait(timeout=30)
+            return super().invoke(messages)
+
+    blocking = BlockingFake(['{"question": "q?", "covered": [], "thin": [], "skipped": [], "complete": false}'])
+    box = {}
+
+    def build(stage, **kwargs):
+        if stage not in box:
+            box[stage] = blocking if stage == 'probing' else FakeModel(
+                ['{"is_web_app": true, "archetype": "saas_crud", "confidence": 0.9, "reason": "web app"}'] * 4)
+        return box[stage]
+
+    monkeypatch.setattr(model_config, 'build_chat_model', build)
+
+    conn_a = make_conn(tmp_path)
+    conn_b = make_conn(tmp_path, init=False)
+    registry1 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn_a),
+                                owner_id=OWNER, instance_id='w#1', lease_ttl=60.0)
+    _OPEN['registries'].append(registry1)
+    store_b = PgSessionStore(conn_b)
+    registry2 = SessionRegistry(default_program_factory, session_store=store_b,
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
+    _OPEN['registries'].append(registry2)
+
+    started = {}
+    thread = threading.Thread(
+        target=lambda: started.update(
+            {'result': registry1.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                           model_route='ollama', initial_model='phi4'))}),
+        daemon=True)
+    thread.start()
+    assert entered.wait(timeout=30), 'first advance never reached the model'
+    head_during = store_b.journal_head(SID, OWNER)
+    before = store_b.load_published(SID, OWNER)
+
+    # A remote authenticated owner without the claim stops the session while
+    # the other instance's advance is still in flight: one atomic transaction,
+    # no lease, no waiting for the worker.
+    registry2.stop(SID)
+    mid = store_b.load_published(SID, OWNER)
+    assert mid['control']['stopped'] is True and mid['generation'] == before['generation'] + 1
+
+    # Release the model: the late advance finishes but its commit dies at the
+    # fence - no new step, no journal page, no pointer move, no result served.
+    release.set()
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    after = store_b.load_published(SID, OWNER)
+    assert after['control']['sequence'] == mid['control']['sequence']
+    assert after['published_checkpoint_id'] == mid['published_checkpoint_id']
+    assert store_b.journal_head(SID, OWNER) == head_during
+    session1 = started['result'][0]
+    assert session1.pg_stopped
+
+    # Takeover honors the stopped marker and constructs nothing: the restored
+    # session triggers no model build at all.
+    models_before = dict(box)
+    registry1.close()
+    restored = registry2.get(SID)
+    assert restored.pg_stopped and restored.program is None
+    assert set(box) == set(models_before), 'no provider dispatch after Stop'
+
+
+def test_stop_never_blocked_by_local_publication_failure(tmp_path, fake_ollama, fake_models, monkeypatch):
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=60.0)
+    _OPEN['registries'].append(registry)
+    registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                       model_route='ollama', initial_model='phi4'))
+    generation = store.load_published(SID, OWNER)['generation']
+
+    # Even when this process can no longer publish session state at all, the
+    # owner-authorized stop still lands atomically.
+    def broken_save(session):
+        raise RuntimeError('publication path down')
+
+    monkeypatch.setattr(registry, '_save', broken_save)
+    registry.stop(SID)
+    row = store.load_published(SID, OWNER)
+    assert row['control']['stopped'] is True and row['generation'] == generation + 1
+
+
+def test_stale_lease_caller_stop_and_cross_owner_rejection(tmp_path, fake_ollama, fake_models):
+    import time as _time
+
+    conn_a = make_conn(tmp_path)
+    conn_b = make_conn(tmp_path, init=False)
+    registry1 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn_a),
+                                owner_id=OWNER, instance_id='w#1', lease_ttl=0.5)
+    _OPEN['registries'].append(registry1)
+    session, _ = registry1.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                     model_route='ollama', initial_model='phi4'))
+    registry1.close()  # heartbeats halted; the lease runs out
+    _time.sleep(0.7)
+    registry2 = SessionRegistry(default_program_factory, session_store=PgSessionStore(conn_b),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
+    _OPEN['registries'].append(registry2)
+    registry2.get(SID)  # live holder now
+
+    # The stale instance's owner-authorized stop still wins: Stop is an owner
+    # decision, not a lease privilege.
+    registry1.stop(SID)
+    row = PgSessionStore(conn_b).load_published(SID, OWNER)
+    assert row['control']['stopped'] is True
+    # The current holder's writes are fenced from now on.
+    with pytest.raises(StopRequested):
+        registry2._store.publish_step(registry2.get(SID).pg_claim,
+                                      dict(row['control'], sequence=row['control']['sequence'] + 1))
+    # A foreign owner cannot stop - or even detect - the session.
+    foreign = PgSessionStore(conn_b)
+    with pytest.raises(KeyError):
+        foreign.stop(SID, 'owner-b')

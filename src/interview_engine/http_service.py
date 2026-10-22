@@ -430,7 +430,15 @@ class SessionRegistry:
             return program
 
     def _advance(self,session,response=None):
-        if session.stop_fence is None:return session.program.advance() if response is None else session.program.advance(response)
+        if session.stop_fence is None:
+            try:return session.program.advance() if response is None else session.program.advance(response)
+            except Exception as exc:
+                # A graph write that dies at the database fence means this
+                # session lost its lease (stop or takeover): say so on the
+                # session instead of leaving it looking live.
+                from .stop_fence import StopRequested
+                if self._store is not None and isinstance(exc,StopRequested):session.pg_stopped=True
+                raise
         with session.stop_fence.running() as generation:
             result=session.program.advance() if response is None else session.program.advance(response)
             session.stop_fence.check(generation)
@@ -439,21 +447,23 @@ class SessionRegistry:
     def stop(self,session_id):
         if self._store is not None:
             owner=self._pg_owner()
-            # Persist the quiesced control state under the live fence (if this
-            # process serves the session), then bump the generation in one
-            # owner-bound statement. The bump needs no execution lease; every
-            # later fenced write fails. Stop marks the staged control stopped
-            # so a takeover never resumes a stopped session.
+            # One owner-authorized transaction: the quiesced control (when this
+            # process serves the session) and the generation bump commit
+            # together. No execution lease is needed, no worker advance is
+            # awaited, and a failed worker-side publication cannot prevent the
+            # stop. After the bump every fenced write from the old generation
+            # fails, so a takeover never resumes a stopped session.
             with self._lock:session=self._sessions.get(session_id)
+            control=None
             if session is not None:
                 # Quiescing is a new step: clearing the open input changes the
-                # control payload, so it publishes under a NEWER sequence. The
-                # CAS publish rejects a same-sequence payload change as a
+                # control payload, so it carries a NEWER sequence. The CAS
+                # publish rejects a same-sequence payload change as a
                 # conflicting replay.
                 session.sequence+=1
                 session.open_input=None
-                self._save(session)
-            self._store.stop(session_id,owner)
+                control=self._serialize(session)
+            self._store.stop(session_id,owner,control=control)
             if session is not None:
                 session.pg_stopped=True
                 return session.snapshot()
