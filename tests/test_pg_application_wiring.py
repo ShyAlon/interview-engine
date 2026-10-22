@@ -55,6 +55,13 @@ def make_conn(tmp_path, name='pgdata', init=True):
         conn.execute(MIRRORED_REGISTRY_DDL)
         conn.execute(MIRRORED_JOURNAL_DDL)
         conn.commit()
+    # Tests bootstrap the checkpoint schema explicitly as superuser; the
+    # runtime saver setup never runs DDL. Library DDL uses CREATE INDEX
+    # CONCURRENTLY, so it runs on its own autocommit connection.
+    from interview_engine.pg_checkpoint import bootstrap_checkpoint_schema
+    boot = psycopg.connect(server.get_uri(), autocommit=True)
+    bootstrap_checkpoint_schema(boot)
+    boot.close()
     _OPEN['conns'].append(conn)
     return conn
 
@@ -403,4 +410,28 @@ def test_db_mode_rejects_production_factory_before_any_provider_call(tmp_path, m
     store = PgSessionStore(make_conn(tmp_path))
     with pytest.raises(ValueError, match='cannot use the production program factory'):
         SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER, instance_id='g#1')
+    assert calls == []
+
+
+def test_db_mode_custom_factory_cannot_bypass_provider_guard(tmp_path, monkeypatch):
+    # A generic injected factory is not a bypass: without the internal opt-in,
+    # the registry blocks preflight/model construction/invocation before any
+    # outbound call, whatever the factory builds.
+    calls = []
+    def record(*a, **k):
+        calls.append((a, k))
+        raise AssertionError('outbound provider call attempted')
+    monkeypatch.setattr('httpx.get', record)
+    monkeypatch.setattr('httpx.post', record)
+    from interview_engine.application import InterviewApplication
+    from interview_engine.errors import UserFacingError
+    def real_factory(session_id, request):
+        return InterviewApplication(session_id, request.task_id, request.idea,
+                                    artifact_root=str(tmp_path / 'artifacts'),
+                                    model_route='ollama', initial_model='phi4')
+    registry = SessionRegistry(real_factory, session_store=PgSessionStore(make_conn(tmp_path)),
+                               owner_id=OWNER, instance_id='g#2')
+    _OPEN['registries'].append(registry)
+    with pytest.raises(UserFacingError, match='does not call providers'):
+        registry.start(StartSessionRequest(task_id='t', idea='i', model_route='ollama'))
     assert calls == []

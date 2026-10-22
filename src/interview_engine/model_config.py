@@ -444,6 +444,7 @@ def for_stage(stage: str) -> StageModel:
 def _preflight(cfg: "StageModel", stage: str) -> None:
     """Fail BEFORE the call, with the fix named. An empty remote key would
     otherwise surface as a raw SDK 401 ten calls deep."""
+    _check_db_dispatch()
     from .errors import UserFacingError
 
     env = _API_KEY_ENV.get(cfg.provider)
@@ -469,6 +470,7 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
     retryable provider signal, log the response envelope, and never let it
     masquerade as a downstream contract failure.
     """
+    _check_db_dispatch()
     from .errors import UserFacingError, translate_llm_error
 
     cfg = for_stage(stage)
@@ -649,6 +651,34 @@ class _DeepSeekToolOutputAdapter:
                              response_metadata=getattr(combined, "response_metadata", {}) or {},
                              usage_metadata=getattr(combined, "usage_metadata", None))
 
+_db_dispatch_block: ContextVar[bool] = ContextVar('db_dispatch_block', default=False)
+
+
+class db_provider_dispatch_blocked:
+    """Block every provider call while set. Database session persistence (PR A)
+    never dispatches providers; staged responses land in PR B. The registry
+    sets this around program construction and advances whenever a session
+    runs on database persistence without the explicit internal test opt-in.
+    This is not a feature flag and must not be exposed as one."""
+
+    def __enter__(self):
+        self._token = _db_dispatch_block.set(True)
+        return self
+
+    def __exit__(self, *exc):
+        _db_dispatch_block.reset(self._token)
+        return False
+
+
+def _check_db_dispatch() -> None:
+    if _db_dispatch_block.get():
+        from .errors import UserFacingError
+        raise UserFacingError(
+            "database session mode does not call providers yet.",
+            "Staged responses land in PR B; this guard is not a feature flag.",
+            "Run the session in file persistence mode.")
+
+
 def build_chat_model(stage: str, schema: dict | None = None):
     """Return a LangChain chat model for the stage.
 
@@ -656,6 +686,7 @@ def build_chat_model(stage: str, schema: dict | None = None):
     supports JSON Schema through response_format; DeepSeek/OpenAI use the same
     interface. The post-parse checks remain the safety net, not the formatter.
     """
+    _check_db_dispatch()
     cfg = for_stage(stage)
     from .wire_binding import validate_provider
     validate_provider(cfg.provider)

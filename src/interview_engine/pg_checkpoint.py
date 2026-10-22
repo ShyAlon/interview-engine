@@ -117,20 +117,24 @@ class FencedPostgresSaver(PostgresSaver):
         self._write_conn.close()
 
     def setup(self) -> None:
-        # When the schema is migration-owned (delivery-api pre-records the
-        # final langgraph migration index), there is nothing to do: the
-        # library's setup always executes its first DDL statement, which the
-        # runtime database role must not be allowed to run. Fall back to the
-        # library only on schemas the migration has not fully prepared.
+        # The checkpoint schema is migration-owned (delivery-api pre-records
+        # the final langgraph migration index). The runtime database role must
+        # never run DDL: when the schema is fully prepared there is nothing to
+        # do, and when it is not, fail clearly instead of mutating the
+        # database through library DDL. Tests and development bootstrap
+        # explicitly through bootstrap_checkpoint_schema under a superuser.
+        version = None
         try:
             row = self.conn.execute("SELECT max(v) AS v FROM checkpoint_migrations").fetchone()
         except Exception:
             row = None
         if row is not None:
             version = row.get('v') if isinstance(row, dict) else row[0]
-            if version is not None and version >= len(self.MIGRATIONS) - 1:
-                return
-        super().setup()
+        if version is None or version < len(self.MIGRATIONS) - 1:
+            raise RuntimeError(
+                'checkpoint schema is not prepared: apply the delivery-api '
+                'checkpoint migration (20261022120000_session_checkpoint_tables); '
+                'the runtime database role never runs DDL')
 
     def _fenced(self, sql: str, params: dict):
         merged = dict(params)
@@ -229,3 +233,12 @@ class FencedPostgresSaver(PostgresSaver):
                 raise
             else:
                 self._write_conn.commit()
+
+def bootstrap_checkpoint_schema(conn) -> None:
+    """Explicit one-off schema bootstrap for tests and development superusers.
+
+    Production databases are prepared by the delivery-api migration; this runs
+    the pinned library DDL directly and is never called from runtime code.
+    """
+    from langgraph.checkpoint.postgres import PostgresSaver
+    PostgresSaver(conn).setup()

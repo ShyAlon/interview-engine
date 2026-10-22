@@ -6,7 +6,7 @@ pgcp=pytest.importorskip('langgraph.checkpoint.postgres',reason='langgraph-check
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from interview_engine.pg_checkpoint import FencedPostgresSaver,LeaseFence
+from interview_engine.pg_checkpoint import bootstrap_checkpoint_schema, FencedPostgresSaver,LeaseFence
 from interview_engine.stop_fence import StopRequested
 
 from test_pg_session_store import MIRRORED_REGISTRY_DDL as LEASE_DDL
@@ -17,7 +17,7 @@ def server(tmp_path):
 def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
     ctx=PostgresSaver.from_conn_string(uri)
     saver=ctx.__enter__()
-    saver.setup()
+    bootstrap_checkpoint_schema(saver.conn)
     saver.conn.execute(LEASE_DDL)
     saver.conn.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",

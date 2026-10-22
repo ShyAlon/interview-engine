@@ -7,7 +7,7 @@ text. Control decisions use protocol enums and identifiers exclusively.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import threading
 import time
@@ -216,10 +216,11 @@ class SessionRegistry:
                 # constructing or invoking the potentially slow program.
                 self._publish(session)
                 if self._program_factory is not None:
-                    if self._store is not None and self._program_factory is default_program_factory:
-                        session.program=self._prepare_program(session,lambda:self._default_pg_program(session,request))
-                    else:
-                        session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
+                    with self._dispatch_guard():
+                        if self._store is not None and self._program_factory is default_program_factory:
+                            session.program=self._prepare_program(session,lambda:self._default_pg_program(session,request))
+                        else:
+                            session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
                     log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
                     self._save(session)  # factory/pinned model is now ready, before long advance
                     pending=self._advance(session)
@@ -433,6 +434,17 @@ class SessionRegistry:
             session.stop_fence.check(session.stop_fence.generation)
             yield
 
+    def _dispatch_guard(self):
+        # Database persistence never dispatches providers before PR B, no
+        # matter which program factory was injected. The default production
+        # factory is refused at construction outright; this guard catches any
+        # other factory's program the moment it tries to preflight, build a
+        # chat model, or invoke one. The internal test opt-in disables it.
+        if self._store is not None and not self._allow_db_dispatch:
+            from .model_config import db_provider_dispatch_blocked
+            return db_provider_dispatch_blocked()
+        return nullcontext()
+
     @staticmethod
     def _prepare_program(session,build):
         # Constructors/preflight can touch per-session files. Count them as
@@ -444,6 +456,10 @@ class SessionRegistry:
             return program
 
     def _advance(self,session,response=None):
+        with self._dispatch_guard():
+            return self._advance_guarded(session,response)
+
+    def _advance_guarded(self,session,response=None):
         if session.stop_fence is None:
             try:return session.program.advance() if response is None else session.program.advance(response)
             except Exception as exc:
@@ -636,8 +652,9 @@ class SessionRegistry:
         if self._program_factory is not None:
             current_route=session.route_history[-1].to_route if session.route_history else request.model_route
             if self._store is not None and self._program_factory is default_program_factory:
-                session.program=self._default_pg_program(session,request.model_copy(update={"model_route":current_route}),
-                    pinned=payload.get('model_map') or None)
+                with self._dispatch_guard():
+                    session.program=self._default_pg_program(session,request.model_copy(update={"model_route":current_route}),
+                        pinned=payload.get('model_map') or None)
                 # Resume from the published pointer, never saver-latest.
                 if published_checkpoint_id is not None:
                     session.program.cfg={'configurable':{'thread_id':session.session_id,'checkpoint_ns':'','checkpoint_id':published_checkpoint_id}}
