@@ -178,6 +178,35 @@ class PgSessionStore:
             return None
         return dict(row)
 
+    def stage_response(self, claim: SessionClaim, *, stage: str, item: str | None,
+                       request_sha256: str, payload: dict, usage: dict | None,
+                       provider: str, model: str, attempt: int = 1) -> None:
+        """Durably stage one usable provider response before interpretation (PR B).
+        Same-key replay is a no-op read; a same-key DIFFERENT payload conflicts loudly."""
+        import json as _json, time as _time
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO staged_provider_responses(owner_id,session_id,stage,item,request_sha256,response,usage,provider,model,attempt,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (session_id,stage,request_sha256) DO NOTHING",
+                (claim.owner_id, claim.session_id, stage, item, request_sha256, _json.dumps(payload),
+                 _json.dumps(usage) if usage is not None else None, provider, model, attempt, _time.time()))
+            cur.execute(
+                "SELECT response FROM staged_provider_responses WHERE session_id=%s AND stage=%s AND request_sha256=%s",
+                (claim.session_id, stage, request_sha256))
+            row = cur.fetchone()
+        if row is None or row["response"] != payload:
+            raise PublicationConflict('staged response conflict: same request hash, different payload')
+
+    def load_staged_response(self, session_id: str, owner_id: str, *, stage: str,
+                             request_sha256: str) -> dict | None:
+        """The staged response for this exact request, or None."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT response,usage,provider,model,attempt FROM staged_provider_responses "
+                "WHERE session_id=%s AND owner_id=%s AND stage=%s AND request_sha256=%s",
+                (session_id, owner_id, stage, request_sha256))
+            return cur.fetchone()
+
     def append_journal(self, claim: SessionClaim, cursor: int, page: dict) -> None:
         """Append one journal page under the fence.
 

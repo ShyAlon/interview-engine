@@ -26,7 +26,7 @@ from interview_engine.pg_checkpoint import FencedPostgresSaver
 from interview_engine.pg_journal import BufferedJournal
 from interview_engine.pg_session_store import PgSessionStore
 from interview_engine.stop_fence import StopRequested
-from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
+from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL, MIRRORED_STAGING_DDL
 
 OWNER = '00000000-0000-0000-0000-000000000001'
 SID = '11111111-1111-4111-8111-111111111111'
@@ -54,6 +54,7 @@ def make_conn(tmp_path, name='pgdata', init=True):
     if init:
         conn.execute(MIRRORED_REGISTRY_DDL)
         conn.execute(MIRRORED_JOURNAL_DDL)
+        conn.execute(MIRRORED_STAGING_DDL)
         conn.commit()
     # Tests bootstrap the checkpoint schema explicitly as superuser; the
     # runtime saver setup never runs DDL. Library DDL uses CREATE INDEX

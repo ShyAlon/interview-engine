@@ -34,6 +34,15 @@ MIRRORED_JOURNAL_DDL = """CREATE TABLE engine_session_journal(
  cursor BIGINT NOT NULL, page JSONB NOT NULL, created_at DOUBLE PRECISION NOT NULL,
  PRIMARY KEY(session_id, cursor))"""
 
+# Mirror of 20261022160000_staged_provider_responses.sql (PR B staged provider
+# responses), without the auth FK/RLS. Provider calls in DB mode stage responses here.
+MIRRORED_STAGING_DDL = """CREATE TABLE staged_provider_responses(
+ owner_id UUID NOT NULL, session_id TEXT NOT NULL, stage TEXT NOT NULL, item TEXT,
+ request_sha256 TEXT NOT NULL, response JSONB NOT NULL, usage JSONB,
+ provider TEXT NOT NULL, model TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+ created_at DOUBLE PRECISION NOT NULL,
+ PRIMARY KEY (session_id, stage, request_sha256))"""
+
 OWNER_A = '00000000-0000-0000-0000-000000000001'
 OWNER_B = '00000000-0000-0000-0000-000000000002'
 

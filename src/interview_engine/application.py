@@ -62,6 +62,7 @@ class InterviewApplication:
         else:
             from .progress_journal import ProgressJournal
             self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
+        self._pg_store=pg_store;self._pg_claim=pg_claim
         def journal_signal(ev):
             # The interview graph emits intent and ConOps stages through one bus.
             phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
@@ -85,6 +86,11 @@ class InterviewApplication:
     @contextmanager
     def _runtime_context(self):
         token=model_config._session_llm_log.set(str(self.outdir/'llm-calls.jsonl'))
+        # PR B staged provider responses: DB-backed sessions stage every usable
+        # provider response durably before interpretation (replay, never rebill).
+        staging_token=None
+        if self._pg_store is not None:
+            staging_token=model_config._response_staging.set((self.session_id,self._pg_store,self._pg_claim))
         heartbeat_token=model_config._progress_heartbeat.set(self._heartbeat_signal)
         from .stop_fence import _stopped_usage
         def stopped_usage(response,*,stage,provider,model):
@@ -100,6 +106,7 @@ class InterviewApplication:
             with use(self.runtime), session_models.use(self.model_map) if self.model_map is not None else nullcontext():
                 yield
         finally:
+            if staging_token is not None:model_config._response_staging.reset(staging_token)
             _stopped_usage.reset(usage_token)
             model_config._progress_heartbeat.reset(heartbeat_token)
             model_config._session_llm_log.reset(token)
