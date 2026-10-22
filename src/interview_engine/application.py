@@ -23,7 +23,7 @@ from . import session_models, model_config
 
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
-    def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None):
+    def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None):
         self.session_id,self.task_id=session_id,task_id
         from .session_runtime import SessionRuntime
         self.runtime=SessionRuntime()
@@ -34,19 +34,34 @@ class InterviewApplication:
         from .evidence import EvidenceLake
         self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
         self.schema_binding=self.evidence.bind_session(session_id)
-        db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
-        from .stop_fence import check_execution,guarded_publish
-        class FencedSqliteSaver(SqliteSaver):
-            def put(self,*args,**kwargs):
-                return guarded_publish(lambda:super(FencedSqliteSaver,self).put(*args,**kwargs))
-            def put_writes(self,*args,**kwargs):
-                return guarded_publish(lambda:super(FencedSqliteSaver,self).put_writes(*args,**kwargs))
-        saver=FencedSqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
+        if pg_store is not None:
+            # Database mode: the graph checkpoints into Postgres through the
+            # fenced saver; every mutation carries the session's lease fence.
+            import psycopg
+            from .pg_checkpoint import FencedPostgresSaver, LeaseFence
+            pg_conn=psycopg.connect(pg_store.conn.info.dsn,autocommit=True)
+            saver=FencedPostgresSaver(pg_conn,
+                lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
+                serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
+            saver.setup()
+        else:
+            db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
+            from .stop_fence import check_execution,guarded_publish
+            class FencedSqliteSaver(SqliteSaver):
+                def put(self,*args,**kwargs):
+                    return guarded_publish(lambda:super(FencedSqliteSaver,self).put(*args,**kwargs))
+                def put_writes(self,*args,**kwargs):
+                    return guarded_publish(lambda:super(FencedSqliteSaver,self).put_writes(*args,**kwargs))
+            saver=FencedSqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
         log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
         self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
-        from .progress_journal import ProgressJournal
-        self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
+        if pg_store is not None:
+            from .pg_journal import BufferedJournal
+            self.progress_journal=BufferedJournal(pg_store,pg_claim,session_id,task_id)
+        else:
+            from .progress_journal import ProgressJournal
+            self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
         def journal_signal(ev):
             # The interview graph emits intent and ConOps stages through one bus.
             phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
@@ -61,7 +76,7 @@ class InterviewApplication:
             from .verification import VerificationLog
             self.graph=build_graph(log,checkpointer=saver,progress=progress,verification_log=VerificationLog(self.outdir/'verification.jsonl'),conops_enabled=True,raw_output_dir=self.outdir/'debug',
                 session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
-        self.checkpointer=saver
+        self.checkpointer=saver;self.saver=saver
         self.cfg={'configurable':{'thread_id':session_id}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
         self.state={'messages':[HumanMessage(content=idea)],'submission':submission.model_dump(mode='json')}

@@ -132,6 +132,16 @@ class SessionRegistry:
                 remaining=deadline-time.monotonic()
                 thread.join(timeout=max(remaining,0.05))
                 if thread.is_alive():log.warning('lease heartbeat did not join session=%s',session.session_id)
+        for session in sessions:
+            # Close program-held database connections: no socket outlives the
+            # registry that owns it.
+            saver=getattr(session.program,'saver',None)
+            if saver is not None:
+                try:
+                    if hasattr(saver,'close'):saver.close()
+                    conn=getattr(saver,'conn',None)
+                    if conn is not None:conn.close()
+                except Exception:log.warning('program saver close failed session=%s',session.session_id,exc_info=True)
 
     def _pg_owner(self)->str:
         # Owner identity comes from the authenticated tenant context (or the
@@ -197,7 +207,10 @@ class SessionRegistry:
                 # constructing or invoking the potentially slow program.
                 self._publish(session)
                 if self._program_factory is not None:
-                    session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
+                    if self._store is not None and self._program_factory is default_program_factory:
+                        session.program=self._prepare_program(session,lambda:self._default_pg_program(session,request))
+                    else:
+                        session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
                     log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
                     self._save(session)  # factory/pinned model is now ready, before long advance
                     pending=self._advance(session)
@@ -338,7 +351,8 @@ class SessionRegistry:
             if self._program_factory is default_program_factory:
                 from .application import InterviewApplication
                 candidate=self._prepare_program(session,lambda:InterviewApplication(session.session_id,session.task_id,session.request.idea,
-                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target))
+                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target,
+                    pg_store=self._store,pg_claim=session.pg_claim))
                 # Read the same durable graph thread; never invoke a model during preflight.
                 checkpoint=candidate.graph.get_state(candidate.cfg)
                 if not checkpoint or not checkpoint.values:
@@ -500,11 +514,26 @@ class SessionRegistry:
 
     def _save_unfenced(self,session:EngineSession)->None:
         if self._store is not None:
-            # Fenced at the database: a stop or takeover that already landed
-            # rejects the write, and the save becomes the same no-op the file
-            # fence produces after its marker.
+            # One publish transaction per step: control state, the advance's
+            # buffered journal pages and the graph checkpoint pointer commit
+            # together. A stop or takeover that already landed rejects the
+            # write, and the save becomes the same no-op the file fence
+            # produces after its marker.
             from .stop_fence import StopRequested
-            try:self._store.fenced_save(session.pg_claim,self._serialize(session))
+            program=session.program
+            journal=getattr(program,'progress_journal',None)
+            pages=journal.pending() if hasattr(journal,'pending') else None
+            checkpoint_id=None
+            graph=getattr(program,'graph',None)
+            if graph is not None:
+                state=graph.get_state(program.cfg)
+                if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
+            try:
+                self._store.publish_step(session.pg_claim,self._serialize(session),
+                    journal_pages=pages,
+                    published_thread_id=session.session_id,
+                    published_checkpoint_id=checkpoint_id)
+                if pages is not None:journal.acknowledge(len(pages))
             except StopRequested:session.pg_stopped=True
             return
         path=self._state_path(session.session_id)
@@ -542,7 +571,13 @@ class SessionRegistry:
             session.open_input=None
             return session  # Stopped sessions never construct or resume a graph.
         self._start_heartbeat(session)
-        return self._restore_program(session,payload)
+        return self._restore_program(session,payload,published_checkpoint_id=row.get('published_checkpoint_id'))
+
+    def _default_pg_program(self,session,request,pinned=None):
+        from .application import InterviewApplication
+        return InterviewApplication(session.session_id,request.task_id,request.idea,
+            artifact_root=None,model_route=request.model_route,pinned_models=pinned,
+            initial_model=request.initial_model,pg_store=self._store,pg_claim=session.pg_claim)
 
     def _restore_payload(self,payload:dict,session_id:str)->EngineSession:
         request=StartSessionRequest.model_validate(payload["request"])
@@ -556,7 +591,7 @@ class SessionRegistry:
         session.responses={response.input_id:response for response in (InputResponse.model_validate(item) for item in payload["responses"])}
         return session
 
-    def _restore_program(self,session:EngineSession,payload:dict)->EngineSession:
+    def _restore_program(self,session:EngineSession,payload:dict,published_checkpoint_id:str|None=None)->EngineSession:
         session_id=session.session_id;request=session.request
         if self._program_factory is default_program_factory:
             from . import session_models
@@ -569,7 +604,14 @@ class SessionRegistry:
                 raise
         if self._program_factory is not None:
             current_route=session.route_history[-1].to_route if session.route_history else request.model_route
-            session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
+            if self._store is not None and self._program_factory is default_program_factory:
+                session.program=self._default_pg_program(session,request.model_copy(update={"model_route":current_route}),
+                    pinned=payload.get('model_map') or None)
+                # Resume from the published pointer, never saver-latest.
+                if published_checkpoint_id is not None:
+                    session.program.cfg={'configurable':{'thread_id':session.session_id,'checkpoint_ns':'','checkpoint_id':published_checkpoint_id}}
+            else:
+                session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
             session.program.open_input=session.open_input
             if session.open_input is not None and hasattr(session.program,'graph'):
                 checkpoint=session.program.graph.get_state(session.program.cfg)
