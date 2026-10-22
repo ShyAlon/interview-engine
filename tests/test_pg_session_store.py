@@ -28,6 +28,12 @@ MIRRORED_REGISTRY_DDL = """CREATE TABLE engine_sessions(
  control JSONB, published_thread_id TEXT,
  published_checkpoint_ns TEXT NOT NULL DEFAULT '', published_checkpoint_id TEXT)"""
 
+# Mirror of 20261022090000_session_placement_leases.sql (engine_session_journal).
+MIRRORED_JOURNAL_DDL = """CREATE TABLE engine_session_journal(
+ session_id TEXT NOT NULL REFERENCES engine_sessions(session_id),
+ cursor BIGINT NOT NULL, page JSONB NOT NULL, created_at DOUBLE PRECISION NOT NULL,
+ PRIMARY KEY(session_id, cursor))"""
+
 OWNER_A = 'owner-a'
 OWNER_B = 'owner-b'
 

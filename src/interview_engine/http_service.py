@@ -315,6 +315,11 @@ class SessionRegistry:
 
     def progress(self, session_id: str, after: int = 0, limit: int = 100):
         # Never acquire the registry's long-lived graph/control lock here.
+        if self._store is not None:
+            from vmodel_contracts.progress_signal import ProgressPage, ProgressSignal
+            rows=self._store.read_journal(session_id,self._pg_owner(),after,limit)
+            events=[ProgressSignal.model_validate(r['page']) for r in rows]
+            return ProgressPage(events=events, next_cursor=events[-1].cursor if events else after)
         from .progress_journal import ProgressJournal
         self._state_path(session_id)  # validate cloud UUID before any journal path
         root = self._state_dir

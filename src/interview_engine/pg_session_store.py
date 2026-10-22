@@ -156,3 +156,47 @@ class PgSessionStore:
         if row is None:
             return None
         return dict(row)
+
+    def append_journal(self, claim: SessionClaim, cursor: int, page: dict) -> None:
+        """Append one journal page under the fence.
+
+        Pages are immutable evidence keyed by (session, cursor): a duplicate
+        cursor is a no-op, never an overwrite. Part of the same staged
+        publication discipline as control state - a stop or takeover that
+        landed rejects the append with StopRequested.
+        """
+        row = self.conn.execute(
+            "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+            " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
+            " WHERE session_id = %(sid)s AND owner_id = %(owner)s AND generation = %(gen)s"
+            "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+            " FOR UPDATE"
+            " ON CONFLICT (session_id, cursor) DO NOTHING"
+            " RETURNING 1",
+            {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+             "epoch": claim.epoch, "cursor": cursor, "page": json.dumps(page),
+             "now": time.time()}).fetchone()
+        # A duplicate cursor returns no row without the guard failing; detect
+        # fence failure separately so a stale writer never passes silently.
+        if row is None:
+            guard = self.conn.execute(
+                "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s"
+                " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s",
+                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                 "epoch": claim.epoch, "now": time.time()}).fetchone()
+            if guard is not None:
+                self.conn.commit()
+                return  # page already staged at this cursor; immutable, kept
+            self.conn.rollback()
+            raise StopRequested("session lease fence rejected the journal append")
+        self.conn.commit()
+
+    def read_journal(self, session_id: str, owner_id: str, after: int, limit: int) -> list[dict]:
+        """Committed journal pages for progress reads; cross-owner reads see nothing."""
+        rows = self.conn.execute(
+            "SELECT j.cursor, j.page FROM engine_session_journal j"
+            " JOIN engine_sessions s ON s.session_id = j.session_id"
+            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s AND j.cursor > %(after)s"
+            " ORDER BY j.cursor LIMIT %(limit)s",
+            {"sid": session_id, "owner": owner_id, "after": after, "limit": limit}).fetchall()
+        return [{"cursor": r["cursor"], "page": r["page"]} for r in rows]
