@@ -125,7 +125,7 @@ class UsageStream(httpx.SyncByteStream):
     """
     def __init__(self,response,gateway,attempt):
         self.response=response;self.gateway=gateway;self.attempt=attempt
-        self.finished=False;self.marked=False;self.evidence=WireEvidence(gateway,attempt)
+        self.finished=False;self.marked=False;self.evidence=WireEvidence(gateway,attempt);self._entered=False
 
     def uncertain(self):
         if self.finished or self.marked:return
@@ -134,6 +134,20 @@ class UsageStream(httpx.SyncByteStream):
         except Exception:pass
 
     def __iter__(self):
+        if self.finished:
+            # SDK drain re-entry: openai>=3.36 drains the response after [DONE]
+            # for HTTP/1.1 connection reuse (drain_response_*). Every byte was
+            # already delivered and the attempt settled exactly once on the
+            # first pass - the drained re-read yields nothing and must have
+            # zero ledger or evidence effects. (A real network stream would be
+            # exhausted here; replaying captured bytes is neither needed by the
+            # SDK's discard-only drain nor acceptable to buffer unboundedly.)
+            return
+        if self._entered:
+            # A repeated iteration after an INCOMPLETE pass must never settle or
+            # replay: the attempt is already uncertain/held - fail loudly.
+            raise AdmissionUnavailable('provider response stream cannot be re-iterated after an incomplete pass; the attempt is held for reconciliation')
+        self._entered = True
         lines=SSELines();data=[];size=0;usage=None;done=False
         try:
             for chunk in self.response.stream:
@@ -249,7 +263,7 @@ class AsyncUsageStream(httpx.AsyncByteStream):
     """
     def __init__(self,response,gateway,attempt):
         self.response=response;self.gateway=gateway;self.attempt=attempt
-        self.finished=False;self.marked=False;self.evidence=WireEvidence(gateway,attempt)
+        self.finished=False;self.marked=False;self.evidence=WireEvidence(gateway,attempt);self._entered=False
 
     def uncertain(self):
         if self.finished or self.marked:return
@@ -258,6 +272,20 @@ class AsyncUsageStream(httpx.AsyncByteStream):
         except Exception:pass
 
     async def __aiter__(self):
+        if self.finished:
+            # SDK drain re-entry: openai>=3.36 drains the response after [DONE]
+            # for HTTP/1.1 connection reuse (drain_response_*). Every byte was
+            # already delivered and the attempt settled exactly once on the
+            # first pass - the drained re-read yields nothing and must have
+            # zero ledger or evidence effects. (A real network stream would be
+            # exhausted here; replaying captured bytes is neither needed by the
+            # SDK's discard-only drain nor acceptable to buffer unboundedly.)
+            return
+        if self._entered:
+            # A repeated iteration after an INCOMPLETE pass must never settle or
+            # replay: the attempt is already uncertain/held - fail loudly.
+            raise AdmissionUnavailable('provider response stream cannot be re-iterated after an incomplete pass; the attempt is held for reconciliation')
+        self._entered = True
         lines=SSELines();data=[];size=0;usage=None;done=False
         try:
             async for chunk in self.response.stream:

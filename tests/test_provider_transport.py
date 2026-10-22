@@ -214,3 +214,65 @@ def test_wire_failure_keeps_unknown_hold_and_closes_response():
     stream=UsageStream(httpx.Response(200,stream=Stream()),g,'attempt')
     with pytest.raises(RuntimeError):list(stream)
     assert g.events[-1][0]=='uncertain' and closed
+
+
+def _sse_raw(usage):
+    events=[{'id':'fake','object':'chat.completion.chunk','model':'fake','choices':[{'index':0,'delta':{'role':'assistant','content':'fake'},'finish_reason':None}]},
+            {'id':'fake','object':'chat.completion.chunk','model':'fake','choices':[],'usage':usage}]
+    return b''.join(('data: '+json.dumps(e)+'\n\n').encode() for e in events)+b'data: [DONE]\n\n'
+
+
+def test_sync_stream_reentry_after_settle_yields_nothing_and_never_rebills():
+    """SDK drain re-entry (openai>=3.36 drains the response after [DONE] for
+    HTTP/1.1 connection reuse): the second iteration of an already-settled stream
+    yields nothing and has zero ledger/evidence effects - settle stays once."""
+    from interview_engine.provider_transport import UsageStream
+    g=Gateway();usage={'prompt_tokens':2,'completion_tokens':1}
+    raw=_sse_raw(usage)
+    stream=UsageStream(httpx.Response(200,stream=Chunks([raw[i:i+7] for i in range(0,len(raw),7)])),g,'attempt')
+    assert b''.join(stream)==raw
+    assert [e[0] for e in g.events]==['settle'] and g.events[-1][1]==usage
+    assert list(stream)==[], 'the drained re-read yields nothing: every byte was already delivered'
+    assert [e[0] for e in g.events]==['settle'], 'repeated iteration must have zero ledger effects'
+
+
+def test_async_stream_reentry_after_settle_yields_nothing_and_never_rebills():
+    import asyncio
+    from interview_engine.provider_transport import AsyncUsageStream
+    g=Gateway();usage={'prompt_tokens':2,'completion_tokens':1}
+    raw=_sse_raw(usage)
+    async def run():
+        stream=AsyncUsageStream(httpx.Response(200,stream=AsyncChunks([raw[i:i+7] for i in range(0,len(raw),7)])),g,'attempt')
+        first=[c async for c in stream]
+        assert b''.join(first)==raw
+        assert [e[0] for e in g.events]==['settle']
+        assert [c async for c in stream]==[], 'the drained re-read yields nothing'
+    asyncio.run(run())
+    assert [e[0] for e in g.events]==['settle'], 'repeated iteration must have zero ledger effects'
+
+
+@pytest.mark.parametrize('sync',[True,False])
+def test_stream_reentry_after_an_incomplete_pass_fails_loudly_and_never_settles(sync):
+    """A repeated iteration of a stream whose first pass ended WITHOUT settlement
+    must not replay or settle: the attempt stays held (uncertain once) and the
+    re-read raises a clear error - never a silent truncation or late settle."""
+    import asyncio
+    g=Gateway();usage={'prompt_tokens':2,'completion_tokens':1}
+    raw=_sse_raw(usage)
+    if sync:
+        from interview_engine.provider_transport import UsageStream
+        stream=UsageStream(httpx.Response(200,stream=Chunks([raw[i:i+7] for i in range(0,len(raw),7)])),g,'attempt')
+        it=iter(stream);next(it);it.close()  # abandoned mid-stream: uncertain marked once
+        assert [e[0] for e in g.events]==['uncertain']
+        with pytest.raises(AdmissionUnavailable,match='re-iterated after an incomplete pass'):
+            list(stream)
+    else:
+        from interview_engine.provider_transport import AsyncUsageStream
+        async def run():
+            stream=AsyncUsageStream(httpx.Response(200,stream=AsyncChunks([raw[i:i+7] for i in range(0,len(raw),7)])),g,'attempt')
+            it=stream.__aiter__();await it.__anext__();await it.aclose()
+            assert [e[0] for e in g.events]==['uncertain']
+            with pytest.raises(AdmissionUnavailable,match='re-iterated after an incomplete pass'):
+                [c async for c in stream]
+        asyncio.run(run())
+    assert [e[0] for e in g.events]==['uncertain'], 'no settle, no double uncertain after re-entry'
