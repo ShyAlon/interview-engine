@@ -25,7 +25,8 @@ def admission_gateway(gateway,*,required=False):
 def _cloud():
     return _required.get() or os.environ.get('VMODEL_TENANT_OWNER') is not None or os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1'
 
-def _reserve(stage,provider,model,messages,max_output_tokens):
+def _resolve_gateway():
+    """The request-bound admission gateway for this execution context, or None."""
     gateway=_gateway.get()
     # A multi-owner HTTP service must never use an ambient process-wide FD.
     # Its authority must be installed for this exact request/job context.
@@ -42,6 +43,11 @@ def _reserve(stage,provider,model,messages,max_output_tokens):
                 _socket_fd=os.environ['VMODEL_ADMISSION_FD']
             except Exception as exc:raise AdmissionUnavailable('invalid inherited admission descriptor') from exc
         gateway=_socket_gateway
+    return gateway
+
+
+def _reserve(stage,provider,model,messages,max_output_tokens):
+    gateway=_resolve_gateway()
     if gateway is None:raise AdmissionUnavailable('cloud provider admission is unavailable')
     # Gateway computes/rejects exact serialized input bound and pinned price.
     attempt=gateway.reserve(attempt_id=uuid.uuid4().hex,stage=stage,provider=provider,
@@ -50,7 +56,12 @@ def _reserve(stage,provider,model,messages,max_output_tokens):
     gateway.start(attempt)
     return gateway,attempt
 
-def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens):
+# Bound for one staged raw provider payload; exceeding it fails loudly (the attempt
+# stays on the ledger for reconciliation) instead of silently dropping a paid result.
+MAX_STAGED_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=None,model_params=None):
     from .stop_fence import check_execution
     check_execution()
     if not _cloud():
@@ -61,6 +72,85 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens):
             record_stopped_usage(response,stage=stage,provider=provider,model=model)
             raise
         return response
+    from . import model_config
+    staging=model_config._response_staging.get()
+    if staging is not None:
+        node=model_config.StagingContext.current_node()
+        point=staging.execution_point
+        key,idx=staging.next_cursor(node,stage,item or '')
+        log=staging.store.staged_log(staging.session_id,staging.generation,
+            execution_point=point,node=node,stage=stage,item=key[3])
+        if idx<len(log):
+            staging.cursors[key]=idx+1
+            row=log[idx]
+            from .errors import UserFacingError
+            fingerprint=model_config._staging_request_sha(
+                type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item,params=model_params)
+            if row['request_sha256']!=fingerprint:
+                # The replay diverged (e.g. code changed mid-session):
+                # never mix old staged results into a new execution path.
+                raise UserFacingError(f"stage '{stage}': the staged provider result does not match this request.",
+                    "the session's execution path changed between the crash and the resume.",
+                    "Resume the session with the original build or start a new session.")
+            if row['response'] is not None:
+                # Replaying a completed result: its billing must be settled BEFORE
+                # the graph consumes it. If the process died after complete/before
+                # settle, settle now from the STAGED trusted usage (attempt-keyed
+                # idempotent on the ledger: settled is a no-op, conflicting usage
+                # raises). No usable result while billing is unreconciled.
+                if row['attempt_id']:
+                    gw=_resolve_gateway()
+                    if gw is None:
+                        raise UserFacingError(f"stage '{stage}': a staged result's billing state cannot be verified.",
+                            "no admission gateway is bound to this execution context.",
+                            "Reconcile attempt " + str(row['attempt_id']) + " before resuming.")
+                    try:
+                        gw.settle_staged(row['attempt_id'],row['usage'])
+                    except AttributeError:
+                        raise UserFacingError(f"stage '{stage}': a staged result's billing state cannot be verified.",
+                            "the admission gateway predates staged settlement (settle_staged missing).",
+                            "Upgrade the producer before resuming; reconcile attempt " + str(row['attempt_id']) + ".")
+                    except Exception as exc:
+                        raise UserFacingError(f"stage '{stage}': the staged result's billing is unreconciled.",
+                            "settling the recorded attempt for the replayed result failed: " + str(exc),
+                            "Reconcile attempt " + str(row['attempt_id']) + " against the provider ledger before resuming.")
+                from langchain_core.load import loads
+                model_config._log_llm({"event":"llm_call_staged_replay","provider":provider,"model":model,"stage":stage,**( {"item":item} if item else {})})
+                return loads(__import__('json').dumps(row['response']))
+            # Dispatched but never completed: the provider may have been charged.
+            # Unknown outcome - pause for reconciliation, never blind-rerun.
+            raise UserFacingError(f"stage '{stage}': a provider call was dispatched but its result is missing.",
+                "the process crashed after dispatch and before the result was staged; the call may have been billed.",
+                "Reconcile attempt " + str(row['attempt_id'] or '(unbound)') + " against the provider ledger before resuming.")
+        staging.cursors[key]=idx+1 if idx<len(log) else len(log)+1
+        ordinal=len(log)
+        request_sha=model_config._staging_request_sha(
+            type('Cfg',(),{'provider':provider,'model':model,'max_tokens':max_output_tokens})(),messages,stage,item,params=model_params)
+        staging.store.record_dispatch(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
+            request_sha256=request_sha,provider=provider,model=model)
+        gateway,attempt=_reserve(stage,provider,model,messages,max_output_tokens)
+        staging.store.bind_attempt(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
+            attempt_id=getattr(attempt,'attempt_id',None) or str(attempt))
+        try:
+            response=call()
+            from langchain_core.load import dumpd
+            payload=dumpd(response)
+            if len(__import__('json').dumps(payload))>MAX_STAGED_RESPONSE_BYTES:
+                raise UserFacingError(f"stage '{stage}': provider response exceeds the staged-size bound.",
+                    "a paid result larger than the staging bound cannot be made durable.",
+                    "Reconcile the billed attempt before retrying.")
+            # Raw result + measured usage durable BEFORE the settle handoff and any
+            # interpretation: crash windows after this point replay, never rebill.
+            staging.store.complete_staged(staging.claim,execution_point=point,node=node,stage=stage,item=key[3],ordinal=ordinal,
+                response=payload,usage=model_config._usage_of(response))
+            # Missing usage is the gateway's responsibility: hold, never assume zero.
+            gateway.settle(attempt,response)
+            check_execution()
+            return response
+        except BaseException:
+            try:gateway.uncertain(attempt)
+            except Exception:pass  # Never turn a ledger outage into a refund or hide provider failure.
+            raise
     gateway,attempt=_reserve(stage,provider,model,messages,max_output_tokens)
     try:
         response=call()
@@ -84,7 +174,34 @@ def admitted_stream(call,*,stage,provider,model,messages,max_output_tokens):
         # Streaming aggregation/usage is not wired yet. Preserve the hold.
         gateway.uncertain(attempt)
 
-def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_tokens):
+def _model_params_snapshot(chat_model, _depth=0):
+    """The provider-significant generation parameters carried by the built model:
+    sampling settings, tool bindings, response_format, provider-route extras.
+    Output adapters are unwrapped so their forced tool/schema is included.
+    Locally assigned ids never appear here; tool-call ids live in the messages."""
+    snap = {}
+    for attr in ('temperature', 'max_tokens', 'top_p', 'seed', 'stop',
+                 'frequency_penalty', 'presence_penalty', 'model_kwargs', 'extra_body'):
+        value = getattr(chat_model, attr, None)
+        if value is not None:
+            snap[attr] = value
+    kwargs = getattr(chat_model, 'kwargs', None)  # RunnableBinding (bind_tools etc.)
+    if isinstance(kwargs, dict):
+        for key in ('tools', 'response_format', 'tool_choice'):
+            if key in kwargs:
+                snap[key] = kwargs[key]
+    tool = getattr(chat_model, 'tool', None)  # forced-tool output adapters
+    if tool is not None:
+        snap['tool'] = tool
+    if _depth < 4:
+        inner = getattr(chat_model, 'model', None) or getattr(chat_model, 'runnable', None)
+        if inner is not None and inner is not chat_model:
+            for key, value in _model_params_snapshot(inner, _depth + 1).items():
+                snap.setdefault(key, value)
+    return snap
+
+
+def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_tokens,item=None):
     from .wire_binding import wire_model
     if wire_model(chat_model,stage=stage,provider=provider,model=model):
         from .stop_fence import check_execution
@@ -102,4 +219,5 @@ def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_t
         check_execution()
         return response
     return admitted_invoke(lambda:chat_model.invoke(messages),stage=stage,provider=provider,
-        model=model,messages=messages,max_output_tokens=max_output_tokens)
+        model=model,messages=messages,max_output_tokens=max_output_tokens,item=item,
+        model_params=_model_params_snapshot(chat_model))

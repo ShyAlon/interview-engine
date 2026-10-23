@@ -40,6 +40,8 @@ class InterviewApplication:
             import psycopg
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
             pg_conn=psycopg.connect(pg_store.conn.info.dsn,autocommit=True)
+            from . import model_config as _mc
+            self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
             saver=FencedPostgresSaver(pg_conn,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
                 serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
@@ -62,6 +64,8 @@ class InterviewApplication:
         else:
             from .progress_journal import ProgressJournal
             self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
+        self._pg_store=pg_store;self._pg_claim=pg_claim
+        if not hasattr(self,'_staging'):self._staging=None
         def journal_signal(ev):
             # The interview graph emits intent and ConOps stages through one bus.
             phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
@@ -85,6 +89,13 @@ class InterviewApplication:
     @contextmanager
     def _runtime_context(self):
         token=model_config._session_llm_log.set(str(self.outdir/'llm-calls.jsonl'))
+        # PR B staged provider responses: DB-backed sessions stage every usable
+        # provider response durably before interpretation (replay, never rebill).
+        staging_token=None
+        # _staging is optional (None outside DB-backed sessions) and absent on
+        # instances built without __init__ (isolated unit constructions).
+        if getattr(self, '_staging', None) is not None:
+            staging_token=model_config._response_staging.set(self._staging)
         heartbeat_token=model_config._progress_heartbeat.set(self._heartbeat_signal)
         from .stop_fence import _stopped_usage
         def stopped_usage(response,*,stage,provider,model):
@@ -100,6 +111,7 @@ class InterviewApplication:
             with use(self.runtime), session_models.use(self.model_map) if self.model_map is not None else nullcontext():
                 yield
         finally:
+            if staging_token is not None:model_config._response_staging.reset(staging_token)
             _stopped_usage.reset(usage_token)
             model_config._progress_heartbeat.reset(heartbeat_token)
             model_config._session_llm_log.reset(token)
@@ -154,6 +166,18 @@ class InterviewApplication:
         while not self.finished:
             try:
                 with self._runtime_context():
+                    if getattr(self, '_staging', None) is not None:
+                        # Anchor for this advance: the pinned checkpoint when
+                        # restored, else the session's published pointer
+                        # ('bootstrap' first). The super-step half of the
+                        # execution point is read from the pregel scratchpad at
+                        # call time - deterministic given the anchor, and immune
+                        # to the async-checkpoint commit race.
+                        anchor = self.cfg['configurable'].get('checkpoint_id')
+                        if anchor is None:
+                            published = self._pg_store.load_published(self.session_id, self._pg_claim.owner_id)
+                            anchor = published['published_checkpoint_id'] if published else None
+                        self._staging.set_execution_point(anchor)
                     self.result=self.graph.invoke(self.state,self.cfg)
                     check_execution()
             except Exception:
@@ -162,15 +186,18 @@ class InterviewApplication:
                     # Registry restores the old approval on failure. Restore its
                     # checkpoint too, so a retry/restart cannot accept a cleared
                     # or partly regenerated ConOps under that old review ID.
-                    from langchain_core.messages import RemoveMessage
-                    current=self.graph.get_state(self.cfg).values
-                    old_ids={m.id for m in rework_backup.get('messages',[]) if getattr(m,'id',None)}
-                    remove=[RemoveMessage(id=m.id) for m in current.get('messages',[])
-                            if getattr(m,'id',None) and m.id not in old_ids]
-                    self.graph.update_state(self.cfg,{'conops':rework_backup.get('conops'),
-                        'conops_draft':rework_backup.get('conops_draft'),
-                        'conops_decision_attempts':rework_backup.get('conops_decision_attempts',0),
-                        'messages':remove+rework_backup.get('messages',[])})
+                    if hasattr(self.graph,'get_state'):
+                        # Checkpoint restore requires a real compiled graph; stub
+                        # graphs (unit constructions) carry no checkpoints.
+                        from langchain_core.messages import RemoveMessage
+                        current=self.graph.get_state(self.cfg).values
+                        old_ids={m.id for m in rework_backup.get('messages',[]) if getattr(m,'id',None)}
+                        remove=[RemoveMessage(id=m.id) for m in current.get('messages',[])
+                                if getattr(m,'id',None) and m.id not in old_ids]
+                        self.graph.update_state(self.cfg,{'conops':rework_backup.get('conops'),
+                            'conops_draft':rework_backup.get('conops_draft'),
+                            'conops_decision_attempts':rework_backup.get('conops_decision_attempts',0),
+                            'messages':remove+rework_backup.get('messages',[])})
                     self.result=rework_backup;self.open_input=rework_input
                     self.state=None
                 raise

@@ -10,6 +10,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG session store tests skip')
+from conftest import managed_pg_server
 
 import psycopg
 import psycopg.rows
@@ -34,12 +35,23 @@ MIRRORED_JOURNAL_DDL = """CREATE TABLE engine_session_journal(
  cursor BIGINT NOT NULL, page JSONB NOT NULL, created_at DOUBLE PRECISION NOT NULL,
  PRIMARY KEY(session_id, cursor))"""
 
+# Mirror of 20261022160000_staged_provider_responses.sql (PR B staged provider
+# responses), without the auth FK/RLS. Provider calls in DB mode stage responses here.
+MIRRORED_STAGING_DDL = """CREATE TABLE staged_provider_responses(
+ owner_id UUID NOT NULL, session_id TEXT NOT NULL, generation INTEGER NOT NULL,
+ execution_point TEXT NOT NULL DEFAULT 'bootstrap', node TEXT NOT NULL DEFAULT '',
+ stage TEXT NOT NULL, item TEXT NOT NULL DEFAULT '', ordinal INTEGER NOT NULL,
+ attempt_id TEXT, request_sha256 TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+ dispatched_at DOUBLE PRECISION NOT NULL, response JSONB, usage JSONB,
+ completed_at DOUBLE PRECISION,
+ PRIMARY KEY (session_id, generation, execution_point, node, stage, item, ordinal))"""
+
 OWNER_A = '00000000-0000-0000-0000-000000000001'
 OWNER_B = '00000000-0000-0000-0000-000000000002'
 
 
 def make_store(tmp_path):
-    server = pgserver.get_server(str(tmp_path / 'pgdata'))
+    server = managed_pg_server(str(tmp_path / 'pgdata'))
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.commit()

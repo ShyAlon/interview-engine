@@ -12,6 +12,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG application wiring tests skip')
+from conftest import managed_pg_server
 
 import psycopg
 import psycopg.rows
@@ -26,7 +27,7 @@ from interview_engine.pg_checkpoint import FencedPostgresSaver
 from interview_engine.pg_journal import BufferedJournal
 from interview_engine.pg_session_store import PgSessionStore
 from interview_engine.stop_fence import StopRequested
-from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
+from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL, MIRRORED_STAGING_DDL
 
 OWNER = '00000000-0000-0000-0000-000000000001'
 SID = '11111111-1111-4111-8111-111111111111'
@@ -48,12 +49,13 @@ def _cleanup_pg():
 
 
 def make_conn(tmp_path, name='pgdata', init=True):
-    server = pgserver.get_server(str(tmp_path / name))
+    server = managed_pg_server(str(tmp_path / name))
     _OPEN['servers'].append(server)
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     if init:
         conn.execute(MIRRORED_REGISTRY_DDL)
         conn.execute(MIRRORED_JOURNAL_DDL)
+        conn.execute(MIRRORED_STAGING_DDL)
         conn.commit()
     # Tests bootstrap the checkpoint schema explicitly as superuser; the
     # runtime saver setup never runs DDL. Library DDL uses CREATE INDEX
@@ -435,3 +437,68 @@ def test_db_mode_custom_factory_cannot_bypass_provider_guard(tmp_path, monkeypat
     with pytest.raises(UserFacingError, match='does not call providers'):
         registry.start(StartSessionRequest(task_id='t', idea='i', model_route='ollama'))
     assert calls == []
+
+
+def test_registry_crash_mid_advance_staged_pause_no_rebill(tmp_path, fake_ollama, fake_models):
+    """Full session-restore E2E through the registry: start publishes with every
+    provider call staged; a crash mid-advance leaves a dispatched-without-response
+    row (unknown outcome, possibly billed); the restored session pins the published
+    pointer and the replayed logical call PAUSES with attempt evidence - no new
+    provider call, no new ledger attempt, never a blind rerun. Drives the program's
+    advance directly (the registry's respond control pipeline is a separate layer)."""
+    import interview_engine.attempt_admission as aa
+    from test_pg_staged_responses import FakeGateway
+    from vmodel_contracts.interactive import InputResponse
+    from interview_engine.errors import UserFacingError
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=1.0)
+    _OPEN['registries'].append(registry)
+    gw = FakeGateway()
+    with aa.admission_gateway(gw, required=True):
+        session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                        model_route='ollama', initial_model='phi4'))
+    # Every provider call of the first advance is staged with its durable
+    # execution point; the saver hook advanced the point past 'bootstrap'.
+    with store.conn.cursor() as cur:
+        cur.execute("SELECT stage, execution_point, response FROM staged_provider_responses WHERE session_id=%s", (SID,))
+        staged = cur.fetchall()
+    assert staged and all(r['response'] is not None for r in staged), staged
+    reserves_after_start = len(gw.reserved)
+
+    # Crash during the NEXT advance: the provider call raises mid-flight, after
+    # its staged row was dispatched and the ledger attempt reserved.
+    class Boom(Exception):
+        pass
+
+    def crashing_invoke(messages):
+        raise Boom('crash during provider call')
+
+    fake_models['probing'].invoke = crashing_invoke  # the graph cached the instance
+    open_input = session.program.open_input
+    answer = InputResponse(input_id=open_input.input_id, actor_id='founder', value='customers book online')
+    with aa.admission_gateway(gw, required=True):
+        with pytest.raises(Boom):
+            session.program.advance(answer)
+    assert len(gw.uncertain_calls) == 1
+    assert len(gw.reserved) == reserves_after_start + 1
+    # The crashed call was staged under the session's PUBLISHED execution point
+    # (never an unpublished intermediate checkpoint), open with response NULL.
+    with store.conn.cursor() as cur:
+        cur.execute("SELECT execution_point, response FROM staged_provider_responses WHERE session_id=%s AND response IS NULL", (SID,))
+        open_rows = cur.fetchall()
+    assert len(open_rows) == 1 and open_rows[0]['execution_point'] != 'bootstrap', open_rows
+
+    registry.close()
+    time.sleep(1.2)
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
+    _OPEN['registries'].append(registry2)
+    restored = registry2.get(SID)
+    probing_before = len(fake_models['probing'].replies)
+    with aa.admission_gateway(gw, required=True):
+        with pytest.raises(UserFacingError, match='Reconcile|result is missing'):
+            restored.program.advance(answer)
+    assert len(gw.reserved) == reserves_after_start + 1, 'resume reserved a new attempt for an unknown outcome'
+    assert len(fake_models['probing'].replies) == probing_before, 'provider re-called during the paused replay'

@@ -305,6 +305,22 @@ class SessionRegistry:
                 if session.stop_fence is not None and session.stop_fence.requested:
                     session.open_input=None
                     return accepted,session.snapshot()
+                # Provably pre-commit: the acceptance block mutates memory only,
+                # and publish_step is reachable solely via _save_unfenced from
+                # registry methods, never from inside _advance - so the durable
+                # control still holds the PRIOR step. Re-publishing it tripped the
+                # sequence CAS and masked the real error; instead verify the
+                # durable state agrees, reconcile from it if the store says the
+                # step somehow landed, and let the ORIGINAL error propagate.
+                if self._store is not None and session.pg_claim is not None:
+                    durable=self._store.load_published(session.session_id,session.pg_claim.owner_id)
+                    if durable is not None and durable['control'].get('sequence',prior[0])!=prior[0]:
+                        with self._lock:self._sessions.pop(session.session_id,None)
+                        self.get(session.session_id)
+                        raise
+                    session.sequence,session.status,session.next_step,session.open_input=prior
+                    self._publish(session)
+                    raise
                 try:
                     with self._control_commit(session):
                         session.sequence,session.status,session.next_step,session.open_input=prior
@@ -323,7 +339,31 @@ class SessionRegistry:
                             session.status=ProcessStatus.COMPLETED;session.next_step=NextStep.COMPLETE
                         else:
                             session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
-                    self._save(session)
+                    try:
+                        self._save(session)
+                    except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+                        raise
+                    except Exception:
+                        # Ambiguous commit: the step transaction may have landed
+                        # while its ack failed (or journal acknowledge raised after
+                        # the commit). The durable store is authoritative: if it
+                        # holds this step, reconcile memory from it and serve the
+                        # committed outcome - never reset to prior memory, never
+                        # let a retry double-advance.
+                        if self._store is not None and session.pg_claim is not None:
+                            durable=self._store.load_published(session.session_id,session.pg_claim.owner_id)
+                            if durable is not None and durable['control'].get('sequence',0)>=session.sequence:
+                                with self._lock:self._sessions.pop(session.session_id,None)
+                                reconciled=self.get(session.session_id)
+                                return accepted,reconciled.published or self._publish(reconciled)
+                            # The store disproves the in-memory step: the tail
+                            # already mutated responses/open_input/sequence, so
+                            # this session object can no longer serve idempotency
+                            # honestly. Evict; the next get reloads the durable
+                            # truth (answer unrecorded, question open) and the
+                            # client retry re-advances from the published pointer.
+                            with self._lock:self._sessions.pop(session.session_id,None)
+                        raise
                     if session.pg_stopped:
                         session.open_input=None
                         return accepted,session.snapshot()

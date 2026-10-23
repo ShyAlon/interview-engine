@@ -463,6 +463,135 @@ def describe_models() -> str:
     return ", ".join(f"{s}={for_stage(s).provider}/{for_stage(s).model}" for s in _STAGE_DEFAULTS)
 
 
+import contextvars as _contextvars
+
+# PR B staged provider responses: set by the application when a DB-backed session
+# runs. Holds a StagingContext; when unset, behavior is exactly the pre-staging path.
+# The dispatch guard (_db_dispatch_block) is unchanged; staging is what will make
+# lifting it safe, under a separate approved enable.
+_response_staging = _contextvars.ContextVar("response_staging", default=None)
+
+
+class StagingContext:
+    """Per-application-instance staging state.
+
+    Logical call identity = (session, generation, execution_point, node, stage,
+    item, ordinal). `execution_point` is the DURABLE checkpoint id the graph
+    execution resumed from ('bootstrap' before the first checkpoint): the
+    application sets it from its pinned config before each advance, and the
+    checkpoint saver advances it as super-steps commit, so a crash-resume pins
+    the same published checkpoint and re-executes the interrupted node under the
+    SAME point (its calls replay), while a new turn resumes from a NEW committed
+    checkpoint (identical prompts are new paid calls, never replays). `node` is
+    the issuing graph node from the LangGraph runnable config, so two parallel
+    nodes under one execution point cannot collide. `ordinal` is the position of
+    the call within that node execution's (stage,item) sequence: `cursors` maps
+    (execution_point, node, stage, item) to the next ordinal. A fresh instance
+    after a crash starts its cursors at 0 and replays the durable log under the
+    pinned execution point; nothing about the identity is process-local."""
+
+    def __init__(self, session_id: str, store, claim):
+        self.session_id = session_id
+        self.store = store
+        self.claim = claim
+        self.generation = claim.generation
+        self.anchor = 'bootstrap'
+        self.step = 0
+        self.cursors: dict = {}
+
+    @property
+    def execution_point(self) -> str:
+        """anchor:super-step - both halves deterministic across re-execution.
+        The anchor is the advance's durable checkpoint anchor (pinned on restore,
+        published pointer while serving, 'bootstrap' first). The step is
+        LangGraph's super-step counter read from the pregel scratchpad AT CALL
+        TIME (checkpoint commits complete asynchronously and race the next
+        super-step's calls; the scratchpad step does not). Resuming from the
+        same anchor re-derives the same steps."""
+        return f"{self.anchor}:{self.current_step()}"
+
+    def set_execution_point(self, anchor, step: int = 0):
+        """Seed the durable anchor for an advance (and the fallback step for
+        calls made outside graph execution, e.g. direct test drives)."""
+        self.anchor = str(anchor) if anchor else 'bootstrap'
+        self.step = step
+
+    # The super-step and node identity rely on LangGraph private internals,
+    # pinned and probed: langgraph 1.1.10 / langchain-core 1.6.3 (uv.lock).
+    # tests/test_pg_staged_loop_replay.py proves the contract against real graph
+    # executions; re-run it before any version bump. A missing/malformed
+    # scratchpad IN GRAPH is a loud failure - a fallback counter would silently
+    # re-key paid-call identity.
+    @staticmethod
+    def _runnable_config() -> dict:
+        from langchain_core.runnables.config import var_child_runnable_config
+        return var_child_runnable_config.get(None) or {}
+
+    def current_step(self) -> int:
+        """The current super-step from LangGraph's runnable config; the seeded
+        value only for calls made entirely outside graph execution."""
+        configurable = self._runnable_config().get('configurable') or {}
+        if not configurable:
+            return self.step  # outside graph execution (direct test drives)
+        scratchpad = configurable.get('__pregel_scratchpad')
+        step = getattr(scratchpad, 'step', None)
+        if not isinstance(step, int) or step < 0:
+            raise RuntimeError(
+                'LangGraph super-step unreadable: in-graph provider call without '
+                f'a valid __pregel_scratchpad.step (scratchpad={scratchpad!r}). '
+                'Pinned/probed at langgraph 1.1.10 + langchain-core 1.6.3; '
+                're-probe the private API before any upgrade - no fallback is '
+                'safe for paid-call identity.')
+        return step
+
+    @staticmethod
+    def current_node() -> str:
+        """The issuing graph node from LangGraph's runnable config contextvar
+        (checkpoint_ns prefix). '' only outside graph execution."""
+        configurable = StagingContext._runnable_config().get('configurable') or {}
+        if not configurable:
+            return ''  # outside graph execution (direct calls)
+        ns = configurable.get('checkpoint_ns') or ''
+        node = ns.split(':')[0] if ns else ''
+        if not node:
+            raise RuntimeError(
+                'LangGraph node identity unreadable: in-graph provider call '
+                'without checkpoint_ns. Pinned/probed at langgraph 1.1.10 + '
+                'langchain-core 1.6.3; re-probe before any upgrade.')
+        return node
+
+    def next_cursor(self, node: str, stage: str, item: str):
+        key = (self.execution_point, node, stage, item)
+        idx = self.cursors.get(key, 0)
+        return key, idx
+
+
+def _staging_request_sha(cfg, messages, stage: str, item, params: dict | None = None) -> str:
+    """Hash the FULL effective request: provider, model, generation ceiling and the
+    serialized messages. A replay matches only the identical paid call."""
+    import hashlib, json
+    from langchain_core.messages import BaseMessage, message_to_dict
+    def _wire(message):
+        # Semantic request content only: the provider never sees the locally
+        # generated message id, and a crash-resume rebuilds messages with fresh
+        # ids - including it would fingerprint-pause a legitimate replay.
+        if not isinstance(message, BaseMessage):
+            return str(message)
+        d = message_to_dict(message)
+        d.get('data', d).pop('id', None)
+        return d
+    body = json.dumps({"provider": cfg.provider, "model": cfg.model, "stage": stage,
+                       "item": item, "max_tokens": _max_tokens_limit(cfg.max_tokens),
+                       # Every provider-significant generation parameter the call
+                       # was built with (temperature, tools, response_format,
+                       # extra_body/provider route settings): a replay must match
+                       # the identical paid call, not merely the same prompt.
+                       "params": params or {},
+                       "messages": [_wire(m) for m in messages]},
+                      sort_keys=True, default=str)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
     """Invoke under guardrails, retrying one provider-empty completion.
 
@@ -487,7 +616,7 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
         t0 = time.monotonic()
         try:
             _set_model_timeout(chat_model, effective_timeout)
-            resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
+            resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,item=item,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
             elapsed = time.monotonic() - t0
             _watchdog().complete(stage, elapsed)
             _check_truncated(resp, stage, cfg)
