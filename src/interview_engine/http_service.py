@@ -17,6 +17,8 @@ import logging
 import os
 from threading import RLock
 from uuid import UUID, uuid4
+from vmodel_contracts.runtime import artifacts_root
+from .tenant_worker import worker_root
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from .errors import UserFacingError
@@ -401,7 +403,7 @@ class SessionRegistry:
             if self._program_factory is default_program_factory:
                 from .application import InterviewApplication
                 candidate=self._prepare_program(session,lambda:InterviewApplication(session.session_id,session.task_id,session.request.idea,
-                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target,
+                    artifact_root=str(self._state_dir) if self._state_dir is not None else str(worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))),model_route=request.model_route,pinned_models=target,
                     pg_store=self._store,pg_claim=session.pg_claim))
                 # Read the same durable graph thread; never invoke a model during preflight.
                 checkpoint=candidate.graph.get_state(candidate.cfg)
@@ -662,8 +664,13 @@ class SessionRegistry:
         if not self._allow_db_dispatch:
             raise UserFacingError("database session cannot dispatch providers yet.","Staged responses land in PR B.","Run this session in file persistence mode.")
         from .application import InterviewApplication
+        # Same artifact root as the file-backed factory: database persistence
+        # changes where SESSION STATE lives, never where validated artifacts
+        # land - the delivery app's terminal reconcile reads them from the
+        # configured artifacts dir under the serving owner's tenant scope.
+        root=worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))
         return InterviewApplication(session.session_id,request.task_id,request.idea,
-            artifact_root=None,model_route=request.model_route,pinned_models=pinned,
+            artifact_root=str(root),model_route=request.model_route,pinned_models=pinned,
             initial_model=request.initial_model,pg_store=self._store,pg_claim=session.pg_claim)
 
     def _restore_payload(self,payload:dict,session_id:str)->EngineSession:
