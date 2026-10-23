@@ -126,6 +126,25 @@ class PgSessionStore:
             return None
         return SessionClaim(session_id, owner_id, row["generation"], row["lease_epoch"], instance)
 
+    def release(self, claim: SessionClaim) -> bool:
+        """Voluntarily end a held lease at a committed boundary so another
+        instance can claim immediately. Identity, generation and epoch must all
+        match, so a stale owner can never release a lease it already lost."""
+        now = time.time()
+        try:
+            row = self.conn.execute(
+                "UPDATE engine_sessions SET lease_expires_at = %(now)s, updated_at = %(now)s"
+                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
+                " RETURNING 1",
+                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                 "epoch": claim.epoch, "instance": claim.instance, "now": now}).fetchone()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return row is not None
+
     def heartbeat(self, claim: SessionClaim, ttl: float) -> bool:
         """Extend a held lease (never bumps the epoch). False means it was lost."""
         now = time.time()

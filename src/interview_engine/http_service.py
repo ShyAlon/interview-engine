@@ -144,6 +144,18 @@ class SessionRegistry:
                 thread.join(timeout=max(remaining,0.05))
                 if thread.is_alive():log.warning('lease heartbeat did not join session=%s',session.session_id)
         for session in sessions:
+            # Voluntary lease release at a committed boundary: the write lock
+            # waits out any in-flight turn, so another host can claim
+            # immediately without resuming mid-call state. Stop stays
+            # terminal - release changes only who may serve next.
+            claim=getattr(session,'pg_claim',None)
+            if claim is not None and self._store is not None:
+                try:
+                    with session.write_lock:
+                        self._store.release(claim)
+                except Exception:
+                    log.warning('lease.release.failed session=%s',session.session_id,exc_info=True)
+        for session in sessions:
             # Close program-held database connections: no socket outlives the
             # registry that owns it.
             saver=getattr(session.program,'saver',None)
@@ -613,8 +625,23 @@ class SessionRegistry:
             checkpoint_id=None
             graph=getattr(program,'graph',None)
             if graph is not None:
-                state=graph.get_state(program.cfg)
-                if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
+                # Publish the checkpoint this step produced, not the resume
+                # anchor: a restored program's cfg is pinned to the published
+                # pointer (authoritative restore), and get_state on a pinned
+                # config returns that pin - so reclaimed sessions used to
+                # re-publish their resume checkpoint forever (2026-10-23
+                # cross-host continuation loop). Provenance, never
+                # saver-latest: the advance records the checkpoint it actually
+                # committed (durability='exit'), so an unpublished orphan from
+                # a crashed prior epoch can never be selected. The fallback
+                # reads the pinned cfg: on a reclaimed session that has not
+                # run a turn yet it yields the restore anchor, which simply
+                # republishes the current pointer; on a fresh session the cfg
+                # is unpinned and yields the first turn's checkpoint.
+                checkpoint_id=getattr(program,'produced_checkpoint_id',None)
+                if checkpoint_id is None:
+                    state=graph.get_state(program.cfg)
+                    if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
             try:
                 self._store.publish_step(session.pg_claim,self._serialize(session),
                     journal_pages=pages,
@@ -747,7 +774,16 @@ class ProtocolFailure(Exception):
 
 
 def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)->FastAPI:
-    sessions=registry or SessionRegistry();app=FastAPI(title="Requi.re interview engine",version="1")
+    sessions=registry or SessionRegistry()
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _lifespan(_app):
+        yield
+        # Stop serving: heartbeats halt and held leases release at committed
+        # boundaries, so the next host takes over without waiting out the TTL.
+        close=getattr(sessions,'close',None)
+        if close is not None:close()
+    app=FastAPI(title="Requi.re interview engine",version="1",lifespan=_lifespan)
     expected_token=service_token if service_token is not None else os.environ.get("INTERVIEW_ENGINE_TOKEN","local-interview-engine-token")
     if not expected_token:raise RuntimeError("INTERVIEW_ENGINE_TOKEN must not be empty")
 

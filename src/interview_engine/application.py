@@ -24,6 +24,7 @@ from . import session_models, model_config
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
     def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None):
+        self.produced_checkpoint_id=None
         self.session_id,self.task_id=session_id,task_id
         from .session_runtime import SessionRuntime
         self.runtime=SessionRuntime()
@@ -178,7 +179,36 @@ class InterviewApplication:
                             published = self._pg_store.load_published(self.session_id, self._pg_claim.owner_id)
                             anchor = published['published_checkpoint_id'] if published else None
                         self._staging.set_execution_point(anchor)
-                    self.result=self.graph.invoke(self.state,self.cfg)
+                    # 'exit' durability: the turn's checkpoints are durable
+                    # when invoke returns (default 'async' commits in the
+                    # background, so the step publish could run before the
+                    # turn's final checkpoint landed - observed 2026-10-23 as
+                    # the published pointer predating the turn's state).
+                    self.result=self.graph.invoke(self.state,self.cfg,durability='exit')
+                    # Publish provenance: record the checkpoint this advance
+                    # produced (its writes are durable at 'exit'). The step
+                    # publish references exactly this checkpoint - a
+                    # saver-latest read at publish time could otherwise select
+                    # an unpublished orphan committed by a crashed prior
+                    # epoch's turn.
+                    if hasattr(self.graph,'get_state'):
+                        cfg_view=self.cfg.get('configurable',{}) if isinstance(self.cfg,dict) else {}
+                        latest=self.graph.get_state({'configurable':{'thread_id':cfg_view.get('thread_id'),
+                            'checkpoint_ns':cfg_view.get('checkpoint_ns','')}})
+                        snap_cfg=(getattr(latest,'config',None) or {}).get('configurable',{}) if latest is not None else {}
+                        # getattr: unit constructions (__new__, no __init__) carry no attribute.
+                        self.produced_checkpoint_id=snap_cfg.get('checkpoint_id') or getattr(self,'produced_checkpoint_id',None)
+                    # Continue from what this turn produced: a restored cfg is
+                    # pinned to the restore anchor, and invoke resumes a pinned
+                    # config from that checkpoint - so without advancing the
+                    # pin, every later turn on a reclaimed host replays from
+                    # the anchor (2026-10-23: conops extraction replayed per
+                    # answer until the LLM call budget stopped the run). A
+                    # fresh host's unpinned cfg gets the same resume-latest
+                    # semantics; a failed invoke leaves the pin at the last
+                    # produced checkpoint, so a retry replays only that turn.
+                    if getattr(self,'produced_checkpoint_id',None) and isinstance(self.cfg,dict):
+                        self.cfg.setdefault('configurable',{})['checkpoint_id']=self.produced_checkpoint_id
                     check_execution()
             except Exception:
                 check_execution()  # Stop must never restore a previous actionable input.
@@ -194,10 +224,16 @@ class InterviewApplication:
                         old_ids={m.id for m in rework_backup.get('messages',[]) if getattr(m,'id',None)}
                         remove=[RemoveMessage(id=m.id) for m in current.get('messages',[])
                                 if getattr(m,'id',None) and m.id not in old_ids]
-                        self.graph.update_state(self.cfg,{'conops':rework_backup.get('conops'),
+                        restored_cfg=self.graph.update_state(self.cfg,{'conops':rework_backup.get('conops'),
                             'conops_draft':rework_backup.get('conops_draft'),
                             'conops_decision_attempts':rework_backup.get('conops_decision_attempts',0),
                             'messages':remove+rework_backup.get('messages',[])})
+                        # The rollback write is this owner's produced state; the
+                        # failed rework's checkpoints are unpublished orphans.
+                        if isinstance(restored_cfg,dict):
+                            self.produced_checkpoint_id=(restored_cfg.get('configurable') or {}).get('checkpoint_id') or getattr(self,'produced_checkpoint_id',None)
+                            if getattr(self,'produced_checkpoint_id',None) and isinstance(self.cfg,dict):
+                                self.cfg.setdefault('configurable',{})['checkpoint_id']=self.produced_checkpoint_id
                     self.result=rework_backup;self.open_input=rework_input
                     self.state=None
                 raise

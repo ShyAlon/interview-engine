@@ -73,8 +73,18 @@ class TenantRegistryRouter:
                     # constructor block is lifted for exactly this wiring.
                     self._registries[owner]=self.registry_type(self.factory,
                         session_store=pg_session_store(owner_scoped_dsn(self._session_dsn,owner)),owner_id=owner,
+                        lease_ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0')),
                         allow_db_provider_dispatch=True)
             return self._registries[owner]
+
+    def close(self)->None:
+        # Shutdown path: close every per-owner registry so held leases are
+        # released at committed boundaries instead of expiring.
+        with self._lock:
+            registries=list(self._registries.values())
+            self._registries={}
+        for registry in registries:
+            registry.close()
 
     def __getattr__(self,name):return getattr(self._registry(),name)
 

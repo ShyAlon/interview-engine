@@ -17,7 +17,7 @@ def app(tmp_path):
  a.open_input=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='Review',context={'decision_purpose':'semantic_review'})
  class Graph:
   def update_state(self,cfg,value):self.updated=value
-  def invoke(self,state,cfg):return {**a.result,'conops_draft':draft()}
+  def invoke(self,state,cfg,**kwargs):return {**a.result,'conops_draft':draft()}
  a.graph=Graph();a._runtime_context=lambda:nullcontext();return a,review
 
 def test_remove_resumes_conops_with_valid_intent(tmp_path):
