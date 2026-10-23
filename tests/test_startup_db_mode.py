@@ -5,9 +5,15 @@ directory to the delivery-api-owned Postgres registry. The wiring is decided
 once at startup and fails clear: an unreachable database, a missing placement
 migration, or a single-tenant deployment without an owner scope all stop the
 boot instead of silently falling back or failing mid-interview.
+
+Schema-present cases run against the REAL delivery-api migrated schema (its
+own pg_harness, no DDL mirror) when the checkout is provided via
+DELIVERY_TEST_DELIVERY_SOURCE, and skip otherwise.
 """
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +23,8 @@ from conftest import managed_pg_server
 import psycopg
 import psycopg.rows
 
-from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
+DELIVERY = os.getenv('DELIVERY_TEST_DELIVERY_SOURCE')
+requires_delivery = pytest.mark.skipif(not DELIVERY, reason='requires DELIVERY_TEST_DELIVERY_SOURCE (delivery-api checkout)')
 
 OWNER = '00000000-0000-0000-0000-000000000001'
 
@@ -42,20 +49,23 @@ print('type=%s dsn_set=%s' % (type(router).__name__, bool(getattr(router, '_sess
 
 
 def run_startup(env, probe=PROBE):
-    import os
     full = {k: v for k, v in os.environ.items() if not k.startswith('INTERVIEW_ENGINE_')}
     full.update(env)
     return subprocess.run([sys.executable, '-c', probe], capture_output=True, text=True, env=full, timeout=120)
 
 
-def migrated_dsn(tmp_path):
-    server = managed_pg_server(str(tmp_path / 'pgdata'))
-    conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
-    conn.execute(MIRRORED_REGISTRY_DDL)
-    conn.execute(MIRRORED_JOURNAL_DDL)
-    conn.commit()
-    conn.close()
-    return server.get_uri()
+@pytest.fixture(scope='module')
+def migrated_dsn():
+    """The real delivery-api schema, applied by its own pg_harness."""
+    if not DELIVERY:
+        pytest.skip('requires DELIVERY_TEST_DELIVERY_SOURCE (delivery-api checkout)')
+    sys.path.insert(0, str(Path(DELIVERY) / 'tests'))
+    import pg_harness
+    pg_harness.start()
+    dsn = pg_harness.STATE.get('dsn')
+    if not dsn:
+        pytest.skip('pg_harness unavailable: ' + pg_harness.STATE.get('reason', ''))
+    yield dsn
 
 
 def test_file_mode_stays_default_without_dsn():
@@ -65,17 +75,16 @@ def test_file_mode_stays_default_without_dsn():
     assert 'state_dir=None' not in result.stdout  # state_dir is the artifacts root
 
 
-def test_database_mode_wires_store_and_owner(tmp_path):
-    dsn = migrated_dsn(tmp_path)
-    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': dsn, 'INTERVIEW_ENGINE_OWNER_ID': OWNER})
+def test_database_mode_wires_store_and_owner(migrated_dsn):
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': migrated_dsn, 'INTERVIEW_ENGINE_OWNER_ID': OWNER})
     assert result.returncode == 0, result.stderr
     assert 'type=SessionRegistry store=PgSessionStore' in result.stdout
     assert ('owner=%s' % OWNER) in result.stdout
 
 
-def test_database_mode_single_tenant_requires_owner_scope(tmp_path):
-    dsn = migrated_dsn(tmp_path)
-    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': dsn})
+def test_database_mode_single_tenant_requires_owner_scope():
+    # The owner check fails before any database contact, so no server is needed.
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': 'postgresql://127.0.0.1:1/none'})
     assert result.returncode != 0
     assert 'INTERVIEW_ENGINE_OWNER_ID is required' in result.stderr
 
@@ -93,12 +102,11 @@ def test_database_mode_fails_clear_when_database_unreachable():
     assert 'database is unreachable' in result.stderr
 
 
-def test_tenant_mode_passes_dsn_to_router(tmp_path):
-    dsn = migrated_dsn(tmp_path)
+def test_tenant_mode_passes_dsn_to_router(migrated_dsn):
     result = run_startup({
         'INTERVIEW_ENGINE_TENANTS': '1',
         'INTERVIEW_ENGINE_TOKEN': 't#startup-test-token',
-        'INTERVIEW_ENGINE_SESSIONS_DSN': dsn,
+        'INTERVIEW_ENGINE_SESSIONS_DSN': migrated_dsn,
     }, probe=PROBE_TENANT)
     assert result.returncode == 0, result.stderr
     assert 'type=TenantRegistryRouter dsn_set=True' in result.stdout
@@ -110,11 +118,10 @@ def test_tenant_mode_without_dsn_keeps_file_registries():
     assert 'type=TenantRegistryRouter dsn_set=False' in result.stdout
 
 
-def test_tenant_router_builds_database_registries_per_owner(tmp_path):
+def test_tenant_router_builds_database_registries_per_owner(migrated_dsn):
     from interview_engine import tenant_worker
     from interview_engine.http_service import SessionRegistry
-    dsn = migrated_dsn(tmp_path)
-    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, tmp_path, session_dsn=dsn)
+    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, Path('/tmp/unused'), session_dsn=migrated_dsn)
     token = tenant_worker._owner.set(OWNER)
     try:
         registry = router._registry()
