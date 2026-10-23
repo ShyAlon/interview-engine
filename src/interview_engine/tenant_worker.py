@@ -21,6 +21,18 @@ def worker_root(default:Path)->Path:
     return _root.get() or default
 
 
+def owner_scoped_dsn(dsn:str,owner:str)->str:
+    """Tenant claims travel in the conninfo: every engine connection - serving,
+    heartbeat and saver-spawned - runs under the same tenant boundary, so the
+    placement tables' row security admits exactly this owner's rows. URI and
+    keyword conninfo forms both normalize through libpq."""
+    from psycopg.conninfo import conninfo_to_dict,make_conninfo
+    parts=conninfo_to_dict(dsn)
+    options="-c request.jwt.claim.sub=%s -c request.jwt.claim.session_id=%s"%(owner,owner)
+    parts['options']=((parts.get('options') or '')+' '+options).strip()
+    return make_conninfo(**parts)
+
+
 def pg_session_store(dsn:str):
     """One serving connection for a database-backed registry; fails clear at
     startup when the database is unreachable or the delivery-api placement
@@ -60,7 +72,7 @@ class TenantRegistryRouter:
                     # staged responses (PR B) landed, so the documented
                     # constructor block is lifted for exactly this wiring.
                     self._registries[owner]=self.registry_type(self.factory,
-                        session_store=pg_session_store(self._session_dsn),owner_id=owner,
+                        session_store=pg_session_store(owner_scoped_dsn(self._session_dsn,owner)),owner_id=owner,
                         allow_db_provider_dispatch=True)
             return self._registries[owner]
 

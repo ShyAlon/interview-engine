@@ -131,6 +131,18 @@ def test_tenant_router_builds_database_registries_per_owner(migrated_dsn):
     assert registry._owner_id == OWNER
     assert registry._state_dir is None
     assert registry._allow_db_dispatch is True
+    # Tenant claims travel in the conninfo, so row security admits this owner only.
+    row = registry._store.conn.execute("select current_setting('request.jwt.claim.sub', true) as claim").fetchone()
+    assert row['claim'] == OWNER
+
+
+def test_owner_scoped_dsn_normalizes_uri_and_keyword_forms():
+    from interview_engine.tenant_worker import owner_scoped_dsn
+    for dsn in ('postgresql://u@h:5432/db', 'host=x dbname=y user=z'):
+        scoped = owner_scoped_dsn(dsn, OWNER)
+        assert 'request.jwt.claim.sub=%s' % OWNER in scoped
+        assert 'request.jwt.claim.session_id=%s' % OWNER in scoped
+        assert 'postgres://' not in scoped  # normalized to keyword conninfo
 
 
 def test_tenant_router_file_mode_unchanged(tmp_path):

@@ -906,10 +906,10 @@ elif _sessions_dsn:
     # Database session persistence is opt-in by environment; file persistence
     # stays the default. Staged responses (PR B) landed, so the documented
     # constructor block on provider dispatch is lifted for exactly this wiring.
-    from .tenant_worker import pg_session_store
+    from .tenant_worker import owner_scoped_dsn,pg_session_store
     _owner_id=os.environ.get(OWNER_ID_ENV)
     if not _owner_id:
         raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
-    app=create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(_sessions_dsn),owner_id=_owner_id,allow_db_provider_dispatch=True))
+    app=create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(owner_scoped_dsn(_sessions_dsn,_owner_id)),owner_id=_owner_id,allow_db_provider_dispatch=True))
 else:
     app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
