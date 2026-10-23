@@ -165,3 +165,32 @@ def test_restore_uses_published_pointer_not_latest_write(tmp_path):
     assert published['control'] == {'status': 'step-1'}
     assert published['published_thread_id'] == 's1'
     assert published['published_checkpoint_id'] == 'cp-1'
+
+
+def test_create_adopts_delivery_app_prebound_row(tmp_path):
+    # The delivery app pre-binds its session row at Start
+    # (begin_interview_start -> set_engine_session, five columns). The engine's
+    # DB-mode create must adopt exactly that row, not conflict with it.
+    store = make_store(tmp_path)
+    store.conn.execute(
+        "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at)"
+        " VALUES ('s1',%s,'task1',1,%s)", (OWNER_A, time.time()))
+    store.conn.commit()
+    store.create('s1', 'task1', OWNER_A)  # no UniqueViolation
+    won = store.claim('s1', OWNER_A, 'host-a#1', ttl=60)
+    assert won is not None and won.generation == 1
+
+
+def test_create_conflict_raises_and_leaves_connection_usable(tmp_path):
+    # A genuinely conflicting existing row is still a hard conflict, and the
+    # failed op must not leave the shared serving connection aborted: every
+    # later operation on it has to see a clean transaction.
+    store = make_store(tmp_path)
+    store.create('s1', 'task1', OWNER_A)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        store.create('s1', 'task-OTHER', OWNER_A)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        store.create('s1', 'task1', OWNER_B)
+    store.create('s2', 'task2', OWNER_A)
+    won = store.claim('s2', OWNER_A, 'host-a#1', ttl=60)
+    assert won is not None
