@@ -936,23 +936,52 @@ def default_program_factory(session_id,request):
 
 SESSIONS_DSN_ENV='INTERVIEW_ENGINE_SESSIONS_DSN'
 OWNER_ID_ENV='INTERVIEW_ENGINE_OWNER_ID'
+FILE_SESSIONS_ENV='INTERVIEW_ENGINE_SESSIONS_FILE'
+FILE_SESSIONS_MSG=('database session persistence is the default: set '+SESSIONS_DSN_ENV+
+    ' (plus '+OWNER_ID_ENV+' outside tenant mode), or explicitly choose file persistence with '+
+    FILE_SESSIONS_ENV+'=1')
 
 from vmodel_contracts.runtime import artifacts_root
-_sessions_dsn=os.environ.get(SESSIONS_DSN_ENV)
-if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
-    if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
-        raise RuntimeError('Tenant engine requires a configured private service token')
-    from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
-    app=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=_sessions_dsn))
-    app.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
-elif _sessions_dsn:
-    # Database session persistence is opt-in by environment; file persistence
-    # stays the default. Staged responses (PR B) landed, so the documented
-    # constructor block on provider dispatch is lifted for exactly this wiring.
-    from .tenant_worker import owner_scoped_dsn,pg_session_store
-    _owner_id=os.environ.get(OWNER_ID_ENV)
-    if not _owner_id:
-        raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
-    app=create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(owner_scoped_dsn(_sessions_dsn,_owner_id)),owner_id=_owner_id,allow_db_provider_dispatch=True))
-else:
-    app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
+
+def _build_service_app():
+    """Service entry wiring, built when the ASGI server actually starts. Database
+    session persistence is the default; file persistence requires the explicit
+    opt-in; a missing choice fails the boot, never silently falls back."""
+    sessions_dsn=os.environ.get(SESSIONS_DSN_ENV)
+    if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
+        if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
+            raise RuntimeError('Tenant engine requires a configured private service token')
+        from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
+        if not sessions_dsn and os.environ.get(FILE_SESSIONS_ENV)!='1':
+            raise RuntimeError(FILE_SESSIONS_MSG)
+        service=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1'))
+        service.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
+        return service
+    if sessions_dsn:
+        # Database session persistence is the default once the DSN is set.
+        # Staged responses (PR B) landed, so the documented
+        # constructor block on provider dispatch is lifted for exactly this wiring.
+        from .tenant_worker import owner_scoped_dsn,pg_session_store
+        owner_id=os.environ.get(OWNER_ID_ENV)
+        if not owner_id:
+            raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
+        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(owner_scoped_dsn(sessions_dsn,owner_id)),owner_id=owner_id,allow_db_provider_dispatch=True))
+    # File persistence only when explicitly chosen; otherwise fail clear at boot.
+    if os.environ.get(FILE_SESSIONS_ENV)!='1':
+        raise RuntimeError(FILE_SESSIONS_MSG)
+    return create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
+
+
+class _LazyServiceApp:
+    """Builds the real app on the server's first ASGI (lifespan) call: importing
+    this module for its classes has no startup side effects, while a misconfigured
+    service still fails at boot, before it serves anything."""
+    def __init__(self):
+        self._service=None
+    async def __call__(self,scope,receive,send):
+        if self._service is None:
+            self._service=_build_service_app()
+        await self._service(scope,receive,send)
+
+
+app=_LazyServiceApp()

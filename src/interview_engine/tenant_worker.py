@@ -53,9 +53,10 @@ def pg_session_store(dsn:str):
 
 
 class TenantRegistryRouter:
-    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None):
+    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
         self._session_dsn=session_dsn
+        self._allow_file_sessions=allow_file_sessions
         self._registries={}
         self._lock=RLock()
 
@@ -66,6 +67,8 @@ class TenantRegistryRouter:
         with self._lock:
             if owner not in self._registries:
                 if self._session_dsn is None:
+                    if not self._allow_file_sessions:
+                        raise RuntimeError('database session persistence is the default: configure the sessions DSN, or explicitly choose file persistence')
                     self._registries[owner]=self.registry_type(self.factory,state_dir=root)
                 else:
                     # Database session persistence opts into provider dispatch:

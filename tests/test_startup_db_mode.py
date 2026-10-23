@@ -1,10 +1,11 @@
-"""Startup database-mode selection: environment opts in, file stays default.
+"""Startup session-persistence selection: database is the default.
 
-INTERVIEW_ENGINE_SESSIONS_DSN switches session persistence from the state
-directory to the delivery-api-owned Postgres registry. The wiring is decided
-once at startup and fails clear: an unreachable database, a missing placement
-migration, or a single-tenant deployment without an owner scope all stop the
-boot instead of silently falling back or failing mid-interview.
+With INTERVIEW_ENGINE_SESSIONS_DSN set, session persistence uses the
+delivery-api-owned Postgres registry. Without it the boot fails clear and
+names the explicit file opt-in (INTERVIEW_ENGINE_SESSIONS_FILE=1): file
+persistence is never a silent fallback. An unreachable database, a missing
+placement migration, or a single-tenant deployment without an owner scope
+also stop the boot instead of failing mid-interview.
 
 Schema-present cases run against the REAL delivery-api migrated schema (its
 own pg_harness, no DDL mirror) when the checkout is provided via
@@ -31,7 +32,7 @@ OWNER = '00000000-0000-0000-0000-000000000001'
 PROBE = """
 import os
 from interview_engine import http_service as hs
-sessions = hs.app.state.sessions
+sessions = hs._build_service_app().state.sessions
 store = getattr(sessions, '_store', None)
 print('type=%s store=%s owner=%s state_dir=%s' % (
     type(sessions).__name__,
@@ -43,7 +44,7 @@ print('type=%s store=%s owner=%s state_dir=%s' % (
 PROBE_TENANT = """
 import os
 from interview_engine import http_service as hs
-router = hs.app.state.sessions
+router = hs._build_service_app().state.sessions
 print('type=%s dsn_set=%s' % (type(router).__name__, bool(getattr(router, '_session_dsn', None))))
 """
 
@@ -68,8 +69,15 @@ def migrated_dsn():
     yield dsn
 
 
-def test_file_mode_stays_default_without_dsn():
+def test_startup_without_dsn_or_explicit_file_fails_clear():
     result = run_startup({})
+    assert result.returncode != 0
+    assert 'database session persistence is the default' in result.stderr
+    assert 'INTERVIEW_ENGINE_SESSIONS_FILE=1' in result.stderr
+
+
+def test_file_mode_runs_when_explicitly_chosen():
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_FILE': '1'})
     assert result.returncode == 0, result.stderr
     assert 'type=SessionRegistry store=None' in result.stdout
     assert 'state_dir=None' not in result.stdout  # state_dir is the artifacts root
@@ -112,8 +120,15 @@ def test_tenant_mode_passes_dsn_to_router(migrated_dsn):
     assert 'type=TenantRegistryRouter dsn_set=True' in result.stdout
 
 
-def test_tenant_mode_without_dsn_keeps_file_registries():
+def test_tenant_mode_without_dsn_or_explicit_file_fails_clear():
     result = run_startup({'INTERVIEW_ENGINE_TENANTS': '1', 'INTERVIEW_ENGINE_TOKEN': 't#startup-test-token'}, probe=PROBE_TENANT)
+    assert result.returncode != 0
+    assert 'database session persistence is the default' in result.stderr
+
+
+def test_tenant_mode_without_dsn_keeps_file_registries_when_explicit():
+    result = run_startup({'INTERVIEW_ENGINE_TENANTS': '1', 'INTERVIEW_ENGINE_TOKEN': 't#startup-test-token',
+                          'INTERVIEW_ENGINE_SESSIONS_FILE': '1'}, probe=PROBE_TENANT)
     assert result.returncode == 0, result.stderr
     assert 'type=TenantRegistryRouter dsn_set=False' in result.stdout
 
@@ -145,10 +160,22 @@ def test_owner_scoped_dsn_normalizes_uri_and_keyword_forms():
         assert 'postgres://' not in scoped  # normalized to keyword conninfo
 
 
-def test_tenant_router_file_mode_unchanged(tmp_path):
+def test_tenant_router_without_dsn_requires_explicit_file_opt_in(tmp_path):
     from interview_engine import tenant_worker
     from interview_engine.http_service import SessionRegistry
     router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, tmp_path)
+    token = tenant_worker._owner.set(OWNER)
+    try:
+        with pytest.raises(RuntimeError, match='database session persistence is the default'):
+            router._registry()
+    finally:
+        tenant_worker._owner.reset(token)
+
+
+def test_tenant_router_file_mode_unchanged(tmp_path):
+    from interview_engine import tenant_worker
+    from interview_engine.http_service import SessionRegistry
+    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, tmp_path, allow_file_sessions=True)
     token = tenant_worker._owner.set(OWNER)
     try:
         registry = router._registry()
