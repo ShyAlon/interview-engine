@@ -21,9 +21,29 @@ def worker_root(default:Path)->Path:
     return _root.get() or default
 
 
+def pg_session_store(dsn:str):
+    """One serving connection for a database-backed registry; fails clear at
+    startup when the database is unreachable or the delivery-api placement
+    migration has not run. The store spawns its own heartbeat connections."""
+    import psycopg
+    import psycopg.rows
+    from .pg_session_store import PgSessionStore
+    try:
+        conn=psycopg.connect(dsn,autocommit=False,row_factory=psycopg.rows.dict_row)
+    except Exception as exc:
+        raise RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__) from exc
+    try:
+        conn.execute('SELECT session_id FROM engine_sessions LIMIT 0')
+    except psycopg.errors.UndefinedTable:
+        conn.close()
+        raise RuntimeError('database session persistence configured but the delivery-api migration 20261022090000_session_placement_leases.sql has not run: engine_sessions is missing') from None
+    return PgSessionStore(conn)
+
+
 class TenantRegistryRouter:
-    def __init__(self,registry_type,factory,base:Path):
+    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
+        self._session_dsn=session_dsn
         self._registries={}
         self._lock=RLock()
 
@@ -33,7 +53,15 @@ class TenantRegistryRouter:
         root=worker_root(self.base)
         with self._lock:
             if owner not in self._registries:
-                self._registries[owner]=self.registry_type(self.factory,state_dir=root)
+                if self._session_dsn is None:
+                    self._registries[owner]=self.registry_type(self.factory,state_dir=root)
+                else:
+                    # Database session persistence opts into provider dispatch:
+                    # staged responses (PR B) landed, so the documented
+                    # constructor block is lifted for exactly this wiring.
+                    self._registries[owner]=self.registry_type(self.factory,
+                        session_store=pg_session_store(self._session_dsn),owner_id=owner,
+                        allow_db_provider_dispatch=True)
             return self._registries[owner]
 
     def __getattr__(self,name):return getattr(self._registry(),name)

@@ -891,12 +891,25 @@ def default_program_factory(session_id,request):
     log.info("model.route.effective session=%s task=%s selected=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(program.model_map))
     return program
 
+SESSIONS_DSN_ENV='INTERVIEW_ENGINE_SESSIONS_DSN'
+OWNER_ID_ENV='INTERVIEW_ENGINE_OWNER_ID'
+
 from vmodel_contracts.runtime import artifacts_root
+_sessions_dsn=os.environ.get(SESSIONS_DSN_ENV)
 if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
     if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
         raise RuntimeError('Tenant engine requires a configured private service token')
     from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
-    app=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root()))
+    app=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=_sessions_dsn))
     app.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
+elif _sessions_dsn:
+    # Database session persistence is opt-in by environment; file persistence
+    # stays the default. Staged responses (PR B) landed, so the documented
+    # constructor block on provider dispatch is lifted for exactly this wiring.
+    from .tenant_worker import pg_session_store
+    _owner_id=os.environ.get(OWNER_ID_ENV)
+    if not _owner_id:
+        raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
+    app=create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(_sessions_dsn),owner_id=_owner_id,allow_db_provider_dispatch=True))
 else:
     app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
