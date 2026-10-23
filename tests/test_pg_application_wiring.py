@@ -239,6 +239,91 @@ def test_pg_application_publish_rolls_back_all_or_nothing(tmp_path, fake_ollama,
     assert journal.pending() == []
 
 
+def test_resumed_turn_advances_published_pointer(tmp_path, fake_ollama, fake_models):
+    """A reclaimed session must publish the checkpoint its turn produced, not
+    the resume anchor. Regression for the cross-host continuation loop
+    (2026-10-23): restore pins program.cfg to the published pointer
+    (authoritative restore), and the step publish derived the pointer from
+    get_state(that pinned cfg), re-publishing the anchor forever - every
+    reclaim resumed the same pre-turn state and the interview regenerated the
+    same wait with a fresh input_id until the driver gave up."""
+    from vmodel_contracts.interactive import InputResponse
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=1.0)
+    _OPEN['registries'].append(registry)
+    session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                    model_route='ollama', initial_model='phi4'))
+    first_pointer = store.load_published(SID, OWNER)['published_checkpoint_id']
+    pending = session.open_input
+    assert pending is not None
+    registry.close()
+    time.sleep(1.2)
+
+    # Second instance takes over and answers the open input: the turn runs to
+    # the next wait and its step publishes.
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=1.0)
+    _OPEN['registries'].append(registry2)
+    resumed = registry2.get(SID)
+    assert resumed.program.cfg['configurable'].get('checkpoint_id') == first_pointer, \
+        'restore pins the published pointer, never saver-latest'
+    registry2.respond(SID, InputResponse(input_id=pending.input_id, value='customers book online from a phone',
+                                         actor_id='founder'))
+    second = store.load_published(SID, OWNER)
+    assert second['published_checkpoint_id'] != first_pointer, \
+        'the resumed turn must publish the checkpoint it produced, not the resume anchor'
+    assert resumed.program.cfg['configurable'].get('checkpoint_id') == second['published_checkpoint_id'], \
+        'after the turn the cfg pin advances to the produced checkpoint'
+
+    # A second answer on the SAME host resumes from the produced checkpoint,
+    # never replays from the restore anchor: both founder answers persist.
+    wait2 = registry2.get(SID).open_input
+    assert wait2 is not None and wait2.input_id != pending.input_id
+    registry2.respond(SID, InputResponse(input_id=wait2.input_id, value='they pick a time slot and pay',
+                                         actor_id='founder'))
+    third = store.load_published(SID, OWNER)
+    assert third['published_checkpoint_id'] not in (first_pointer, second['published_checkpoint_id'])
+    live = registry2.get(SID).program
+    assert live.cfg['configurable'].get('checkpoint_id') == third['published_checkpoint_id']
+    live_text = str(live.graph.get_state(live.cfg).values.get('messages', ''))
+    assert 'customers book online from a phone' in live_text and 'they pick a time slot and pay' in live_text, \
+        'same-host turns accumulate: the second turn resumed from the checkpoint turn one produced'
+
+    # A failed invoke keeps the pin at the last produced checkpoint, so a retry
+    # replays only the failed turn and the published pointer stays put.
+    import unittest.mock as mock
+    with mock.patch.object(type(live.graph), 'invoke', side_effect=RuntimeError('model failed')):
+        try:
+            registry2.respond(SID, InputResponse(input_id=live.open_input.input_id, value='retry me', actor_id='founder'))
+            raised = False
+        except RuntimeError:
+            raised = True
+    assert raised
+    assert live.cfg['configurable'].get('checkpoint_id') == third['published_checkpoint_id'], \
+        'failed invoke retains the prior produced cfg pin'
+    assert store.load_published(SID, OWNER)['published_checkpoint_id'] == third['published_checkpoint_id']
+
+    # The published state carries the new turn: a third reclaim restores the
+    # advanced transcript (founder answer and the next question), never the
+    # stale pre-turn base.
+    registry2.close()
+    time.sleep(1.2)
+    registry3 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#3', lease_ttl=60.0)
+    _OPEN['registries'].append(registry3)
+    restored3 = registry3.get(SID)
+    text = str(restored3.program.graph.get_state(restored3.program.cfg).values.get('messages', ''))
+    assert 'customers book online from a phone' in text, \
+        'the second reclaim resumes the advanced turn, including its transcript'
+    assert 'they pick a time slot and pay' in text, \
+        'both same-host answers persist across the reclaim'
+    assert 'What does a booking look like for your customers?' in text, \
+        'the new question the turn asked is in the restored transcript'
+    assert restored3.program.cfg['configurable'].get('checkpoint_id') == third['published_checkpoint_id']
+
+
 def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
     store = PgSessionStore(conn)
@@ -255,7 +340,9 @@ def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, 
     app = session.program
     from langchain_core.messages import HumanMessage
     app.graph.invoke({'messages': [HumanMessage(content='customers book online from a phone')]}, app.cfg)
-    latest = app.saver.get_tuple(app.cfg)
+    # Saver-latest read (unpinned): the program cfg is pinned to the produced
+    # checkpoint after each turn, so a pinned get_tuple would read the pin.
+    latest = app.saver.get_tuple({'configurable': {'thread_id': SID, 'checkpoint_ns': ''}})
     assert latest is not None and latest.config['configurable']['checkpoint_id'] != published
 
     registry.close()
@@ -269,6 +356,68 @@ def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, 
     values = restored.program.graph.get_state(restored.program.cfg).values
     text = str(values.get('messages', ''))
     assert 'customers book online from a phone' not in text, 'unpublished work is not served after a crash'
+
+
+def test_reclaim_and_new_turn_never_publishes_orphan_checkpoint(tmp_path, fake_ollama, fake_models):
+    """A crashed turn leaves committed-but-unpublished checkpoints (orphans)
+    newer than the published pointer. A bare reclaim must republish only the
+    staged pointer, and the next turn must publish the checkpoint IT produced
+    (recorded at advance time), never the orphan - even though the orphan is
+    the saver-latest row before that turn runs."""
+    from vmodel_contracts.interactive import InputResponse
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=1.0)
+    _OPEN['registries'].append(registry)
+    session, _ = registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                                    model_route='ollama', initial_model='phi4'))
+    published = store.load_published(SID, OWNER)['published_checkpoint_id']
+    pending = session.open_input
+
+    # Unpublished newer work lands, then the process dies before the publish.
+    app = session.program
+    from langchain_core.messages import HumanMessage
+    app.graph.invoke({'messages': [HumanMessage(content='orphan work never published')]}, app.cfg, durability='exit')
+    orphan_id = app.saver.get_tuple({'configurable': {'thread_id': SID, 'checkpoint_ns': ''}}).config['configurable']['checkpoint_id']
+    assert orphan_id != published, 'the orphan is strictly newer than the staged pointer'
+
+    registry.close()
+    time.sleep(1.2)
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=1.0)
+    _OPEN['registries'].append(registry2)
+    restored = registry2.get(SID)
+    assert store.load_published(SID, OWNER)['published_checkpoint_id'] == published, \
+        'a bare reclaim republishes the staged pointer, never the saver-latest orphan'
+
+    registry2.respond(SID, InputResponse(input_id=restored.open_input.input_id,
+                                         value='customers book online from a phone', actor_id='founder'))
+    new_pointer = store.load_published(SID, OWNER)['published_checkpoint_id']
+    assert new_pointer not in (published, orphan_id), \
+        'the new turn publishes the checkpoint it produced, not the stale anchor and not the orphan'
+
+
+def test_close_voluntarily_releases_lease_at_committed_boundary(tmp_path, fake_ollama, fake_models):
+    """Scope: handoff without waiting out the lease is a voluntary release at
+    a committed boundary, never mid-call. close() releases a lease it still
+    holds, so the next host claims immediately even with a long TTL."""
+    conn = make_conn(tmp_path)
+    store = PgSessionStore(conn)
+    registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
+                               instance_id='w#1', lease_ttl=60.0)
+    _OPEN['registries'].append(registry)
+    registry.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
+                                       model_route='ollama', initial_model='phi4'))
+    published = store.load_published(SID, OWNER)['published_checkpoint_id']
+    registry.close()
+
+    # No expiry wait: a 60s TTL would block this claim without the release.
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+                                owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
+    _OPEN['registries'].append(registry2)
+    restored = registry2.get(SID)
+    assert restored.program.cfg['configurable'].get('checkpoint_id') == published
 
 
 def test_remote_owner_stop_while_other_instance_blocked_mid_advance(tmp_path, fake_ollama, monkeypatch):

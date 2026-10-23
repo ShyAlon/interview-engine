@@ -118,3 +118,11 @@ def test_cross_owner_invisible_under_rls():
     assert other.read_journal(sid, B, after=0, limit=10) == []
     with pytest.raises(KeyError):
         other.stop(sid, B)
+    # The adoption path is not a cross-owner oracle either: B's create against
+    # A's session id conflicts (the row is invisible under RLS, never adopted),
+    # and B's heartbeat against A's claim matches no row.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        other.create(sid, 'ita', B)
+    assert other.heartbeat(claim, ttl=60) is False
+    # A's own connection is unharmed by B's failed attempts.
+    assert store_a.claim(sid, A, 'integration#1', ttl=60) is not None

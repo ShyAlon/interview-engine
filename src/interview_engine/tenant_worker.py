@@ -21,9 +21,42 @@ def worker_root(default:Path)->Path:
     return _root.get() or default
 
 
+def owner_scoped_dsn(dsn:str,owner:str)->str:
+    """Tenant claims travel in the conninfo: every engine connection - serving,
+    heartbeat and saver-spawned - runs under the same tenant boundary, so the
+    placement tables' row security admits exactly this owner's rows. URI and
+    keyword conninfo forms both normalize through libpq."""
+    from psycopg.conninfo import conninfo_to_dict,make_conninfo
+    parts=conninfo_to_dict(dsn)
+    options="-c request.jwt.claim.sub=%s -c request.jwt.claim.session_id=%s"%(owner,owner)
+    parts['options']=((parts.get('options') or '')+' '+options).strip()
+    return make_conninfo(**parts)
+
+
+def pg_session_store(dsn:str):
+    """One serving connection for a database-backed registry; fails clear at
+    startup when the database is unreachable or the delivery-api placement
+    migration has not run. The store spawns its own heartbeat connections."""
+    import psycopg
+    import psycopg.rows
+    from .pg_session_store import PgSessionStore
+    try:
+        conn=psycopg.connect(dsn,autocommit=False,row_factory=psycopg.rows.dict_row)
+    except Exception as exc:
+        raise RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__) from exc
+    try:
+        conn.execute('SELECT session_id FROM engine_sessions LIMIT 0')
+    except psycopg.errors.UndefinedTable:
+        conn.close()
+        raise RuntimeError('database session persistence configured but the delivery-api migration 20261022090000_session_placement_leases.sql has not run: engine_sessions is missing') from None
+    return PgSessionStore(conn)
+
+
 class TenantRegistryRouter:
-    def __init__(self,registry_type,factory,base:Path):
+    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
+        self._session_dsn=session_dsn
+        self._allow_file_sessions=allow_file_sessions
         self._registries={}
         self._lock=RLock()
 
@@ -33,8 +66,28 @@ class TenantRegistryRouter:
         root=worker_root(self.base)
         with self._lock:
             if owner not in self._registries:
-                self._registries[owner]=self.registry_type(self.factory,state_dir=root)
+                if self._session_dsn is None:
+                    if not self._allow_file_sessions:
+                        raise RuntimeError('database session persistence is the default: configure the sessions DSN, or explicitly choose file persistence')
+                    self._registries[owner]=self.registry_type(self.factory,state_dir=root)
+                else:
+                    # Database session persistence opts into provider dispatch:
+                    # staged responses (PR B) landed, so the documented
+                    # constructor block is lifted for exactly this wiring.
+                    self._registries[owner]=self.registry_type(self.factory,
+                        session_store=pg_session_store(owner_scoped_dsn(self._session_dsn,owner)),owner_id=owner,
+                        lease_ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0')),
+                        allow_db_provider_dispatch=True)
             return self._registries[owner]
+
+    def close(self)->None:
+        # Shutdown path: close every per-owner registry so held leases are
+        # released at committed boundaries instead of expiring.
+        with self._lock:
+            registries=list(self._registries.values())
+            self._registries={}
+        for registry in registries:
+            registry.close()
 
     def __getattr__(self,name):return getattr(self._registry(),name)
 

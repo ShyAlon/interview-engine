@@ -75,11 +75,29 @@ class PgSessionStore:
 
     def create(self, session_id: str, task_id: str, owner_id: str) -> None:
         now = time.time()
-        self.conn.execute(
-            "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
-            " VALUES (%s,%s,%s,1,%s,0,0)",
-            (session_id, owner_id, task_id, now))
-        self.conn.commit()
+        try:
+            row = self.conn.execute(
+                "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
+                " VALUES (%s,%s,%s,1,%s,0,0)"
+                " ON CONFLICT (session_id) DO NOTHING"
+                " RETURNING session_id",
+                (session_id, owner_id, task_id, now)).fetchone()
+            if row is None:
+                # The delivery app pre-binds its session row at Start
+                # (begin_interview_start -> set_engine_session). Adopt exactly
+                # that row; any other existing row is the real conflict.
+                existing = self.conn.execute(
+                    "SELECT owner_id::text AS owner_id, task_id FROM engine_sessions WHERE session_id = %s",
+                    (session_id,)).fetchone()
+                if existing is None or existing["owner_id"] != owner_id or existing["task_id"] != task_id:
+                    self.conn.rollback()
+                    raise psycopg.errors.UniqueViolation("engine_sessions session_id conflict")
+            self.conn.commit()
+        except Exception:
+            # Never leave the shared serving connection in an aborted
+            # transaction: one failed op must not poison every later claim.
+            self.conn.rollback()
+            raise
 
     def claim(self, session_id: str, owner_id: str, instance: str, ttl: float) -> SessionClaim | None:
         """Win the lease atomically, or return None while another instance holds it.
@@ -89,33 +107,61 @@ class PgSessionStore:
         fenced writes are not invalidated by reentrant requests.
         """
         now = time.time()
-        row = self.conn.execute(
-            "UPDATE engine_sessions"
-            " SET lease_epoch = CASE WHEN lease_expires_at <= %(now)s THEN lease_epoch + 1 ELSE lease_epoch END,"
-            "     placement_instance = %(instance)s, lease_expires_at = %(expiry)s, updated_at = %(now)s"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-            "   AND (lease_expires_at <= %(now)s OR placement_instance = %(instance)s)"
-            " RETURNING generation, lease_epoch",
-            {"sid": session_id, "owner": owner_id, "instance": instance,
-             "expiry": now + ttl, "now": now}).fetchone()
-        self.conn.commit()
+        try:
+            row = self.conn.execute(
+                "UPDATE engine_sessions"
+                " SET lease_epoch = CASE WHEN lease_expires_at <= %(now)s THEN lease_epoch + 1 ELSE lease_epoch END,"
+                "     placement_instance = %(instance)s, lease_expires_at = %(expiry)s, updated_at = %(now)s"
+                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                "   AND (lease_expires_at <= %(now)s OR placement_instance = %(instance)s)"
+                " RETURNING generation, lease_epoch",
+                {"sid": session_id, "owner": owner_id, "instance": instance,
+                 "expiry": now + ttl, "now": now}).fetchone()
+            self.conn.commit()
+        except Exception:
+            # Never leave the shared serving connection aborted.
+            self.conn.rollback()
+            raise
         if row is None:
             return None
         return SessionClaim(session_id, owner_id, row["generation"], row["lease_epoch"], instance)
 
+    def release(self, claim: SessionClaim) -> bool:
+        """Voluntarily end a held lease at a committed boundary so another
+        instance can claim immediately. Identity, generation and epoch must all
+        match, so a stale owner can never release a lease it already lost."""
+        now = time.time()
+        try:
+            row = self.conn.execute(
+                "UPDATE engine_sessions SET lease_expires_at = %(now)s, updated_at = %(now)s"
+                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
+                " RETURNING 1",
+                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                 "epoch": claim.epoch, "instance": claim.instance, "now": now}).fetchone()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return row is not None
+
     def heartbeat(self, claim: SessionClaim, ttl: float) -> bool:
         """Extend a held lease (never bumps the epoch). False means it was lost."""
         now = time.time()
-        row = self.conn.execute(
-            "UPDATE engine_sessions SET lease_expires_at = %(expiry)s, updated_at = %(now)s"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-            "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
-            "   AND lease_expires_at > %(now)s"
-            " RETURNING 1",
-            {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-             "epoch": claim.epoch, "instance": claim.instance,
-             "expiry": now + ttl, "now": now}).fetchone()
-        self.conn.commit()
+        try:
+            row = self.conn.execute(
+                "UPDATE engine_sessions SET lease_expires_at = %(expiry)s, updated_at = %(now)s"
+                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
+                "   AND lease_expires_at > %(now)s"
+                " RETURNING 1",
+                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                 "epoch": claim.epoch, "instance": claim.instance,
+                 "expiry": now + ttl, "now": now}).fetchone()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return row is not None
 
     def fenced_save(self, claim: SessionClaim, control: dict, *,

@@ -28,7 +28,7 @@ def test_approval_edit_archives_and_regenerates_conops_without_losing_intent(tmp
  pending=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Review',options=[InputOption(value=1,label='Proceed'),InputOption(value=0,label='Edit')]);app.open_input=pending
  class Graph:
   def update_state(self,cfg,value):self.cleared=value
-  def invoke(self,state,cfg):
+  def invoke(self,state,cfg,**kwargs):
    self.input=state
    return {'messages':[HumanMessage(content='Habit app')],'intent_model':app.result['intent_model'],'conops_draft':draft()}
  app.graph=Graph()
@@ -50,7 +50,7 @@ def test_failed_rework_restores_checkpoint_and_old_review_identity(tmp_path):
  class Graph:
   updates=[]
   def update_state(self,cfg,value):self.updates.append(value)
-  def invoke(self,state,cfg):raise RuntimeError('model failed')
+  def invoke(self,state,cfg,**kwargs):raise RuntimeError('model failed')
   def get_state(self,cfg):return SimpleNamespace(values={'messages':[old,HumanMessage(content='new guidance',id='new')]})
  app.graph=Graph();app._runtime_context=lambda:nullcontext()
  with pytest.raises(RuntimeError,match='model failed'):app.advance(InputResponse(input_id=pending.input_id,value=0,actor_id='founder'))
@@ -66,7 +66,7 @@ def test_rework_also_records_founder_input_resolutions_with_history(tmp_path):
  class Graph:
   def __init__(self):self.updates=[]
   def update_state(self,cfg,value):self.updates.append(value)
-  def invoke(self,state,cfg):return {'messages':[HumanMessage(content='Habit app')],'intent_model':app.result['intent_model'],'conops_draft':draft()}
+  def invoke(self,state,cfg,**kwargs):return {'messages':[HumanMessage(content='Habit app')],'intent_model':app.result['intent_model'],'conops_draft':draft()}
  app.graph=Graph()
  from contextlib import nullcontext
  app._runtime_context=lambda:nullcontext()

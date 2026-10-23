@@ -17,6 +17,8 @@ import logging
 import os
 from threading import RLock
 from uuid import UUID, uuid4
+from vmodel_contracts.runtime import artifacts_root
+from .tenant_worker import worker_root
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from .errors import UserFacingError
@@ -141,6 +143,18 @@ class SessionRegistry:
                 remaining=deadline-time.monotonic()
                 thread.join(timeout=max(remaining,0.05))
                 if thread.is_alive():log.warning('lease heartbeat did not join session=%s',session.session_id)
+        for session in sessions:
+            # Voluntary lease release at a committed boundary: the write lock
+            # waits out any in-flight turn, so another host can claim
+            # immediately without resuming mid-call state. Stop stays
+            # terminal - release changes only who may serve next.
+            claim=getattr(session,'pg_claim',None)
+            if claim is not None and self._store is not None:
+                try:
+                    with session.write_lock:
+                        self._store.release(claim)
+                except Exception:
+                    log.warning('lease.release.failed session=%s',session.session_id,exc_info=True)
         for session in sessions:
             # Close program-held database connections: no socket outlives the
             # registry that owns it.
@@ -401,7 +415,7 @@ class SessionRegistry:
             if self._program_factory is default_program_factory:
                 from .application import InterviewApplication
                 candidate=self._prepare_program(session,lambda:InterviewApplication(session.session_id,session.task_id,session.request.idea,
-                    artifact_root=str(self._state_dir) if self._state_dir is not None else None,model_route=request.model_route,pinned_models=target,
+                    artifact_root=str(self._state_dir) if self._state_dir is not None else str(worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))),model_route=request.model_route,pinned_models=target,
                     pg_store=self._store,pg_claim=session.pg_claim))
                 # Read the same durable graph thread; never invoke a model during preflight.
                 checkpoint=candidate.graph.get_state(candidate.cfg)
@@ -611,8 +625,23 @@ class SessionRegistry:
             checkpoint_id=None
             graph=getattr(program,'graph',None)
             if graph is not None:
-                state=graph.get_state(program.cfg)
-                if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
+                # Publish the checkpoint this step produced, not the resume
+                # anchor: a restored program's cfg is pinned to the published
+                # pointer (authoritative restore), and get_state on a pinned
+                # config returns that pin - so reclaimed sessions used to
+                # re-publish their resume checkpoint forever (2026-10-23
+                # cross-host continuation loop). Provenance, never
+                # saver-latest: the advance records the checkpoint it actually
+                # committed (durability='exit'), so an unpublished orphan from
+                # a crashed prior epoch can never be selected. The fallback
+                # reads the pinned cfg: on a reclaimed session that has not
+                # run a turn yet it yields the restore anchor, which simply
+                # republishes the current pointer; on a fresh session the cfg
+                # is unpinned and yields the first turn's checkpoint.
+                checkpoint_id=getattr(program,'produced_checkpoint_id',None)
+                if checkpoint_id is None:
+                    state=graph.get_state(program.cfg)
+                    if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
             try:
                 self._store.publish_step(session.pg_claim,self._serialize(session),
                     journal_pages=pages,
@@ -662,8 +691,13 @@ class SessionRegistry:
         if not self._allow_db_dispatch:
             raise UserFacingError("database session cannot dispatch providers yet.","Staged responses land in PR B.","Run this session in file persistence mode.")
         from .application import InterviewApplication
+        # Same artifact root as the file-backed factory: database persistence
+        # changes where SESSION STATE lives, never where validated artifacts
+        # land - the delivery app's terminal reconcile reads them from the
+        # configured artifacts dir under the serving owner's tenant scope.
+        root=worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))
         return InterviewApplication(session.session_id,request.task_id,request.idea,
-            artifact_root=None,model_route=request.model_route,pinned_models=pinned,
+            artifact_root=str(root),model_route=request.model_route,pinned_models=pinned,
             initial_model=request.initial_model,pg_store=self._store,pg_claim=session.pg_claim)
 
     def _restore_payload(self,payload:dict,session_id:str)->EngineSession:
@@ -740,7 +774,16 @@ class ProtocolFailure(Exception):
 
 
 def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)->FastAPI:
-    sessions=registry or SessionRegistry();app=FastAPI(title="Requi.re interview engine",version="1")
+    sessions=registry or SessionRegistry()
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _lifespan(_app):
+        yield
+        # Stop serving: heartbeats halt and held leases release at committed
+        # boundaries, so the next host takes over without waiting out the TTL.
+        close=getattr(sessions,'close',None)
+        if close is not None:close()
+    app=FastAPI(title="Requi.re interview engine",version="1",lifespan=_lifespan)
     expected_token=service_token if service_token is not None else os.environ.get("INTERVIEW_ENGINE_TOKEN","local-interview-engine-token")
     if not expected_token:raise RuntimeError("INTERVIEW_ENGINE_TOKEN must not be empty")
 
@@ -891,12 +934,54 @@ def default_program_factory(session_id,request):
     log.info("model.route.effective session=%s task=%s selected=%s stages=%s",session_id,request.task_id,request.model_route,json.dumps(program.model_map))
     return program
 
+SESSIONS_DSN_ENV='INTERVIEW_ENGINE_SESSIONS_DSN'
+OWNER_ID_ENV='INTERVIEW_ENGINE_OWNER_ID'
+FILE_SESSIONS_ENV='INTERVIEW_ENGINE_SESSIONS_FILE'
+FILE_SESSIONS_MSG=('database session persistence is the default: set '+SESSIONS_DSN_ENV+
+    ' (plus '+OWNER_ID_ENV+' outside tenant mode), or explicitly choose file persistence with '+
+    FILE_SESSIONS_ENV+'=1')
+
 from vmodel_contracts.runtime import artifacts_root
-if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
-    if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
-        raise RuntimeError('Tenant engine requires a configured private service token')
-    from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
-    app=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root()))
-    app.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
-else:
-    app=create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
+
+def _build_service_app():
+    """Service entry wiring, built when the ASGI server actually starts. Database
+    session persistence is the default; file persistence requires the explicit
+    opt-in; a missing choice fails the boot, never silently falls back."""
+    sessions_dsn=os.environ.get(SESSIONS_DSN_ENV)
+    if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
+        if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
+            raise RuntimeError('Tenant engine requires a configured private service token')
+        from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
+        if not sessions_dsn and os.environ.get(FILE_SESSIONS_ENV)!='1':
+            raise RuntimeError(FILE_SESSIONS_MSG)
+        service=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1'))
+        service.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
+        return service
+    if sessions_dsn:
+        # Database session persistence is the default once the DSN is set.
+        # Staged responses (PR B) landed, so the documented
+        # constructor block on provider dispatch is lifted for exactly this wiring.
+        from .tenant_worker import owner_scoped_dsn,pg_session_store
+        owner_id=os.environ.get(OWNER_ID_ENV)
+        if not owner_id:
+            raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
+        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(owner_scoped_dsn(sessions_dsn,owner_id)),owner_id=owner_id,allow_db_provider_dispatch=True))
+    # File persistence only when explicitly chosen; otherwise fail clear at boot.
+    if os.environ.get(FILE_SESSIONS_ENV)!='1':
+        raise RuntimeError(FILE_SESSIONS_MSG)
+    return create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
+
+
+class _LazyServiceApp:
+    """Builds the real app on the server's first ASGI (lifespan) call: importing
+    this module for its classes has no startup side effects, while a misconfigured
+    service still fails at boot, before it serves anything."""
+    def __init__(self):
+        self._service=None
+    async def __call__(self,scope,receive,send):
+        if self._service is None:
+            self._service=_build_service_app()
+        await self._service(scope,receive,send)
+
+
+app=_LazyServiceApp()

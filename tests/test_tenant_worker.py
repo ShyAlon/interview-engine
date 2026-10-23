@@ -13,7 +13,7 @@ class Registry:
 
 
 def test_router_tenant_cache_and_same_session_isolation(tmp_path):
-    router=TenantRegistryRouter(Registry,None,tmp_path)
+    router=TenantRegistryRouter(Registry,None,tmp_path,allow_file_sessions=True)
     app=FastAPI()
     @app.post('/sessions/{session}')
     def start(session:str,value:str):return {'root':router.start(session,value),'worker_root':str(worker_root(tmp_path))}
@@ -43,7 +43,7 @@ def test_restart_retains_same_owner_root(tmp_path):
     assert tmp_path.resolve()==tmp_path
     # Root selection is deterministic even with a fresh per-owner registry cache.
     for _ in range(2):
-        router=TenantRegistryRouter(Registry,None,tmp_path)
+        router=TenantRegistryRouter(Registry,None,tmp_path,allow_file_sessions=True)
         app=FastAPI()
         @app.get('/')
         def root():return {'path':str(router._registry().root)}
@@ -65,7 +65,7 @@ def test_stop_same_session_id_is_owner_scoped(tmp_path):
     from uuid import uuid4
     from interview_engine.http_service import SessionRegistry,create_app
     from vmodel_contracts.interactive import ProcessStatus
-    router=TenantRegistryRouter(SessionRegistry,None,tmp_path)
+    router=TenantRegistryRouter(SessionRegistry,None,tmp_path,allow_file_sessions=True)
     app=create_app(router,service_token='fake-service')
     app.add_middleware(TenantWorkerMiddleware,base=tmp_path,service_token='fake-service')
     sid=str(uuid4());ha={'X-Requi-Owner':A,'X-Interview-Engine-Token':'fake-service'};hb={'X-Requi-Owner':B,'X-Interview-Engine-Token':'fake-service'}
