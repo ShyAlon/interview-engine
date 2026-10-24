@@ -28,6 +28,9 @@ DELIVERY = os.getenv('DELIVERY_TEST_DELIVERY_SOURCE')
 requires_delivery = pytest.mark.skipif(not DELIVERY, reason='requires DELIVERY_TEST_DELIVERY_SOURCE (delivery-api checkout)')
 
 OWNER = '00000000-0000-0000-0000-000000000001'
+# Matches the seeded live auth session for OWNER in delivery's pg_harness (distinct
+# from the owner id: session authority is never the owner UUID).
+SESSION = '00000000-0000-0000-0000-0000000000a1'
 
 PROBE = """
 import os
@@ -84,7 +87,7 @@ def test_file_mode_runs_when_explicitly_chosen():
 
 
 def test_database_mode_wires_store_and_owner(migrated_dsn):
-    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': migrated_dsn, 'INTERVIEW_ENGINE_OWNER_ID': OWNER})
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': migrated_dsn, 'INTERVIEW_ENGINE_OWNER_ID': OWNER, 'INTERVIEW_ENGINE_SESSION_ID': SESSION})
     assert result.returncode == 0, result.stderr
     assert 'type=SessionRegistry store=PgSessionStore' in result.stdout
     assert ('owner=%s' % OWNER) in result.stdout
@@ -97,15 +100,23 @@ def test_database_mode_single_tenant_requires_owner_scope():
     assert 'INTERVIEW_ENGINE_OWNER_ID is required' in result.stderr
 
 
+def test_database_mode_single_tenant_requires_session_scope():
+    # The session check also fails before any database contact: synthetic
+    # session authority is never substituted for a real auth session.
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': 'postgresql://127.0.0.1:1/none', 'INTERVIEW_ENGINE_OWNER_ID': OWNER})
+    assert result.returncode != 0
+    assert 'INTERVIEW_ENGINE_SESSION_ID is required' in result.stderr
+
+
 def test_database_mode_fails_clear_without_placement_migration(tmp_path):
     server = managed_pg_server(str(tmp_path / 'pgdata'))
-    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': server.get_uri(), 'INTERVIEW_ENGINE_OWNER_ID': OWNER})
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': server.get_uri(), 'INTERVIEW_ENGINE_OWNER_ID': OWNER, 'INTERVIEW_ENGINE_SESSION_ID': SESSION})
     assert result.returncode != 0
     assert '20261022090000_session_placement_leases.sql has not run' in result.stderr
 
 
 def test_database_mode_fails_clear_when_database_unreachable():
-    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': 'postgresql://127.0.0.1:1/none', 'INTERVIEW_ENGINE_OWNER_ID': OWNER})
+    result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': 'postgresql://127.0.0.1:1/none', 'INTERVIEW_ENGINE_OWNER_ID': OWNER, 'INTERVIEW_ENGINE_SESSION_ID': SESSION})
     assert result.returncode != 0
     assert 'database is unreachable' in result.stderr
 
@@ -138,26 +149,72 @@ def test_tenant_router_builds_database_registries_per_owner(migrated_dsn):
     from interview_engine.http_service import SessionRegistry
     router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, Path('/tmp/unused'), session_dsn=migrated_dsn)
     token = tenant_worker._owner.set(OWNER)
+    stoken = tenant_worker._session.set(SESSION)
     try:
         registry = router._registry()
     finally:
+        tenant_worker._session.reset(stoken)
         tenant_worker._owner.reset(token)
     assert registry._store is not None
     assert registry._owner_id == OWNER
     assert registry._state_dir is None
     assert registry._allow_db_dispatch is True
-    # Tenant claims travel in the conninfo, so row security admits this owner only.
-    row = registry._store.conn.execute("select current_setting('request.jwt.claim.sub', true) as claim").fetchone()
-    assert row['claim'] == OWNER
+    # Tenant claims travel in the conninfo, so row security admits this owner
+    # only, and only while this auth session stays live.
+    row = registry._store.conn.execute("select current_setting('request.jwt.claim.sub', true) as sub, current_setting('request.jwt.claim.session_id', true) as sid").fetchone()
+    assert row['sub'] == OWNER
+    assert row['sid'] == SESSION
 
 
 def test_owner_scoped_dsn_normalizes_uri_and_keyword_forms():
     from interview_engine.tenant_worker import owner_scoped_dsn
     for dsn in ('postgresql://u@h:5432/db', 'host=x dbname=y user=z'):
-        scoped = owner_scoped_dsn(dsn, OWNER)
+        scoped = owner_scoped_dsn(dsn, OWNER, SESSION)
         assert 'request.jwt.claim.sub=%s' % OWNER in scoped
-        assert 'request.jwt.claim.session_id=%s' % OWNER in scoped
+        assert 'request.jwt.claim.session_id=%s' % SESSION in scoped
         assert 'postgres://' not in scoped  # normalized to keyword conninfo
+
+
+def test_database_registry_requires_session_scope(migrated_dsn):
+    # Router-level defense in depth: a database-backed registry is never built
+    # without a session scope, even if the middleware were bypassed.
+    from interview_engine import tenant_worker
+    from interview_engine.http_service import SessionRegistry
+    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, Path('/tmp/unused'), session_dsn=migrated_dsn)
+    token = tenant_worker._owner.set(OWNER)
+    try:
+        with pytest.raises(PermissionError, match='worker session scope required'):
+            router._registry()
+    finally:
+        tenant_worker._owner.reset(token)
+
+
+def test_parallel_sessions_of_one_owner_coexist(migrated_dsn):
+    # Two simultaneous valid logins of the same owner get separate registries;
+    # neither closes the other's connections.
+    from interview_engine import tenant_worker
+    from interview_engine.http_service import SessionRegistry
+    other = '00000000-0000-0000-0000-0000000000a2'
+    import psycopg as _pg
+    with _pg.connect(migrated_dsn, autocommit=True) as conn:
+        conn.execute("INSERT INTO auth.sessions(id,user_id) VALUES (%s,%s) ON CONFLICT (id) DO NOTHING", (other, OWNER))
+    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, Path('/tmp/unused'), session_dsn=migrated_dsn)
+    token = tenant_worker._owner.set(OWNER)
+    try:
+        stoken = tenant_worker._session.set(SESSION)
+        try:first = router._registry()
+        finally:tenant_worker._session.reset(stoken)
+        stoken = tenant_worker._session.set(other)
+        try:second = router._registry()
+        finally:tenant_worker._session.reset(stoken)
+        assert first is not second
+        assert len(router._registries) == 2
+        stoken = tenant_worker._session.set(SESSION)
+        try:assert router._registry() is first
+        finally:tenant_worker._session.reset(stoken)
+    finally:
+        tenant_worker._owner.reset(token)
+        router.close()
 
 
 def test_tenant_router_without_dsn_requires_explicit_file_opt_in(tmp_path):
