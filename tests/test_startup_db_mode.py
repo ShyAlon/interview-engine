@@ -240,3 +240,35 @@ def test_tenant_router_file_mode_unchanged(tmp_path):
         tenant_worker._owner.reset(token)
     assert registry._store is None
     assert registry._state_dir is not None
+
+
+def test_relogin_builds_fresh_registry_and_writes_succeed(migrated_dsn):
+    # Re-login recovery: the next request carries the new session id, the
+    # router builds a fresh registry under the new claims, and its writes pass
+    # the placement policy as delivery_app - the old registry is untouched.
+    from interview_engine import tenant_worker
+    from interview_engine.http_service import SessionRegistry
+    import psycopg as _pg
+    relogin = '00000000-0000-0000-0000-0000000000b1'
+    with _pg.connect(migrated_dsn, autocommit=True) as conn:
+        conn.execute("INSERT INTO auth.sessions(id,user_id) VALUES (%s,%s)", (relogin, OWNER))
+        conn.execute("INSERT INTO tasks(task_id,title,state,created_at,updated_at,owner_id) VALUES ('relogin-task','relogin-title','pending',0,0,%s) ON CONFLICT (task_id) DO NOTHING", (OWNER,))
+    app_dsn = migrated_dsn.replace('user=sandbox', 'user=delivery_app')
+    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, Path('/tmp/unused'), session_dsn=app_dsn)
+    token = tenant_worker._owner.set(OWNER)
+    try:
+        stoken = tenant_worker._session.set(SESSION)
+        try:
+            first = router._registry()
+        finally:
+            tenant_worker._session.reset(stoken)
+        stoken = tenant_worker._session.set(relogin)
+        try:
+            second = router._registry()
+            assert second is not first
+            second._store.create('relogin-sess', 'relogin-task', OWNER)
+        finally:
+            tenant_worker._session.reset(stoken)
+    finally:
+        tenant_worker._owner.reset(token)
+        router.close()
