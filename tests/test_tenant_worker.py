@@ -5,6 +5,8 @@ from interview_engine.tenant_worker import TenantWorkerMiddleware,TenantRegistry
 
 A='00000000-0000-0000-0000-000000000001'
 B='00000000-0000-0000-0000-000000000002'
+SA='00000000-0000-0000-0000-0000000000a1'
+SB='00000000-0000-0000-0000-0000000000a2'
 
 class Registry:
     def __init__(self,factory,state_dir):self.root=state_dir;self.records={}
@@ -78,3 +80,93 @@ def test_stop_same_session_id_is_owner_scoped(tmp_path):
         assert c.post(f'/v1/sessions/{sid}/stop',headers={'X-Requi-Owner':A}).status_code==401
     assert (tmp_path/'tenants'/A/'sessions'/sid/'interview'/'stop-request.json').exists()
     assert not (tmp_path/'tenants'/B/'sessions'/sid/'interview'/'stop-request.json').exists()
+
+
+def test_middleware_session_scope_required_and_validated(tmp_path):
+    app=FastAPI()
+    @app.get('/')
+    def root():return {'ok':True}
+    app.add_middleware(TenantWorkerMiddleware,base=tmp_path,service_token='real-token',require_session=True)
+    h={'X-Requi-Owner':A,'X-Interview-Engine-Token':'real-token'}
+    with TestClient(app) as client:
+        assert client.get('/',headers=h).status_code==401
+        assert client.get('/',headers={**h,'X-Requi-Session-Id':'not-a-uuid'}).status_code==401
+        assert client.get('/',headers={**h,'X-Requi-Session-Id':SA}).status_code==200
+
+
+def test_middleware_session_scope_optional_when_file_persistence(tmp_path):
+    app=FastAPI()
+    @app.get('/')
+    def root():return {'ok':True}
+    app.add_middleware(TenantWorkerMiddleware,base=tmp_path,service_token='real-token')
+    h={'X-Requi-Owner':A,'X-Interview-Engine-Token':'real-token'}
+    with TestClient(app) as client:
+        assert client.get('/',headers=h).status_code==200
+        assert client.get('/',headers={**h,'X-Requi-Session-Id':SA}).status_code==200
+
+
+class _StubRegistry:
+    def __init__(self,factory,state_dir):self.root=state_dir;self._sessions={};self.closed=False
+    def close(self):self.closed=True
+
+
+def _active_session():
+    import threading
+    halt=threading.Event()
+    thread=threading.Thread(target=halt.wait,daemon=True);thread.start()
+    class S:pass
+    session=S();session.pg_heartbeat_thread=thread;session.write_lock=threading.RLock()
+    return session,halt
+
+
+def test_same_scope_returns_cached_registry(tmp_path):
+    router=TenantRegistryRouter(_StubRegistry,None,tmp_path,allow_file_sessions=True)
+    from interview_engine import tenant_worker
+    token=tenant_worker._owner.set(A)
+    try:
+        assert router._registry() is router._registry()
+    finally:
+        tenant_worker._owner.reset(token)
+
+
+def test_idle_registry_evicted_active_work_never(tmp_path,monkeypatch):
+    monkeypatch.setenv('INTERVIEW_ENGINE_REGISTRY_IDLE_TTL','0')
+    router=TenantRegistryRouter(_StubRegistry,None,tmp_path,allow_file_sessions=True)
+    from interview_engine import tenant_worker
+    session,halt=_active_session()
+    token=tenant_worker._owner.set(A)
+    try:
+        first=router._registry()
+        # With an active session the registry is not evictable.
+        first._sessions['live']=session
+        assert not router._evictable(first)
+        first._sessions.pop('live')
+        assert router._evictable(first)
+        # A different scope's lookup retires the idle registry through close().
+        token_b=tenant_worker._owner.set(B)
+        try:router._registry()
+        finally:tenant_worker._owner.reset(token_b)
+        assert first.closed
+    finally:
+        halt.set();tenant_worker._owner.reset(token)
+
+
+def test_capacity_rejects_rather_than_closing_active_work(tmp_path,monkeypatch):
+    monkeypatch.setenv('INTERVIEW_ENGINE_REGISTRY_CAP','1')
+    monkeypatch.setenv('INTERVIEW_ENGINE_REGISTRY_IDLE_TTL','0')
+    router=TenantRegistryRouter(_StubRegistry,None,tmp_path,allow_file_sessions=True)
+    from interview_engine import tenant_worker
+    session,halt=_active_session()
+    token=tenant_worker._owner.set(A)
+    try:
+        first=router._registry()
+        first._sessions['live']=session
+        token_b=tenant_worker._owner.set(B)
+        try:
+            import pytest
+            with pytest.raises(RuntimeError,match='tenant registry capacity reached'):
+                router._registry()
+        finally:tenant_worker._owner.reset(token_b)
+        assert not first.closed  # active work was never closed to make room
+    finally:
+        halt.set();tenant_worker._owner.reset(token)

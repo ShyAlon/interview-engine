@@ -936,9 +936,10 @@ def default_program_factory(session_id,request):
 
 SESSIONS_DSN_ENV='INTERVIEW_ENGINE_SESSIONS_DSN'
 OWNER_ID_ENV='INTERVIEW_ENGINE_OWNER_ID'
+SESSION_ID_ENV='INTERVIEW_ENGINE_SESSION_ID'
 FILE_SESSIONS_ENV='INTERVIEW_ENGINE_SESSIONS_FILE'
 FILE_SESSIONS_MSG=('database session persistence is the default: set '+SESSIONS_DSN_ENV+
-    ' (plus '+OWNER_ID_ENV+' outside tenant mode), or explicitly choose file persistence with '+
+    ' (plus '+OWNER_ID_ENV+' and '+SESSION_ID_ENV+' outside tenant mode), or explicitly choose file persistence with '+
     FILE_SESSIONS_ENV+'=1')
 
 from vmodel_contracts.runtime import artifacts_root
@@ -955,7 +956,7 @@ def _build_service_app():
         if not sessions_dsn and os.environ.get(FILE_SESSIONS_ENV)!='1':
             raise RuntimeError(FILE_SESSIONS_MSG)
         service=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1'))
-        service.add_middleware(TenantWorkerMiddleware,base=artifacts_root())
+        service.add_middleware(TenantWorkerMiddleware,base=artifacts_root(),require_session=bool(sessions_dsn))
         return service
     if sessions_dsn:
         # Database session persistence is the default once the DSN is set.
@@ -965,7 +966,10 @@ def _build_service_app():
         owner_id=os.environ.get(OWNER_ID_ENV)
         if not owner_id:
             raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
-        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(owner_scoped_dsn(sessions_dsn,owner_id)),owner_id=owner_id,allow_db_provider_dispatch=True))
+        session_id=os.environ.get(SESSION_ID_ENV)
+        if not session_id:
+            raise RuntimeError(SESSION_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence runs under the real auth session - synthetic session authority is never substituted')
+        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(owner_scoped_dsn(sessions_dsn,owner_id,session_id)),owner_id=owner_id,allow_db_provider_dispatch=True))
     # File persistence only when explicitly chosen; otherwise fail clear at boot.
     if os.environ.get(FILE_SESSIONS_ENV)!='1':
         raise RuntimeError(FILE_SESSIONS_MSG)
