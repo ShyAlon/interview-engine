@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import threading
 
+from contextlib import contextmanager
+
 import psycopg
 from langgraph.checkpoint.base import WRITES_IDX_MAP
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -99,7 +101,7 @@ class FencedPostgresSaver(PostgresSaver):
     """PostgresSaver whose every mutation is fenced against the DB lease row."""
 
     def __init__(self, conn, *, lease: LeaseFence, pipe=None, serde=None,
-                 lease_table: str = LEASE_TABLE):
+                 lease_table: str = LEASE_TABLE, claims: tuple | None = None):
         super().__init__(conn, pipe=pipe, serde=serde)
         if not isinstance(lease, LeaseFence):
             raise ValueError('explicit lease fence required')
@@ -107,11 +109,43 @@ class FencedPostgresSaver(PostgresSaver):
             raise ValueError('trusted lease table name required')
         self._lease = lease
         self._lease_table = lease_table
+        # Per-transaction tenant claims (pg_claims): carried by every
+        # connection the saver drives. None only in mirrored-DDL superuser
+        # tests; the production wiring always passes them.
+        self._claims = claims if claims is not None else getattr(conn, 'claims', None)
         # Guarded writes use a dedicated connection: graph nodes run on worker
         # threads and the base saver drives its connection in pipeline mode,
         # so sharing it for fenced statements corrupts the pipeline.
-        self._write_conn = psycopg.Connection.connect(conn.info.dsn, autocommit=False)
+        if self._claims is not None:
+            from .pg_claims import connect_claimed
+            self._write_conn = connect_claimed(conn.info.dsn, *self._claims, autocommit=False)
+        else:
+            self._write_conn = psycopg.Connection.connect(conn.info.dsn, autocommit=False)
         self._write_lock = threading.Lock()
+
+    @contextmanager
+    def _cursor(self, *, pipeline: bool = False):
+        # When claims are bound, every saver operation runs in one explicit
+        # claimed transaction: on the autocommit base connection an explicit
+        # block is the only way transaction-local claims (set_config
+        # is_local=true) span the operation's statements. Startup-option GUCs
+        # are not used: poolers drop them (pg_claims). Pipeline behavior is
+        # preserved inside the claimed transaction.
+        if self._claims is None:
+            with super()._cursor(pipeline=pipeline) as cur:
+                yield cur
+            return
+        from .pg_claims import CLAIM_SQL
+        with self.lock:
+            with self.conn.transaction():
+                # Idempotent: a ClaimedConnection already applied these at BEGIN.
+                self.conn.execute(CLAIM_SQL, self._claims)
+                if pipeline and self.supports_pipeline:
+                    with self.conn.pipeline(), self.conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
+                        yield cur
+                else:
+                    with self.conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
+                        yield cur
 
     def close(self):
         self._write_conn.close()
@@ -125,7 +159,10 @@ class FencedPostgresSaver(PostgresSaver):
         # explicitly through bootstrap_checkpoint_schema under a superuser.
         version = None
         try:
-            row = self.conn.execute("SELECT max(v) AS v FROM checkpoint_migrations").fetchone()
+            # Routed through _cursor so the claimed transaction carries the
+            # tenant boundary for this read too.
+            with self._cursor() as cur:
+                row = cur.execute("SELECT max(v) AS v FROM checkpoint_migrations").fetchone()
         except Exception:
             row = None
         if row is not None:

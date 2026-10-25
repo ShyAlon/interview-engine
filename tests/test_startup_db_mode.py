@@ -159,20 +159,36 @@ def test_tenant_router_builds_database_registries_per_owner(migrated_dsn):
     assert registry._owner_id == OWNER
     assert registry._state_dir is None
     assert registry._allow_db_dispatch is True
-    # Tenant claims travel in the conninfo, so row security admits this owner
-    # only, and only while this auth session stays live.
+    # Tenant claims ride each transaction (pg_claims), never the conninfo, so
+    # row security admits this owner only, and only while this auth session
+    # stays live.
     row = registry._store.conn.execute("select current_setting('request.jwt.claim.sub', true) as sub, current_setting('request.jwt.claim.session_id', true) as sid").fetchone()
     assert row['sub'] == OWNER
     assert row['sid'] == SESSION
 
 
-def test_owner_scoped_dsn_normalizes_uri_and_keyword_forms():
-    from interview_engine.tenant_worker import owner_scoped_dsn
-    for dsn in ('postgresql://u@h:5432/db', 'host=x dbname=y user=z'):
-        scoped = owner_scoped_dsn(dsn, OWNER, SESSION)
-        assert 'request.jwt.claim.sub=%s' % OWNER in scoped
-        assert 'request.jwt.claim.session_id=%s' % SESSION in scoped
-        assert 'postgres://' not in scoped  # normalized to keyword conninfo
+def test_pg_session_store_claims_per_transaction_never_conninfo(migrated_dsn):
+    # The claim transport is per-transaction set_config (pg_claims): the
+    # conninfo carries no options payload at all, because poolers drop
+    # startup-option GUCs (2026-10-25 live probe: claims invisible in both
+    # sampled transactions through the Supabase pooler).
+    from interview_engine.tenant_worker import pg_session_store
+    store = pg_session_store(migrated_dsn, OWNER, SESSION)
+    try:
+        assert 'request.jwt' not in store.conn.info.dsn
+        assert 'options' not in store.conn.info.dsn
+        row = store.conn.execute("select current_setting('request.jwt.claim.sub', true) as sub,"
+                                 " current_setting('request.jwt.claim.session_id', true) as sid").fetchone()
+        assert row['sub'] == OWNER
+        assert row['sid'] == SESSION
+        store.conn.commit()
+        # Claims are transaction-local: after COMMIT they are gone, and the
+        # next transaction re-applies them before any statement.
+        row = store.conn.execute("select current_setting('request.jwt.claim.sub', true) as sub").fetchone()
+        assert row['sub'] == OWNER
+        store.conn.rollback()
+    finally:
+        store.conn.close()
 
 
 def test_database_registry_requires_session_scope(migrated_dsn):

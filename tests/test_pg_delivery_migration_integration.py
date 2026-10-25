@@ -52,13 +52,12 @@ SESSION = {A: '00000000-0000-0000-0000-0000000000a1',
 
 
 def app_conn(owner):
-    # Tenant claims travel IN THE CONNINFO: connections the saver spawns for
-    # fenced writes inherit them, so every engine connection runs under the
-    # same tenant boundary.
-    return psycopg.connect(
-        f"{_STATE['dsn']} user=delivery_app options='-c request.jwt.claim.sub={owner}"
-        f" -c request.jwt.claim.session_id={SESSION[owner]}'",
-        autocommit=False, row_factory=psycopg.rows.dict_row)
+    # The engine's exact production claim shape: tenant claims ride each
+    # transaction (pg_claims), never the conninfo - poolers drop startup-option
+    # GUCs, so the conninfo options payload is not a claim transport.
+    from interview_engine.pg_claims import connect_claimed
+    return connect_claimed(f"{_STATE['dsn']} user=delivery_app",
+                           owner, SESSION[owner], autocommit=False)
 
 
 def test_store_claim_publish_stop_under_app_role():

@@ -38,14 +38,18 @@ class InterviewApplication:
         if pg_store is not None:
             # Database mode: the graph checkpoints into Postgres through the
             # fenced saver; every mutation carries the session's lease fence.
+            # Tenant claims ride each transaction (pg_claims): poolers drop
+            # startup-option GUCs, so the conninfo never carries them.
             import psycopg
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
-            pg_conn=psycopg.connect(pg_store.conn.info.dsn,autocommit=True)
+            from .pg_claims import connect_claimed
+            pg_conn=connect_claimed(pg_store.conn.info.dsn,pg_claim.owner_id,pg_claim.session_id,autocommit=True)
             from . import model_config as _mc
             self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
             saver=FencedPostgresSaver(pg_conn,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
-                serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
+                serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
+                claims=(pg_claim.owner_id,pg_claim.session_id))
             saver.setup()
         else:
             db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
