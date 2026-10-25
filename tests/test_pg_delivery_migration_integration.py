@@ -42,13 +42,22 @@ def migrated():
     _STATE.clear()
 
 
+# The harness seeds one ACTIVE session per owner, deliberately distinct from the
+# owner uuid: the engine_sessions RLS policy requires requi_session_active(),
+# i.e. request.jwt.claim.session_id must name a live session owned by
+# request.jwt.claim.sub. Claiming session_id == owner is the vacuous
+# session==user trap and fails under FORCE RLS.
+SESSION = {A: '00000000-0000-0000-0000-0000000000a1',
+           B: '00000000-0000-0000-0000-0000000000a2'}
+
+
 def app_conn(owner):
     # Tenant claims travel IN THE CONNINFO: connections the saver spawns for
     # fenced writes inherit them, so every engine connection runs under the
     # same tenant boundary.
     return psycopg.connect(
         f"{_STATE['dsn']} user=delivery_app options='-c request.jwt.claim.sub={owner}"
-        f" -c request.jwt.claim.session_id={owner}'",
+        f" -c request.jwt.claim.session_id={SESSION[owner]}'",
         autocommit=False, row_factory=psycopg.rows.dict_row)
 
 
