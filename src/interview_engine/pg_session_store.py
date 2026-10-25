@@ -36,6 +36,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass
 
@@ -68,6 +69,10 @@ class PgSessionStore:
         self.conn = conn
         self.claims = claims if claims is not None else getattr(conn, 'claims', None)
         self._staging_conn = None
+        # One claimed transaction at a time on the dedicated staging
+        # connection: parallel nodes share it, and overlapping Transaction
+        # contexts on a single connection nest and fail out of order.
+        self._staging_lock = threading.Lock()
 
     def spawn(self) -> "PgSessionStore":
         # A second store on its own connection: a psycopg connection is not
@@ -260,7 +265,7 @@ class PgSessionStore:
         """The ordered staged rows for one logical call sequence: a (stage,item)
         sequence issued by one node under one execution point (the durable
         checkpoint the execution resumed from) in one generation."""
-        with self._stage_conn.transaction():
+        with self._staging_lock, self._stage_conn.transaction():
             with self._stage_conn.cursor() as cur:
                 cur.execute(
                     "SELECT ordinal,attempt_id,request_sha256,response,usage,provider,model FROM staged_provider_responses "
@@ -274,7 +279,7 @@ class PgSessionStore:
         """Open a logical call's staged row BEFORE the ledger attempt is reserved:
         any crash from here on leaves visible evidence instead of an invisible rerun."""
         import time as _time
-        with self._stage_conn.transaction():
+        with self._staging_lock, self._stage_conn.transaction():
             with self._stage_conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO staged_provider_responses(owner_id,session_id,generation,execution_point,node,stage,item,ordinal,request_sha256,provider,model,dispatched_at) "
@@ -285,7 +290,7 @@ class PgSessionStore:
     def bind_attempt(self, claim: SessionClaim, *, execution_point: str, node: str,
                      stage: str, item: str, ordinal: int, attempt_id: str) -> None:
         """Bind the ledger attempt to the staged row (once)."""
-        with self._stage_conn.transaction():
+        with self._staging_lock, self._stage_conn.transaction():
             with self._stage_conn.cursor() as cur:
                 row = cur.execute(
                     "UPDATE staged_provider_responses SET attempt_id=%s WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND attempt_id IS NULL RETURNING ordinal",
@@ -298,7 +303,7 @@ class PgSessionStore:
                         response: dict, usage: dict | None) -> None:
         """Stage the raw provider result + measured usage (once) BEFORE settle/handoff."""
         import json as _json, time as _time
-        with self._stage_conn.transaction():
+        with self._staging_lock, self._stage_conn.transaction():
             with self._stage_conn.cursor() as cur:
                 row = cur.execute(
                     "UPDATE staged_provider_responses SET response=%s,usage=%s,completed_at=%s "
