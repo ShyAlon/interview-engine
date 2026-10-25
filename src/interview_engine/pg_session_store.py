@@ -61,8 +61,12 @@ class SessionClaim:
 class PgSessionStore:
     """Registry operations against the migration-owned engine_sessions table."""
 
-    def __init__(self, conn: psycopg.Connection):
+    def __init__(self, conn: psycopg.Connection, *, claims: tuple[str, str] | None = None):
+        # claims = (owner_id, session_id) for per-transaction tenant claims on
+        # every spawned connection (pg_claims). None only in mirrored-DDL
+        # superuser tests; the production wiring always passes them.
         self.conn = conn
+        self.claims = claims if claims is not None else getattr(conn, 'claims', None)
         self._staging_conn = None
 
     def spawn(self) -> "PgSessionStore":
@@ -70,6 +74,9 @@ class PgSessionStore:
         # thread-safe, so a background heartbeat must never share the serving
         # thread's connection.
         import psycopg.rows
+        if self.claims is not None:
+            from .pg_claims import connect_claimed
+            return PgSessionStore(connect_claimed(self.conn.info.dsn, *self.claims, autocommit=False))
         return PgSessionStore(psycopg.connect(self.conn.info.dsn, autocommit=False,
                                               row_factory=psycopg.rows.dict_row))
 
@@ -227,17 +234,25 @@ class PgSessionStore:
 
     @property
     def _stage_conn(self):
-        """Dedicated AUTOCOMMIT connection for staged provider-response rows.
+        """Dedicated connection for staged provider-response rows.
 
         A staged row is crash evidence: it must be durable the moment it is
         written, independent of the step-publish transaction on the main
         connection (a crash mid-step must never lose the record that a possibly
-        paid call was dispatched). Mutations stay generation-scoped, so a stale
-        pre-takeover writer cannot touch the new generation's rows.
+        paid call was dispatched). Each method runs one short claimed
+        transaction committed at return, so durability matches the former
+        autocommit behavior exactly while the tenant claims ride the
+        transaction stream (pg_claims). Mutations stay generation-scoped, so a
+        stale pre-takeover writer cannot touch the new generation's rows.
         """
         if self._staging_conn is None or self._staging_conn.closed:
-            self._staging_conn = psycopg.connect(self.conn.info.dsn, autocommit=True,
-                                                 row_factory=psycopg.rows.dict_row)
+            if self.claims is not None:
+                from .pg_claims import connect_claimed
+                self._staging_conn = connect_claimed(self.conn.info.dsn, *self.claims,
+                                                     autocommit=False)
+            else:
+                self._staging_conn = psycopg.connect(self.conn.info.dsn, autocommit=True,
+                                                     row_factory=psycopg.rows.dict_row)
         return self._staging_conn
 
     def staged_log(self, session_id: str, generation: int, *, execution_point: str,
@@ -245,12 +260,13 @@ class PgSessionStore:
         """The ordered staged rows for one logical call sequence: a (stage,item)
         sequence issued by one node under one execution point (the durable
         checkpoint the execution resumed from) in one generation."""
-        with self._stage_conn.cursor() as cur:
-            cur.execute(
-                "SELECT ordinal,attempt_id,request_sha256,response,usage,provider,model FROM staged_provider_responses "
-                "WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s ORDER BY ordinal",
-                (session_id, generation, execution_point, node, stage, item))
-            return cur.fetchall()
+        with self._stage_conn.transaction():
+            with self._stage_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ordinal,attempt_id,request_sha256,response,usage,provider,model FROM staged_provider_responses "
+                    "WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s ORDER BY ordinal",
+                    (session_id, generation, execution_point, node, stage, item))
+                return cur.fetchall()
 
     def record_dispatch(self, claim: SessionClaim, *, execution_point: str, node: str,
                         stage: str, item: str, ordinal: int,
@@ -258,20 +274,22 @@ class PgSessionStore:
         """Open a logical call's staged row BEFORE the ledger attempt is reserved:
         any crash from here on leaves visible evidence instead of an invisible rerun."""
         import time as _time
-        with self._stage_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO staged_provider_responses(owner_id,session_id,generation,execution_point,node,stage,item,ordinal,request_sha256,provider,model,dispatched_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (claim.owner_id, claim.session_id, claim.generation, execution_point, node,
-                 stage, item, ordinal, request_sha256, provider, model, _time.time()))
+        with self._stage_conn.transaction():
+            with self._stage_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO staged_provider_responses(owner_id,session_id,generation,execution_point,node,stage,item,ordinal,request_sha256,provider,model,dispatched_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (claim.owner_id, claim.session_id, claim.generation, execution_point, node,
+                     stage, item, ordinal, request_sha256, provider, model, _time.time()))
 
     def bind_attempt(self, claim: SessionClaim, *, execution_point: str, node: str,
                      stage: str, item: str, ordinal: int, attempt_id: str) -> None:
         """Bind the ledger attempt to the staged row (once)."""
-        with self._stage_conn.cursor() as cur:
-            row = cur.execute(
-                "UPDATE staged_provider_responses SET attempt_id=%s WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND attempt_id IS NULL RETURNING ordinal",
-                (attempt_id, claim.session_id, claim.generation, execution_point, node, stage, item, ordinal)).fetchone()
+        with self._stage_conn.transaction():
+            with self._stage_conn.cursor() as cur:
+                row = cur.execute(
+                    "UPDATE staged_provider_responses SET attempt_id=%s WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND attempt_id IS NULL RETURNING ordinal",
+                    (attempt_id, claim.session_id, claim.generation, execution_point, node, stage, item, ordinal)).fetchone()
         if row is None:
             raise PublicationConflict('staged response attempt binding raced or repeated')
 
@@ -280,12 +298,13 @@ class PgSessionStore:
                         response: dict, usage: dict | None) -> None:
         """Stage the raw provider result + measured usage (once) BEFORE settle/handoff."""
         import json as _json, time as _time
-        with self._stage_conn.cursor() as cur:
-            row = cur.execute(
-                "UPDATE staged_provider_responses SET response=%s,usage=%s,completed_at=%s "
-                "WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND response IS NULL RETURNING ordinal",
-                (_json.dumps(response), _json.dumps(usage) if usage is not None else None, _time.time(),
-                 claim.session_id, claim.generation, execution_point, node, stage, item, ordinal)).fetchone()
+        with self._stage_conn.transaction():
+            with self._stage_conn.cursor() as cur:
+                row = cur.execute(
+                    "UPDATE staged_provider_responses SET response=%s,usage=%s,completed_at=%s "
+                    "WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND response IS NULL RETURNING ordinal",
+                    (_json.dumps(response), _json.dumps(usage) if usage is not None else None, _time.time(),
+                     claim.session_id, claim.generation, execution_point, node, stage, item, ordinal)).fetchone()
         if row is None:
             raise PublicationConflict('staged response already completed or missing')
 
