@@ -178,3 +178,16 @@ def test_start_conflict_409_carries_no_operator_header(tmp_path):
     finally:
         registry.close()
         conn.close()
+
+
+def test_operator_header_never_reaches_unauthenticated_callers():
+    """The diagnostics header exists only behind the service-token boundary:
+    a missing or wrong token is a 401 before the handler runs, with no header.
+    (Network layer separately binds the engine to loopback in the full-service
+    image; this pins the application layer.)"""
+    client = TestClient(create_app(SessionRegistry(), service_token=_TOKEN))
+    payload = {'protocol_version': 1, 'task_id': 't', 'idea': 'i', 'model_route': 'm'}
+    for headers in ({}, {'X-Interview-Engine-Token': 'wrong-token'}):
+        r = client.post('/v1/sessions', json=payload, headers=headers)
+        assert r.status_code == 401
+        assert 'x-engine-operator-diagnostics' not in r.headers
