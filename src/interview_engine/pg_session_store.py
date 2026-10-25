@@ -178,18 +178,24 @@ class PgSessionStore:
                     published_checkpoint_ns: str = "",
                     published_checkpoint_id: str | None = None) -> None:
         """Commit control state and the staged publication pointer under the fence."""
-        row = self.conn.execute(
-            "UPDATE engine_sessions"
-            " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
-            "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
-            "     updated_at = %(now)s"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-            "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
-            " RETURNING 1",
-            {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-             "epoch": claim.epoch, "control": json.dumps(control), "tid": published_thread_id,
-             "ns": published_checkpoint_ns, "cid": published_checkpoint_id,
-             "now": time.time()}).fetchone()
+        try:
+            row = self.conn.execute(
+                "UPDATE engine_sessions"
+                " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
+                "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
+                "     updated_at = %(now)s"
+                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+                " RETURNING 1",
+                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                 "epoch": claim.epoch, "control": json.dumps(control), "tid": published_thread_id,
+                 "ns": published_checkpoint_ns, "cid": published_checkpoint_id,
+                 "now": time.time()}).fetchone()
+        except Exception as exc:
+            self.conn.rollback()
+            from .pg_diagnostics import tag_stage
+            tag_stage(exc, "checkpoint save", self.conn)
+            raise
         if row is None:
             self.conn.rollback()
             raise StopRequested("session lease fence rejected the save")
@@ -306,31 +312,37 @@ class PgSessionStore:
         publication discipline as control state - a stop or takeover that
         landed rejects the append with StopRequested.
         """
-        row = self.conn.execute(
-            "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
-            " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
-            " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-            "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
-            " FOR UPDATE"
-            " ON CONFLICT (session_id, cursor) DO NOTHING"
-            " RETURNING 1",
-            {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-             "epoch": claim.epoch, "cursor": cursor, "page": json.dumps(page),
-             "now": time.time()}).fetchone()
-        # A duplicate cursor returns no row without the guard failing; detect
-        # fence failure separately so a stale writer never passes silently.
-        if row is None:
-            guard = self.conn.execute(
-                "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-                " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s",
+        try:
+            row = self.conn.execute(
+                "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+                " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
+                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+                " FOR UPDATE"
+                " ON CONFLICT (session_id, cursor) DO NOTHING"
+                " RETURNING 1",
                 {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                 "epoch": claim.epoch, "now": time.time()}).fetchone()
-            if guard is not None:
-                self.conn.commit()
-                return  # page already staged at this cursor; immutable, kept
+                 "epoch": claim.epoch, "cursor": cursor, "page": json.dumps(page),
+                 "now": time.time()}).fetchone()
+            # A duplicate cursor returns no row without the guard failing; detect
+            # fence failure separately so a stale writer never passes silently.
+            if row is None:
+                guard = self.conn.execute(
+                    "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                    " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s",
+                    {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                     "epoch": claim.epoch, "now": time.time()}).fetchone()
+                if guard is not None:
+                    self.conn.commit()
+                    return  # page already staged at this cursor; immutable, kept
+                self.conn.rollback()
+                raise StopRequested("session lease fence rejected the journal append")
+            self.conn.commit()
+        except Exception as exc:
             self.conn.rollback()
-            raise StopRequested("session lease fence rejected the journal append")
-        self.conn.commit()
+            from .pg_diagnostics import tag_stage
+            tag_stage(exc, "journal append", self.conn)
+            raise
 
     def read_journal(self, session_id: str, owner_id: str, after: int, limit: int) -> list[dict]:
         """Committed journal pages for progress reads; cross-owner reads see nothing."""
@@ -370,12 +382,18 @@ class PgSessionStore:
             raise ValueError('control payload must carry an integer "sequence" revision')
         params = {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
                   "epoch": claim.epoch, "now": time.time()}
-        row = self.conn.execute(
-            "SELECT control, published_thread_id, published_checkpoint_ns, published_checkpoint_id"
-            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-            " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
-            " FOR UPDATE",
-            params).fetchone()
+        try:
+            row = self.conn.execute(
+                "SELECT control, published_thread_id, published_checkpoint_ns, published_checkpoint_id"
+                " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+                " FOR UPDATE",
+                params).fetchone()
+        except Exception as exc:
+            self.conn.rollback()
+            from .pg_diagnostics import tag_stage
+            tag_stage(exc, "publication guard", self.conn)
+            raise
         if row is None:
             self.conn.rollback()
             raise StopRequested("session lease fence rejected the publication")
@@ -439,8 +457,10 @@ class PgSessionStore:
                 " WHERE session_id = %(sid)s",
                 {**params, "control": json.dumps(control), "tid": published_thread_id,
                  "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
-        except BaseException:
+        except BaseException as exc:
             self.conn.rollback()
+            from .pg_diagnostics import tag_stage
+            tag_stage(exc, "step publication", self.conn)
             raise
         self.conn.commit()
 

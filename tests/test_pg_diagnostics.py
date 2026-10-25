@@ -84,3 +84,97 @@ def test_block_is_json_ascii_safe_and_bounded():
     raw = json.dumps(build_operator_block(exc), separators=(',', ':')).encode()
     assert len(raw) <= 1800
     base64.urlsafe_b64encode(raw).decode('ascii')
+
+
+# --- HTTP-level integration: the block must actually travel on the start 503
+# response header, through the real app, store and handler - and customer
+# error contracts (409, minimal 503 detail) must stay untouched.
+
+import base64
+import json
+from uuid import uuid4
+
+import psycopg.rows
+from fastapi.testclient import TestClient
+from vmodel_contracts.interactive import ProtocolErrorCode
+
+from interview_engine.http_service import SessionRegistry, create_app
+from interview_engine.pg_session_store import PgSessionStore
+
+_TOKEN = 'test-service-token'
+_OWNER = '00000000-0000-0000-0000-000000000001'
+
+
+def _pg_registry(tmp_path):
+    from conftest import managed_pg_server
+    from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
+    server = managed_pg_server(str(tmp_path / 'pgdata'))
+    conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
+    conn.execute(MIRRORED_REGISTRY_DDL)
+    conn.execute(MIRRORED_JOURNAL_DDL)
+    conn.commit()
+    registry = SessionRegistry(session_store=PgSessionStore(conn), owner_id=_OWNER,
+                               instance_id='t#diag', lease_ttl=60.0)
+    return registry, conn
+
+
+def test_start_503_carries_sanitized_operator_header(tmp_path):
+    """A real database failure during start surfaces the operator block on the
+    response header: tagged stage, real sqlstate, sanitized message - while the
+    customer-facing detail keeps its minimal-disclosure shape."""
+    registry, conn = _pg_registry(tmp_path)
+    try:
+        # Force a genuine NotNullViolation in the session insert.
+        conn.execute("ALTER TABLE engine_sessions ADD COLUMN forced_failure TEXT NOT NULL")
+        conn.commit()
+        client = TestClient(create_app(registry, service_token=_TOKEN),
+                            headers={'X-Interview-Engine-Token': _TOKEN})
+        r = client.post('/v1/sessions', json={'protocol_version': 1, 'task_id': 't',
+                                              'idea': 'i', 'model_route': 'm'})
+        assert r.status_code == 503
+        detail = r.json()['detail']
+        assert detail['code'] == ProtocolErrorCode.INTERNAL_ERROR
+        assert detail['retryable'] is True
+        assert detail['detail'] == 'engine program failed during start: NotNullViolation'
+        header = r.headers.get('x-engine-operator-diagnostics')
+        assert header, 'operator diagnostics header missing on start 503'
+        assert len(header) <= 2400  # bounded by construction before base64
+        block = json.loads(base64.urlsafe_b64decode(header))
+        assert block['error_class'] == 'NotNullViolation'
+        assert block['sqlstate'] == '23502'
+        assert block['stage'] == 'session insert'
+        # Sanitized by construction: no relation/column identifiers, no values.
+        assert 'engine_sessions' not in block['message']
+        assert 'forced_failure' not in block['message']
+        assert '[identifier]' in block['message']
+        # Presence fields are booleans or an honest UNKNOWN - never values.
+        assert block['sub_present'] in (True, False, 'UNKNOWN')
+        assert block['session_id_present'] in (True, False, 'UNKNOWN')
+        assert block['session_active_for_sub'] in (True, False, 'UNKNOWN')
+        assert isinstance(block['role'], str) and block['role']
+    finally:
+        registry.close()
+        conn.close()
+
+
+def test_start_conflict_409_carries_no_operator_header(tmp_path):
+    """A typed protocol failure (session ID conflict) is a 409 with the plain
+    contract - the operator header is added only on unexpected 503s."""
+    registry, conn = _pg_registry(tmp_path)
+    try:
+        sid = str(uuid4())
+        conn.execute(
+            "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
+            " VALUES (%s,%s,%s,1,1,0,0)",
+            (sid, '00000000-0000-0000-0000-000000000002', 'other-task'))
+        conn.commit()
+        client = TestClient(create_app(registry, service_token=_TOKEN),
+                            headers={'X-Interview-Engine-Token': _TOKEN})
+        r = client.post('/v1/sessions', json={'protocol_version': 1, 'task_id': 't',
+                                              'idea': 'i', 'model_route': 'm',
+                                              'session_id': sid})
+        assert r.status_code == 409
+        assert 'x-engine-operator-diagnostics' not in r.headers
+    finally:
+        registry.close()
+        conn.close()
