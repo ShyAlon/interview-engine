@@ -52,7 +52,10 @@ def pg_session_store(dsn:str):
     try:
         conn=psycopg.connect(dsn,autocommit=False,row_factory=psycopg.rows.dict_row)
     except Exception as exc:
-        raise RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__) from exc
+        from .pg_diagnostics import tag_stage
+        err=RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__)
+        tag_stage(err,"connect")
+        raise err from tag_stage(exc,"connect")
     try:
         conn.execute('SELECT session_id FROM engine_sessions LIMIT 0')
     except psycopg.errors.UndefinedTable:

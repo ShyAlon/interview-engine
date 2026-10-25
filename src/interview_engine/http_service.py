@@ -850,7 +850,21 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             raise HTTPException(422,ProtocolError(code=ProtocolErrorCode.INVALID_RESPONSE,detail=exc.render(),retryable=False).model_dump(mode="json"))
         except Exception as exc:
             log.exception("interview session start failed task=%s",request.task_id)
-            raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed during start: {type(exc).__name__}",retryable=True).model_dump(mode="json"))
+            # Operator-only failure diagnostics travel on a response header so
+            # the protocol error contract is untouched; the block is sanitized
+            # by construction and bounded, and the customer-facing detail keeps
+            # its minimal-disclosure shape. Delivery records it on the task's
+            # failure event for operator Debug surfaces only.
+            headers={}
+            try:
+                from . import pg_diagnostics
+                import base64 as _b64, json as _json
+                raw=_json.dumps(pg_diagnostics.build_operator_block(exc),separators=(",",":")).encode()
+                if len(raw)<=1800:
+                    headers["X-Engine-Operator-Diagnostics"]=_b64.urlsafe_b64encode(raw).decode("ascii")
+            except Exception:
+                headers={}
+            raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed during start: {type(exc).__name__}",retryable=True).model_dump(mode="json"),headers=headers)
         return StartSessionResponse(snapshot=session.snapshot(),accepted_event=event)
 
     @app.get("/v1/sessions/{session_id}/progress",dependencies=[Depends(authenticate)])

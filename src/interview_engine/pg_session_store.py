@@ -70,8 +70,13 @@ class PgSessionStore:
         # thread-safe, so a background heartbeat must never share the serving
         # thread's connection.
         import psycopg.rows
-        return PgSessionStore(psycopg.connect(self.conn.info.dsn, autocommit=False,
-                                              row_factory=psycopg.rows.dict_row))
+        from .pg_diagnostics import tag_stage
+        try:
+            conn = psycopg.connect(self.conn.info.dsn, autocommit=False,
+                                   row_factory=psycopg.rows.dict_row)
+        except Exception as exc:
+            raise tag_stage(exc, "connect") from exc
+        return PgSessionStore(conn)
 
     def create(self, session_id: str, task_id: str, owner_id: str) -> None:
         now = time.time()
@@ -93,10 +98,12 @@ class PgSessionStore:
                     self.conn.rollback()
                     raise psycopg.errors.UniqueViolation("engine_sessions session_id conflict")
             self.conn.commit()
-        except Exception:
+        except Exception as exc:
             # Never leave the shared serving connection in an aborted
             # transaction: one failed op must not poison every later claim.
             self.conn.rollback()
+            from .pg_diagnostics import tag_stage
+            tag_stage(exc, "session insert", self.conn)
             raise
 
     def claim(self, session_id: str, owner_id: str, instance: str, ttl: float) -> SessionClaim | None:
@@ -118,9 +125,11 @@ class PgSessionStore:
                 {"sid": session_id, "owner": owner_id, "instance": instance,
                  "expiry": now + ttl, "now": now}).fetchone()
             self.conn.commit()
-        except Exception:
+        except Exception as exc:
             # Never leave the shared serving connection aborted.
             self.conn.rollback()
+            from .pg_diagnostics import tag_stage
+            tag_stage(exc, "claim setup", self.conn)
             raise
         if row is None:
             return None
