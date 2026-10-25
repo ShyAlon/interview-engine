@@ -29,28 +29,24 @@ def worker_root(default:Path)->Path:
     return _root.get() or default
 
 
-def owner_scoped_dsn(dsn:str,owner:str,session_id:str)->str:
-    """Tenant claims travel in the conninfo: every engine connection - serving,
-    heartbeat and saver-spawned - runs under the same tenant boundary, so the
-    placement tables' row security admits exactly this owner's rows, and only
-    while the named auth session stays live. URI and keyword conninfo forms
-    both normalize through libpq."""
-    from psycopg.conninfo import conninfo_to_dict,make_conninfo
-    parts=conninfo_to_dict(dsn)
-    options="-c request.jwt.claim.sub=%s -c request.jwt.claim.session_id=%s"%(owner,session_id)
-    parts['options']=((parts.get('options') or '')+' '+options).strip()
-    return make_conninfo(**parts)
-
-
-def pg_session_store(dsn:str):
+def pg_session_store(dsn:str,owner:str,session_id:str):
     """One serving connection for a database-backed registry; fails clear at
     startup when the database is unreachable or the delivery-api placement
-    migration has not run. The store spawns its own heartbeat connections."""
+    migration has not run. The store spawns its own heartbeat connections.
+
+    Tenant claims ride every transaction (pg_claims), never the conninfo:
+    poolers drop libpq startup-option GUCs, so claims in the startup packet
+    never reach the backend there. Every engine connection - serving,
+    heartbeat and saver-spawned - applies the same (owner, session) claims as
+    the first statement of each transaction, so the placement tables' row
+    security admits exactly this owner's rows, and only while the named auth
+    session stays live."""
     import psycopg
     import psycopg.rows
+    from .pg_claims import connect_claimed
     from .pg_session_store import PgSessionStore
     try:
-        conn=psycopg.connect(dsn,autocommit=False,row_factory=psycopg.rows.dict_row)
+        conn=connect_claimed(dsn,owner,session_id,autocommit=False)
     except Exception as exc:
         from .pg_diagnostics import tag_stage
         err=RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__)
@@ -61,7 +57,7 @@ def pg_session_store(dsn:str):
     except psycopg.errors.UndefinedTable:
         conn.close()
         raise RuntimeError('database session persistence configured but the delivery-api migration 20261022090000_session_placement_leases.sql has not run: engine_sessions is missing') from None
-    return PgSessionStore(conn)
+    return PgSessionStore(conn,claims=(owner,session_id))
 
 
 class TenantRegistryRouter:
@@ -141,7 +137,7 @@ class TenantRegistryRouter:
                     # staged responses (PR B) landed, so the documented
                     # constructor block is lifted for exactly this wiring.
                     self._registries[key]=self.registry_type(self.factory,
-                        session_store=pg_session_store(owner_scoped_dsn(self._session_dsn,owner,session)),owner_id=owner,
+                        session_store=pg_session_store(self._session_dsn,owner,session),owner_id=owner,
                         lease_ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0')),
                         allow_db_provider_dispatch=True)
                 self._inflight[key]=0
