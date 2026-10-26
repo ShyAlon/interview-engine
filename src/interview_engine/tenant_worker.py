@@ -74,13 +74,16 @@ class TenantRegistryRouter:
     new scope requests are rejected rather than closing anyone's active
     interview."""
 
-    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False):
+    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False,pool=None):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
         self._session_dsn=session_dsn
         # One pool per process/DSN shared by every tenant registry: claims are
         # applied per checkout (pg_claims), so one pool serves all tenants
         # without cross-tenant bleed and the connection budget is one number.
-        self._pool=None
+        # Hosted in-process (delivery-api) the host INJECTS its process pool;
+        # standalone the router builds its own from session_dsn and owns it.
+        self._pool=pool
+        self._owns_pool=pool is None
         self._allow_file_sessions=allow_file_sessions
         self._registries={}
         self._used={}
@@ -146,7 +149,7 @@ class TenantRegistryRouter:
                     ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','150.0'))
                     if self._pool is None:
                         from .pg_pool import build_pool
-                        self._pool=build_pool(self._session_dsn)
+                        self._pool=build_pool(self._session_dsn)  # standalone: router-owned
                     self._registries[key]=self.registry_type(self.factory,
                         session_store=pg_session_store(self._pool,owner,session),owner_id=owner,
                         lease_ttl=ttl,
@@ -165,8 +168,9 @@ class TenantRegistryRouter:
             self._registries={};self._used={};self._inflight={}
         for registry in registries:
             registry.close()
-        if self._pool is not None:
-            self._pool.close();self._pool=None
+        if self._pool is not None and self._owns_pool:
+            self._pool.close()
+        self._pool=None
 
     def __getattr__(self,name):
         registry=self._registry()
