@@ -45,9 +45,9 @@ class InterviewApplication:
             # startup-option GUCs, so the conninfo never carries them.
             import psycopg
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
-            from .pg_claims import connect_claimed
+            from .pg_claims import connect_claimed, reconnect_dsn
             t_pg=time.monotonic();_log.info("pg.connect.begin session=%s",session_id)
-            pg_conn=connect_claimed(pg_store.conn.info.dsn,pg_claim.owner_id,pg_claim.session_id,autocommit=True)
+            pg_conn=connect_claimed(reconnect_dsn(pg_store.conn),pg_claim.owner_id,pg_claim.session_id,autocommit=True)
             _log.info("pg.connect.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_pg)*1000))
             from . import model_config as _mc
             self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)

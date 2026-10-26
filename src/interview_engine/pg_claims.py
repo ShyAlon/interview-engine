@@ -61,6 +61,22 @@ class ClaimedConnection:
         return getattr(self._conn, name)
 
 
+def reconnect_dsn(conn) -> str:
+    """A conninfo string for opening a second connection like `conn`.
+
+    psycopg's Connection.info.dsn NEVER carries the password (its docstring:
+    "The password is never returned (you can read it using the `password`
+    attribute)"), so a bare psycopg.connect(conn.info.dsn) against a
+    password-authenticated server fails with fe_sendauth: no password
+    supplied. Rebuild the conninfo with the password the live connection
+    used; a server without password auth gets the original string unchanged.
+    """
+    password = conn.info.password
+    if not password:
+        return conn.info.dsn
+    return psycopg.conninfo.make_conninfo(conn.info.dsn, password=password)
+
+
 def connect_claimed(dsn: str, owner_id: str, session_id: str, **kwargs) -> ClaimedConnection:
     """Connect and bind (owner, session) claims for per-transaction application."""
     kwargs.setdefault('row_factory', psycopg.rows.dict_row)
