@@ -11,8 +11,11 @@ from contextvars import ContextVar
 from pathlib import Path
 from uuid import UUID
 from threading import RLock
+import logging
 import os
 import time
+
+log=logging.getLogger("interview_engine.tenant_worker")
 
 _owner=ContextVar('interview_worker_owner',default=None)
 _session=ContextVar('interview_worker_session',default=None)
@@ -136,10 +139,12 @@ class TenantRegistryRouter:
                     # Database session persistence opts into provider dispatch:
                     # staged responses (PR B) landed, so the documented
                     # constructor block is lifted for exactly this wiring.
+                    ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0'))
                     self._registries[key]=self.registry_type(self.factory,
                         session_store=pg_session_store(self._session_dsn,owner,session),owner_id=owner,
-                        lease_ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0')),
+                        lease_ttl=ttl,
                         allow_db_provider_dispatch=True)
+                    log.info("registry.constructed owner=%s session=%s mode=pg lease_ttl=%s",owner,session,ttl)
                 self._inflight[key]=0
             self._used[key]=time.monotonic()
             return self._registries[key]
