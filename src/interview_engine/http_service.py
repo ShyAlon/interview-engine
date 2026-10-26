@@ -897,7 +897,9 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
     def progress(session_id:str,after:int=0,limit:int=100):
         if after<0 or limit<1 or limit>500:raise HTTPException(422,"invalid progress cursor or page size")
         try:return sessions.progress(session_id,after,limit)
-        except KeyError:raise HTTPException(404,"session has no progress journal")
+        except KeyError:
+            log.info("session.progress.no_journal session=%s",session_id)
+            raise HTTPException(404,"session has no progress journal")
 
     @app.get("/v1/sessions/{session_id}",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
     def snapshot(session_id:str):
@@ -914,17 +916,29 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
     def stop_session(session_id:UUID):
         # Trusted service-token boundary, owner-scoped by tenant middleware.
         # No graph lock, cancellation, deletion or implicit resume.
-        try:return sessions.stop(str(session_id))
-        except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        log.info("session.stop.request session=%s",session_id)
+        try:out=sessions.stop(str(session_id))
+        except KeyError:
+            log.info("session.stop.refused session=%s reason=not-found",session_id)
+            raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
         except ProtocolFailure as failure:
+            log.info("session.stop.refused session=%s code=%s",session_id,failure.code)
             raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+        log.info("session.stop.recorded session=%s status=%s",session_id,getattr(out.process_status,'name',out.process_status))
+        return out
 
     @app.post("/v1/sessions/{session_id}/stop/reconcile",response_model=EngineSnapshot,dependencies=[Depends(authenticate)])
     def reconcile_stop(session_id:UUID):
-        try:return sessions.reconcile_stopped(str(session_id))
-        except KeyError:raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
+        log.info("session.stop.reconcile.request session=%s",session_id)
+        try:out=sessions.reconcile_stopped(str(session_id))
+        except KeyError:
+            log.info("session.stop.reconcile.refused session=%s reason=not-found",session_id)
+            raise HTTPException(404,ProtocolError(code=ProtocolErrorCode.UNKNOWN_INPUT,detail="session not found").model_dump(mode="json"))
         except ProtocolFailure as failure:
+            log.info("session.stop.reconcile.refused session=%s code=%s",session_id,failure.code)
             raise HTTPException(409,ProtocolError(code=failure.code,detail=failure.detail).model_dump(mode="json"))
+        log.info("session.stop.reconcile.recorded session=%s status=%s",session_id,getattr(out.process_status,'name',out.process_status))
+        return out
 
     @app.post("/v1/sessions/{session_id}/model-route",response_model=ModelRouteSwitchResponse,dependencies=[Depends(authenticate)])
     def switch_model_route(session_id:str,request:ModelRouteSwitchRequest):
