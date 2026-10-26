@@ -168,3 +168,28 @@ def test_capacity_rejects_rather_than_closing_active_work(tmp_path,monkeypatch):
         assert not first.closed  # active work was never closed to make room
     finally:
         halt.set();tenant_worker._owner.reset(token)
+
+
+def test_injected_pool_is_used_and_never_closed(tmp_path):
+    # Hosted in-process the host owns the process pool: the router must build
+    # stores on the INJECTED pool and must not close it at router close.
+    import contextlib, pytest
+    class Marker(Exception):pass
+    class FakePool:
+        closed=False
+        @contextlib.contextmanager
+        def connection(self):
+            raise Marker('injected pool used')
+            yield
+        def close(self):FakePool.closed=True
+    router=TenantRegistryRouter(_StubRegistry,None,tmp_path,session_dsn='postgresql://unused',pool=FakePool())
+    from interview_engine import tenant_worker
+    token=tenant_worker._owner.set(A);stoken=tenant_worker._session.set('auth-session-1')
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            router._registry()
+        assert isinstance(caught.value.__cause__, Marker)  # the INJECTED pool drove the startup probe
+    finally:
+        tenant_worker._session.reset(stoken);tenant_worker._owner.reset(token)
+    router.close()
+    assert FakePool.closed is False
