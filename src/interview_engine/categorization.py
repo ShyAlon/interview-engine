@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from .errors import UserFacingError
 from .model_config import _env
 
 
@@ -131,7 +132,17 @@ class ProviderChain:
                 ))
                 return result
             except Exception as exc:
-                errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+                if isinstance(exc, UserFacingError):
+                    # str(UserFacingError) is only its headline; the check that fired
+                    # and the next action live on the exception and must survive into
+                    # the operator-facing message.
+                    extras = [part for part in (
+                        f"likely cause: {exc.cause}" if exc.cause else None,
+                        f"next: {exc.next_action}" if exc.next_action else None,
+                    ) if part]
+                    errors.append(f"{provider.name}: {type(exc).__name__}: {' | '.join([str(exc), *extras])}")
+                else:
+                    errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
         raise RuntimeError(f"all providers failed for {self.slot}: {'; '.join(errors)}")
 
 

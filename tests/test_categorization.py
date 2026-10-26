@@ -20,6 +20,21 @@ def test_chain_fails_loudly_after_all_providers():
     with pytest.raises(RuntimeError,match='all providers failed'):
         ProviderChain('scope',[Provider('rules',error=ValueError('bad'))],lambda _:None).classify(request())
 
+def test_chain_error_names_the_admission_check_that_fired():
+    # Regression: an admission denial reached the operator as "all providers failed
+    # ... stopped by admission/accounting checks" with the check name dropped,
+    # because ProviderChain formatted only str(UserFacingError) == the generic what.
+    from interview_engine.errors import UserFacingError
+    denial=UserFacingError("stage 'scope' was stopped by admission/accounting checks.",
+        "unresolved compute accounting requires review",
+        "preserve the run evidence and review its ledger; do not retry or blame connectivity.")
+    chain=ProviderChain('scope',[Provider('llm',error=denial)],lambda _:None)
+    with pytest.raises(RuntimeError) as excinfo:
+        chain.classify(request())
+    message=str(excinfo.value)
+    assert 'unresolved compute accounting requires review' in message
+    assert 'preserve the run evidence' in message
+
 def test_registry_is_global_or_per_slot_config_not_call_site(monkeypatch):
     monkeypatch.setenv('INTERVIEW_ENGINE_CATEGORIZERS','jev,llm,rules')
     monkeypatch.setenv('INTERVIEW_ENGINE_CATEGORIZER_SCOPE','rules')
