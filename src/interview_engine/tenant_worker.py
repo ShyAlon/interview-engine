@@ -30,61 +30,66 @@ def worker_root(default:Path)->Path:
     return _root.get() or default
 
 
-def pg_session_store(dsn:str,owner:str,session_id:str):
-    """One serving connection for a database-backed registry; fails clear at
-    startup when the database is unreachable or the delivery-api placement
-    migration has not run. The store spawns its own heartbeat connections.
+def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False):
+    """A database-backed session store over the process connection pool.
+
+    Fails clear at startup when the database is unreachable or the delivery-api
+    placement migration has not run. The store pins NO connection: every
+    operation borrows from the pool (pg_pool).
 
     Tenant claims ride every transaction (pg_claims), never the conninfo:
     poolers drop libpq startup-option GUCs, so claims in the startup packet
-    never reach the backend there. Every engine connection - serving,
-    heartbeat and saver-spawned - applies the same (owner, session) claims as
-    the first statement of each transaction, so the placement tables' row
-    security admits exactly this owner's rows, and only while the named auth
-    session stays live."""
-    import psycopg
-    import psycopg.rows
-    from .pg_claims import connect_claimed
+    never reach the backend there. Every engine operation - serving, heartbeat
+    and saver - applies the same (owner, session) claims as the first
+    statement of each transaction, so the placement tables' row security
+    admits exactly this owner's rows, and only while the named auth session
+    stays live."""
     from .pg_session_store import PgSessionStore
+    from .pg_pool import borrow_claimed
     try:
-        conn=connect_claimed(dsn,owner,session_id,autocommit=False)
+        with borrow_claimed(pool,(owner,session_id)) as conn:
+            conn.execute("SELECT 1 FROM engine_sessions LIMIT 1")
+            conn.commit()
     except Exception as exc:
         from .pg_diagnostics import tag_stage
-        err=RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__)
-        tag_stage(err,"connect")
-        raise err from tag_stage(exc,"connect")
-    try:
-        conn.execute('SELECT session_id FROM engine_sessions LIMIT 0')
-    except psycopg.errors.UndefinedTable:
-        conn.close()
-        raise RuntimeError('database session persistence configured but the delivery-api migration 20261022090000_session_placement_leases.sql has not run: engine_sessions is missing') from None
-    return PgSessionStore(conn,claims=(owner,session_id))
+        import psycopg.errors
+        if isinstance(exc, psycopg.errors.UndefinedTable):
+            err=RuntimeError('database session persistence configured but the delivery-api placement migration '
+                             '20261022090000_session_placement_leases.sql has not run: engine_sessions is missing')
+        else:
+            err=RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__)
+        raise tag_stage(err,'startup connect',None) from exc
+    return PgSessionStore(pool,claims=(owner,session_id),close_pool=close_pool)
 
 
 class TenantRegistryRouter:
     """One registry per (owner, auth session): parallel logins coexist and
-    never share connections, because each registry's connections carry that
-    exact session's claims. Idle registries cost one serving connection each,
-    so the map is bounded: a registry becomes evictable only when it owns no
-    active work (no live lease heartbeat and no turn in flight) and has been
-    idle past the TTL; eviction stops heartbeats, waits out in-flight turns
-    and releases leases through the registry's own close(). At the cap with
-    nothing evictable, new scope requests are rejected rather than closing
-    anyone's active interview."""
+    share ONE process pool, because claims ride each checked-out transaction
+    (pg_claims) instead of pinned connections. Idle registries cost no
+    connections, but each still runs a heartbeat loop while it holds leases,
+    so the map stays bounded: a registry becomes evictable only when it owns
+    no active work (no held lease and no turn in flight) and has been idle
+    past the TTL; eviction waits out in-flight turns and releases leases
+    through the registry's own close(). At the cap with nothing evictable,
+    new scope requests are rejected rather than closing anyone's active
+    interview."""
 
     def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
         self._session_dsn=session_dsn
+        # One pool per process/DSN shared by every tenant registry: claims are
+        # applied per checkout (pg_claims), so one pool serves all tenants
+        # without cross-tenant bleed and the connection budget is one number.
+        self._pool=None
         self._allow_file_sessions=allow_file_sessions
         self._registries={}
         self._used={}
         self._inflight={}
         self._lock=RLock()
-        lease_ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0'))
-        # Defaults disclose what they protect: the idle TTL retires connections
-        # unused for ten lease periods; the cap bounds engine-held database
-        # connections (one serving connection per idle registry, more for
-        # active ones), sized for a shared Postgres pool.
+        lease_ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','150.0'))
+        # Defaults disclose what they protect: the idle TTL retires registries
+        # unused for ten lease periods; the cap bounds concurrent tenant
+        # scopes, not connections (those are bounded by the pool).
         self._idle_ttl=float(os.environ.get('INTERVIEW_ENGINE_REGISTRY_IDLE_TTL',str(10*lease_ttl)))
         self._cap=int(os.environ.get('INTERVIEW_ENGINE_REGISTRY_CAP','100'))
 
@@ -94,8 +99,9 @@ class TenantRegistryRouter:
         # write lock. Anything else is terminal or never-started state that a
         # later request reloads from the store on demand.
         for session in list(registry._sessions.values()):
-            thread=session.pg_heartbeat_thread
-            if thread is not None and thread.is_alive():return False
+            # Active work = a held lease (beaten by the registry's shared loop)
+            # or a turn holding the session write lock.
+            if session.pg_claim is not None and not session.pg_stopped:return False
             if not session.write_lock.acquire(blocking=False):return False
             session.write_lock.release()
         return True
@@ -137,9 +143,12 @@ class TenantRegistryRouter:
                     # Database session persistence opts into provider dispatch:
                     # staged responses (PR B) landed, so the documented
                     # constructor block is lifted for exactly this wiring.
-                    ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','30.0'))
+                    ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','150.0'))
+                    if self._pool is None:
+                        from .pg_pool import build_pool
+                        self._pool=build_pool(self._session_dsn)
                     self._registries[key]=self.registry_type(self.factory,
-                        session_store=pg_session_store(self._session_dsn,owner,session),owner_id=owner,
+                        session_store=pg_session_store(self._pool,owner,session),owner_id=owner,
                         lease_ttl=ttl,
                         allow_db_provider_dispatch=True)
                     log.info("registry.constructed owner=%s session=%s mode=pg lease_ttl=%s",owner,session,ttl)
@@ -149,12 +158,15 @@ class TenantRegistryRouter:
 
     def close(self)->None:
         # Shutdown path: close every per-owner registry so held leases are
-        # released at committed boundaries instead of expiring.
+        # released at committed boundaries instead of expiring, then close the
+        # shared pool this router owns.
         with self._lock:
             registries=list(self._registries.values())
             self._registries={};self._used={};self._inflight={}
         for registry in registries:
             registry.close()
+        if self._pool is not None:
+            self._pool.close();self._pool=None
 
     def __getattr__(self,name):
         registry=self._registry()

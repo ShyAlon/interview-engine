@@ -106,14 +106,14 @@ _OWNER = '00000000-0000-0000-0000-000000000001'
 
 
 def _pg_registry(tmp_path):
-    from conftest import managed_pg_server
+    from conftest import managed_pg_server, managed_pool
     from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL
     server = managed_pg_server(str(tmp_path / 'pgdata'))
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_JOURNAL_DDL)
     conn.commit()
-    registry = SessionRegistry(session_store=PgSessionStore(conn), owner_id=_OWNER,
+    registry = SessionRegistry(session_store=PgSessionStore(managed_pool(conn.info.dsn)), owner_id=_OWNER,
                                instance_id='t#diag', lease_ttl=60.0)
     return registry, conn
 

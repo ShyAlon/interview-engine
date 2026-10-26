@@ -15,6 +15,16 @@ def _no_dotenv_files(monkeypatch):
 
 
 _PG_SERVERS = []
+_PG_POOLS = []
+
+
+def managed_pool(dsn, max_size=4, name='test'):
+    """One psycopg_pool per throwaway server, tracked for per-test shutdown
+    (closed BEFORE the server underneath goes away, mirroring managed_pg_server)."""
+    from interview_engine.pg_pool import build_pool
+    pool = build_pool(dsn, max_size=max_size, name=name)
+    _PG_POOLS.append(pool)
+    return pool
 
 
 def managed_pg_server(path):
@@ -32,6 +42,12 @@ def managed_pg_server(path):
 @pytest.fixture(autouse=True)
 def _cleanup_pg_servers():
     yield
+    while _PG_POOLS:
+        pool = _PG_POOLS.pop()
+        try:
+            pool.close()
+        except Exception:
+            pass
     while _PG_SERVERS:
         server = _PG_SERVERS.pop()
         try:

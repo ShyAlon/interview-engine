@@ -16,16 +16,18 @@ def server(tmp_path):
     return managed_pg_server(str(tmp_path/'pgdata'))
 
 def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
+    from conftest import managed_pool
     ctx=PostgresSaver.from_conn_string(uri)
     saver=ctx.__enter__()
     bootstrap_checkpoint_schema(saver.conn)
-    saver.conn.execute(LEASE_DDL)
-    saver.conn.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
+    admin.execute(LEASE_DDL)
+    admin.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",
         (session,'00000000-0000-0000-0000-000000000001','task1',generation,time.time(),epoch,time.time()+expire))
-    fenced=FencedPostgresSaver(saver.conn,lease=LeaseFence(session,generation,epoch),
+    pool=managed_pool(uri)
+    fenced=FencedPostgresSaver(pool,lease=LeaseFence(session,generation,epoch),
         serde=JsonPlusSerializer())
-    return ctx,fenced
+    return ctx,fenced,saver.conn
 
 def cp(i):
     return {'v':4,'ts':f'2026-10-22T08:0{i}:00+00:00','id':f'00000000-0000-4000-8000-{i:012d}',
@@ -36,7 +38,7 @@ def cfg(tid,cid=''):
     return {'configurable':{'thread_id':tid,'checkpoint_ns':'','checkpoint_id':cid}}
 
 def test_fenced_writes_round_trip(tmp_path):
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
         saver.put_writes(c1,[('messages','w1')],'taskA')
@@ -45,18 +47,18 @@ def test_fenced_writes_round_trip(tmp_path):
     finally:ctx.__exit__(None,None,None)
 
 def test_stale_generation_raises_and_persists_nothing(tmp_path):
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
-        saver.conn.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
+        admin.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
         with pytest.raises(StopRequested):
             saver.put_writes(c1,[('messages','stale')],'taskB')
-        rows=saver.conn.execute("SELECT count(*) AS n FROM checkpoint_writes WHERE task_id='taskB'").fetchone()
+        rows=admin.execute("SELECT count(*) AS n FROM checkpoint_writes WHERE task_id='taskB'").fetchone()
         assert rows['n']==0
     finally:ctx.__exit__(None,None,None)
 
 def test_same_key_collision_first_writer_wins(tmp_path):
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
         saver.put_writes(c1,[('messages','legit')],'taskA')
@@ -67,7 +69,7 @@ def test_same_key_collision_first_writer_wins(tmp_path):
 
 def test_reserved_channel_guarded_upsert(tmp_path):
     from langgraph.checkpoint.base import INTERRUPT
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
         saver.put_writes(c1,[(INTERRUPT,'first')],'taskA')
@@ -78,11 +80,11 @@ def test_reserved_channel_guarded_upsert(tmp_path):
 
 def test_reserved_upsert_still_fenced(tmp_path):
     from langgraph.checkpoint.base import INTERRUPT
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
         saver.put_writes(c1,[(INTERRUPT,'first')],'taskA')
-        saver.conn.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
+        admin.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
         with pytest.raises(StopRequested):
             saver.put_writes(c1,[(INTERRUPT,'stale-update')],'taskA')
         got=saver.get_tuple(c1)
@@ -90,13 +92,14 @@ def test_reserved_upsert_still_fenced(tmp_path):
     finally:ctx.__exit__(None,None,None)
 
 def test_takeover_keeps_prior_epoch_work(tmp_path):
-    srv=server(tmp_path);ctx,saver=make_saver(srv.get_uri())
+    srv=server(tmp_path);ctx,saver,admin=make_saver(srv.get_uri())
+    from conftest import managed_pool as _mp; pool=_mp(srv.get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
         saver.put_writes(c1,[('messages','epoch1-result')],'taskA')
         # takeover: bump + new lease identity, new saver handle
-        saver.conn.execute("UPDATE engine_sessions SET generation=2,lease_epoch=2 WHERE session_id='s1'")
-        take=FencedPostgresSaver(saver.conn,lease=LeaseFence('s1',2,2),serde=JsonPlusSerializer())
+        admin.execute("UPDATE engine_sessions SET generation=2,lease_epoch=2 WHERE session_id='s1'")
+        take=FencedPostgresSaver(pool,lease=LeaseFence('s1',2,2),serde=JsonPlusSerializer())
         take.put_writes(c1,[('messages','epoch2-result')],'taskB')
         got=take.get_tuple(c1)
         vals={w[0]:w[2] for w in got.pending_writes}
@@ -104,10 +107,10 @@ def test_takeover_keeps_prior_epoch_work(tmp_path):
     finally:ctx.__exit__(None,None,None)
 
 def test_expired_lease_raises(tmp_path):
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
-        saver.conn.execute("UPDATE engine_sessions SET lease_expires_at=%s WHERE session_id='s1'",(time.time()-1,))
+        admin.execute("UPDATE engine_sessions SET lease_expires_at=%s WHERE session_id='s1'",(time.time()-1,))
         with pytest.raises(StopRequested):
             saver.put_writes(c1,[('messages','x')],'taskA')
         with pytest.raises(StopRequested):
@@ -125,7 +128,7 @@ def test_graph_resume_through_fenced_saver(tmp_path):
         return {'steps':s['steps']+['second:'+answer]}
     g=StateGraph(S);g.add_node('first',first);g.add_node('second',second)
     g.add_edge(START,'first');g.add_edge('first','second');g.add_edge('second',END)
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         graph=g.compile(checkpointer=saver)
         c=cfg('session-x')
@@ -139,14 +142,14 @@ def test_graph_resume_through_fenced_saver(tmp_path):
     finally:ctx.__exit__(None,None,None)
 
 def test_stale_same_id_reput_cannot_mutate_metadata_or_payload(tmp_path):
-    ctx,saver=make_saver(server(tmp_path).get_uri())
+    ctx,saver,admin=make_saver(server(tmp_path).get_uri())
     try:
         c1=saver.put(cfg('t'),cp(1),META,{'messages':1})
-        saver.conn.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
+        admin.execute("UPDATE engine_sessions SET generation=2 WHERE session_id='s1'")
         forged=dict(cp(1));forged['ts']='2030-01-01T00:00:00+00:00'
         with pytest.raises(StopRequested):
             saver.put(cfg('t'),forged,{'source':'update','step':9,'parents':{'x':'y'}},{'messages':1})
-        got=PostgresSaver(saver.conn,serde=JsonPlusSerializer()).get_tuple(c1)
+        got=PostgresSaver(admin,serde=JsonPlusSerializer()).get_tuple(c1)
         assert got.checkpoint['ts']=='2026-10-22T08:01:00+00:00'
         assert got.metadata==META
     finally:ctx.__exit__(None,None,None)

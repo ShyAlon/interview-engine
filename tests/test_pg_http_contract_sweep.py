@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG sweep tests skip')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 
 import psycopg
 import psycopg.rows
@@ -57,7 +57,7 @@ def make_conn(tmp_path, name='pgdata', init=True):
 
 
 def make_registry(conn, factory=None, ttl=60.0):
-    registry = SessionRegistry(factory, session_store=PgSessionStore(conn),
+    registry = SessionRegistry(factory, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                owner_id=OWNER, instance_id='sweep#1', lease_ttl=ttl)
     _OPEN['registries'].append(registry)
     return registry
@@ -88,7 +88,7 @@ def test_program_driven_to_typed_input_and_completion(tmp_path):
     reply = {'protocol_version': 1, 'input_id': pending['input_id'], 'value': 'players', 'actor_id': 'founder'}
     done = client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}", json=reply).json()
     assert done['snapshot']['process_status'] == ProcessStatus.COMPLETED
-    row = PgSessionStore(_OPEN['conns'][-1]).load_published(started['snapshot']['session_id'], OWNER)
+    row = PgSessionStore(managed_pool(_OPEN['conns'][-1].info.dsn)).load_published(started['snapshot']['session_id'], OWNER)
     assert row['control']['status'] == int(ProcessStatus.COMPLETED)
 
 
@@ -156,7 +156,7 @@ def test_stop_blocks_inputs_and_persists(tmp_path):
     sid = started['snapshot']['session_id']
     pending = started['snapshot']['open_input']
     registry.stop(sid)
-    row = PgSessionStore(_OPEN['conns'][-1]).load_published(sid, OWNER)
+    row = PgSessionStore(managed_pool(_OPEN['conns'][-1].info.dsn)).load_published(sid, OWNER)
     assert row['control']['stopped'] is True
     r = client.post(f"/v1/sessions/{sid}/inputs/{pending['input_id']}", json={
         'protocol_version': 1, 'input_id': pending['input_id'], 'value': 'players', 'actor_id': 'founder'})
@@ -168,7 +168,7 @@ def test_http_cross_owner_session_invisible(tmp_path):
     # invisible through the real HTTP app + auth route, not only registry calls.
     OWNER_B = '00000000-0000-0000-0000-000000000002'
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     store.create('s-foreign', 'task-b', OWNER_B)
     # Published for its owner: the 404 below is owner scoping, not an
     # unpublished-row artifact.
@@ -186,7 +186,7 @@ def test_http_unpublished_row_never_leaks(tmp_path):
     # A row that was created but has no published step must not leak through
     # the ordinary session or progress APIs.
     conn = make_conn(tmp_path)
-    PgSessionStore(conn).create('s-draft', 'task-d', OWNER)
+    PgSessionStore(managed_pool(conn.info.dsn)).create('s-draft', 'task-d', OWNER)
     client = authed(create_app(make_registry(conn), service_token=TOKEN))
     assert client.get('/v1/sessions/s-draft').status_code == 404
     assert client.get('/v1/sessions/s-draft/progress').status_code == 404

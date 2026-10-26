@@ -112,11 +112,9 @@ class _StubRegistry:
 
 def _active_session():
     import threading
-    halt=threading.Event()
-    thread=threading.Thread(target=halt.wait,daemon=True);thread.start()
     class S:pass
-    session=S();session.pg_heartbeat_thread=thread;session.write_lock=threading.RLock()
-    return session,halt
+    session=S();session.pg_claim=object();session.pg_stopped=False;session.write_lock=threading.RLock()
+    return session,threading.Event()
 
 
 def test_same_scope_returns_cached_registry(tmp_path):

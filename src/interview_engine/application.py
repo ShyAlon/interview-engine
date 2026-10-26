@@ -60,17 +60,15 @@ class InterviewApplication:
             # fenced saver; every mutation carries the session's lease fence.
             # Tenant claims ride each transaction (pg_claims): poolers drop
             # startup-option GUCs, so the conninfo never carries them.
-            import psycopg
+            # No per-session connection: the saver and staging borrow claimed
+            # connections per operation from the process pool (pg_pool). The
+            # fence identity (generation, epoch) is data, not a socket.
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
-            from .pg_claims import connect_claimed, reconnect_dsn
-            t_pg=time.monotonic();_log.info("pg.connect.begin session=%s",session_id)
             tenant_claims=_graph_tenant_claims(pg_store,pg_claim)
-            pg_conn=connect_claimed(reconnect_dsn(pg_store.conn),*tenant_claims,autocommit=True)
-            _log.info("pg.connect.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_pg)*1000))
             from . import model_config as _mc
             self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
             _log.info("staging.ready session=%s",session_id)
-            saver=FencedPostgresSaver(pg_conn,
+            saver=FencedPostgresSaver(pg_store.pool,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
                 serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
                 claims=tenant_claims)

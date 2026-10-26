@@ -10,7 +10,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG session store tests skip')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 
 import psycopg
 import psycopg.rows
@@ -55,7 +55,8 @@ def make_store(tmp_path):
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.commit()
-    return PgSessionStore(conn)
+    conn.close()
+    return PgSessionStore(managed_pool(server.get_uri()))
 
 
 def test_claim_before_serve_single_winner(tmp_path):
@@ -172,10 +173,11 @@ def test_create_adopts_delivery_app_prebound_row(tmp_path):
     # (begin_interview_start -> set_engine_session, five columns). The engine's
     # DB-mode create must adopt exactly that row, not conflict with it.
     store = make_store(tmp_path)
-    store.conn.execute(
-        "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at)"
-        " VALUES ('s1',%s,'task1',1,%s)", (OWNER_A, time.time()))
-    store.conn.commit()
+    with store._borrow() as c:
+        c.execute(
+            "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at)"
+            " VALUES ('s1',%s,'task1',1,%s)", (OWNER_A, time.time()))
+        c.commit()
     store.create('s1', 'task1', OWNER_A)  # no UniqueViolation
     won = store.claim('s1', OWNER_A, 'host-a#1', ttl=60)
     assert won is not None and won.generation == 1

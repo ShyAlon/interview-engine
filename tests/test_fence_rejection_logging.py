@@ -14,6 +14,18 @@ from interview_engine.pg_session_store import PgSessionStore, SessionClaim
 from interview_engine.pg_checkpoint import FencedPostgresSaver, LeaseFence
 
 
+import contextlib
+
+
+class _FakePool:
+    """A pool-shaped double: checkout yields the scripted conn, like a pool of one."""
+    def __init__(self, conn):
+        self._conn = conn
+    @contextlib.contextmanager
+    def connection(self):
+        yield self._conn
+
+
 class _Cur:
     def __init__(self, row):
         self._row = row
@@ -33,6 +45,10 @@ class _FakeConn:
         return _Cur(row)
     def rollback(self):
         self.rollbacks += 1
+    @property
+    def info(self):
+        from psycopg.pq import TransactionStatus
+        return type('I', (), {'transaction_status': TransactionStatus.INTRANS})()
 
 
 def test_stop_fence_check_logs_requested(tmp_path, caplog):
@@ -58,13 +74,13 @@ def test_session_store_fence_logs_expired_lease(caplog):
     claim = SessionClaim('sid-1', 'owner-1', 1, 1, 'inst-1')
     conn = _FakeConn([None, {'generation': 1, 'lease_epoch': 1,
                              'lease_expires_at': time.time() - 5, 'placement_instance': 'inst-1'}])
-    store = PgSessionStore(conn)
+    store = PgSessionStore(_FakePool(conn))
     with caplog.at_level('WARNING', logger='interview_engine.pg_session_store'):
         with pytest.raises(StopRequested, match='rejected the save'):
             store.fenced_save(claim, {'sequence': 1})
     msgs = [r.getMessage() for r in caplog.records]
     assert any('lease.fence.rejected' in m and 'what=save' in m and 'expired' in m for m in msgs), msgs
-    assert conn.rollbacks == 1
+    assert conn.rollbacks >= 1  # borrowed conn returned clean; exact count is pool-internal
 
 
 def test_session_store_fence_logs_epoch_and_generation_mismatch(caplog):
@@ -72,7 +88,7 @@ def test_session_store_fence_logs_epoch_and_generation_mismatch(caplog):
     future = time.time() + 60
     conn = _FakeConn([None, {'generation': 2, 'lease_epoch': 3,
                              'lease_expires_at': future, 'placement_instance': 'inst-2'}])
-    store = PgSessionStore(conn)
+    store = PgSessionStore(_FakePool(conn))
     with caplog.at_level('WARNING', logger='interview_engine.pg_session_store'):
         with pytest.raises(StopRequested):
             store.fenced_save(claim, {'sequence': 1})
@@ -91,10 +107,14 @@ def test_session_store_fence_diagnostic_failure_never_masks_rejection(caplog):
             raise RuntimeError('diagnostic read failed')
         def rollback(self):
             pass
+        @property
+        def info(self):
+            from psycopg.pq import TransactionStatus
+            return type('I', (), {'transaction_status': TransactionStatus.INTRANS})()
     claim = SessionClaim('sid-1', 'owner-1', 1, 1, 'inst-1')
     with caplog.at_level('WARNING', logger='interview_engine.pg_session_store'):
         with pytest.raises(StopRequested, match='rejected the save'):
-            PgSessionStore(FailingConn()).fenced_save(claim, {'sequence': 1})
+            PgSessionStore(_FakePool(FailingConn())).fenced_save(claim, {'sequence': 1})
     msgs = [r.getMessage() for r in caplog.records]
     assert any('diagnostic-read-failed' in m for m in msgs), msgs
 
@@ -103,10 +123,10 @@ def test_checkpoint_fence_logs_expired_lease(caplog):
     saver = FencedPostgresSaver.__new__(FencedPostgresSaver)
     saver._lease = LeaseFence('sid-1', 1, 1)
     saver._lease_table = 'engine_sessions'
-    saver._write_conn = _FakeConn([None, {'generation': 1, 'lease_epoch': 1,
-                                          'lease_expires_at': time.time() - 9}])
+    conn = _FakeConn([None, {'generation': 1, 'lease_epoch': 1,
+                             'lease_expires_at': time.time() - 9}])
     with caplog.at_level('WARNING', logger='interview_engine.pg_checkpoint'):
         with pytest.raises(StopRequested, match='lease lost'):
-            saver._fenced('SELECT count(*) FROM guard', {})
+            saver._fenced(conn, 'SELECT count(*) FROM guard', {})
     msgs = [r.getMessage() for r in caplog.records]
     assert any('lease.fence.rejected' in m and 'what=checkpoint write' in m and 'expired' in m for m in msgs), msgs

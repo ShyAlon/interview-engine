@@ -36,21 +36,22 @@ class FakePgStore:
         self.expiry=0.0;self.heartbeats=0;self.publishes=[];self.lock=threading.Lock()
         self.gate=threading.Event();self.gate.set() if not block_heartbeat else self.gate.clear()
         self.heartbeat_raises=heartbeat_raises;self.heartbeat_alive=heartbeat_alive
-        self.conn=type("C",(),{"close":lambda self:None,"info":type("I",(),{"dsn":"fake"})()})()
     def create(self,session_id,task_id,owner):pass
     def claim(self,session_id,owner,instance,ttl):
         with self.lock:self.expiry=time.time()+ttl
         return SessionClaim(session_id,owner,1,1,instance)
-    def spawn(self):return self
-    def heartbeat(self,claim,ttl):
-        if not self.gate.wait(timeout=10):raise RuntimeError("test gate")
-        if self.heartbeat_raises:raise RuntimeError("database unreachable")
-        with self.lock:
-            self.heartbeats+=1
-            if not self.heartbeat_alive:return False
-            now=time.time()
-            if now>=self.expiry:return False
-            self.expiry=now+ttl;return True
+    def heartbeat_many(self,claims,ttl):
+        lost=[]
+        for claim in claims:
+            if not self.gate.wait(timeout=10):raise RuntimeError("test gate")
+            if self.heartbeat_raises:raise RuntimeError("database unreachable")
+            with self.lock:
+                self.heartbeats+=1
+                now=time.time()
+                if not self.heartbeat_alive or now>=self.expiry:lost.append(claim)
+                else:self.expiry=now+ttl
+        return lost
+    def close(self):pass
     def publish_step(self,claim,control,**kwargs):
         with self.lock:
             if time.time()>=self.expiry:raise StopRequested("session lease fence rejected the publication")
@@ -70,8 +71,11 @@ class FakeProgram:
 
 
 def registry(store,program,ttl=0.3):
+    # Shared heartbeat loop at the production ttl:beat ratio (one loop per
+    # registry beats every held lease on one borrowed connection per tick).
     return SessionRegistry(program_factory=lambda sid,req:program,session_store=store,
-        owner_id="owner-1",instance_id="test-instance",lease_ttl=ttl,allow_db_provider_dispatch=True)
+        owner_id="owner-1",instance_id="test-instance",lease_ttl=ttl,allow_db_provider_dispatch=True,
+        heartbeat_interval=max(ttl/3.0,0.05))
 
 def start(reg):
     return reg.start(StartSessionRequest(task_id="task-1",idea="an idea",model_route="ollama"))
@@ -181,16 +185,17 @@ def test_heartbeat_lost_lease_logs_the_takeover(caplog):
     assert session.pg_stopped is True
 
 
-def test_heartbeat_give_up_logs_the_lapse(caplog):
-    # After 5 consecutive failures the thread exits; that exit must say the
-    # lease will now lapse instead of going quiet.
+def test_heartbeat_loop_survives_repeated_failures(caplog):
+    # The shared loop beats every session in the process: it must NOT give up
+    # after consecutive failures (that would silently un-beat the healthy
+    # sessions too). Each failed tick logs; the loop keeps running; the lease
+    # lapse itself is reported when a later tick observes it.
     import logging
     store=FakePgStore(heartbeat_raises=True)
     with caplog.at_level(logging.INFO,logger="interview_engine.http"):
         session,_=start(registry(store,FakeProgram(delay=0.0),ttl=0.2))
-        deadline=time.time()+3
-        while time.time()<deadline:
-            if any("giving up" in r.getMessage() for r in caplog.records):break
-            time.sleep(0.1)
-    warnings=[r.getMessage() for r in caplog.records if r.levelname=="WARNING"]
-    assert any("lease heartbeat giving up" in m and "session=" in m for m in warnings),warnings
+        time.sleep(0.6)
+        reg_loop_alive=True
+    failures=[r for r in caplog.records if "lease heartbeat failed" in r.getMessage()]
+    assert len(failures)>=2,"shared loop must keep beating after failures, logging each one"
+    assert session.pg_stopped is False  # transport failure is not a lost lease; writes fail closed at the fence

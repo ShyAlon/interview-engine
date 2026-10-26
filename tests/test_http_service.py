@@ -22,7 +22,7 @@ def make_registry(request,tmp_path):
             r=SessionRegistry(*a,**k);regs.append(r);return r
         yield mk
         return
-    from conftest import managed_pg_server
+    from conftest import managed_pg_server, managed_pool
     from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
     from interview_engine.pg_session_store import PgSessionStore
     server=managed_pg_server(str(tmp_path/'pgdata'))
@@ -31,7 +31,7 @@ def make_registry(request,tmp_path):
     n=[0]
     def mk(*a,**k):
         n[0]+=1
-        k.setdefault('session_store',PgSessionStore(conn));k.setdefault('owner_id',PG_OWNER)
+        k.setdefault('session_store',PgSessionStore(managed_pool(conn.info.dsn)));k.setdefault('owner_id',PG_OWNER)
         k.setdefault('instance_id',f't#{n[0]}');k.setdefault('lease_ttl',60.0)
         r=SessionRegistry(*a,**k);regs.append(r);return r
     mk.tmpdir=tmp_path
@@ -51,7 +51,7 @@ def make_persistent_registry(request,tmp_path):
         mk.tmpdir=tmp_path
         yield mk
         return
-    from conftest import managed_pg_server
+    from conftest import managed_pg_server, managed_pool
     from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
     from interview_engine.pg_session_store import PgSessionStore
     server=managed_pg_server(str(tmp_path/'pgdata'))
@@ -60,7 +60,7 @@ def make_persistent_registry(request,tmp_path):
     n=[0]
     def mk(*a,**k):
         n[0]+=1
-        k.setdefault('session_store',PgSessionStore(conn));k.setdefault('owner_id',PG_OWNER)
+        k.setdefault('session_store',PgSessionStore(managed_pool(conn.info.dsn)));k.setdefault('owner_id',PG_OWNER)
         k.setdefault('instance_id',f't#{n[0]}');k.setdefault('lease_ttl',60.0)
         r=SessionRegistry(*a,**k);regs.append(r);return r
     mk.tmpdir=tmp_path

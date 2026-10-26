@@ -12,7 +12,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG application wiring tests skip')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 
 import psycopg
 import psycopg.rows
@@ -109,7 +109,7 @@ def fake_models(monkeypatch):
 
 
 def test_application_pg_builds_fenced_saver_and_buffered_journal(tmp_path, fake_ollama, fake_models):
-    store = PgSessionStore(make_conn(tmp_path))
+    store = PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn))
     store.create('s1', 'task-1', OWNER)
     claim = store.claim('s1', OWNER, 'inst#1', ttl=60)
     app = InterviewApplication('s1', 'task-1', 'idea', model_route='ollama', initial_model='phi4',
@@ -117,19 +117,19 @@ def test_application_pg_builds_fenced_saver_and_buffered_journal(tmp_path, fake_
                                pg_store=store, pg_claim=claim)
     try:
         assert isinstance(app.saver, FencedPostgresSaver)
-        assert app.saver.conn is not store.conn  # own write connection
+        assert app.saver.conn is store.pool  # saver borrows the shared process pool; nothing pinned
         assert isinstance(app.progress_journal, BufferedJournal)
         app.progress_journal.append(phase_key='intent', stage='interview_turn', label='t', status='started')
         assert len(app.progress_journal.pending()) == 1
         # Buffered, not published: nothing is durable before the step commits.
         assert store.journal_head('s1', OWNER) == 0
     finally:
-        app.saver.conn.close()
+        pass  # no pinned saver connection remains to close; the pool is conftest-managed
 
 
 def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -154,7 +154,7 @@ def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_pa
     # program resumes at the published pointer, never at saver-latest.
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -170,7 +170,7 @@ def test_registry_pg_real_application_publishes_step_and_restores_pointer(tmp_pa
 
 def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -191,7 +191,7 @@ def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_
     # Takeover after expiry: the stopped marker is honored, no graph is built.
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -200,7 +200,7 @@ def test_pg_application_stop_blocks_writes_and_survives_takeover(tmp_path, fake_
 
 def test_pg_application_publish_rolls_back_all_or_nothing(tmp_path, fake_ollama, fake_models, monkeypatch):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -249,7 +249,7 @@ def test_resumed_turn_advances_published_pointer(tmp_path, fake_ollama, fake_mod
     same wait with a fresh input_id until the driver gave up."""
     from vmodel_contracts.interactive import InputResponse
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -263,7 +263,7 @@ def test_resumed_turn_advances_published_pointer(tmp_path, fake_ollama, fake_mod
 
     # Second instance takes over and answers the open input: the turn runs to
     # the next wait and its step publishes.
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=1.0)
     _OPEN['registries'].append(registry2)
     resumed = registry2.get(SID)
@@ -310,7 +310,7 @@ def test_resumed_turn_advances_published_pointer(tmp_path, fake_ollama, fake_mod
     # stale pre-turn base.
     registry2.close()
     time.sleep(1.2)
-    registry3 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry3 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#3', lease_ttl=60.0)
     _OPEN['registries'].append(registry3)
     restored3 = registry3.get(SID)
@@ -326,7 +326,7 @@ def test_resumed_turn_advances_published_pointer(tmp_path, fake_ollama, fake_mod
 
 def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -347,7 +347,7 @@ def test_pg_application_crash_after_checkpoint_resumes_last_published(tmp_path, 
 
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -366,7 +366,7 @@ def test_reclaim_and_new_turn_never_publishes_orphan_checkpoint(tmp_path, fake_o
     the saver-latest row before that turn runs."""
     from vmodel_contracts.interactive import InputResponse
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -384,7 +384,7 @@ def test_reclaim_and_new_turn_never_publishes_orphan_checkpoint(tmp_path, fake_o
 
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=1.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -403,7 +403,7 @@ def test_close_voluntarily_releases_lease_at_committed_boundary(tmp_path, fake_o
     a committed boundary, never mid-call. close() releases a lease it still
     holds, so the next host claims immediately even with a long TTL."""
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -413,7 +413,7 @@ def test_close_voluntarily_releases_lease_at_committed_boundary(tmp_path, fake_o
     registry.close()
 
     # No expiry wait: a 60s TTL would block this claim without the release.
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -446,10 +446,10 @@ def test_remote_owner_stop_while_other_instance_blocked_mid_advance(tmp_path, fa
 
     conn_a = make_conn(tmp_path)
     conn_b = make_conn(tmp_path, init=False)
-    registry1 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn_a),
+    registry1 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn_a.info.dsn)),
                                 owner_id=OWNER, instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry1)
-    store_b = PgSessionStore(conn_b)
+    store_b = PgSessionStore(managed_pool(conn_b.info.dsn))
     registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store_b,
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
@@ -495,7 +495,7 @@ def test_remote_owner_stop_while_other_instance_blocked_mid_advance(tmp_path, fa
 
 def test_stop_never_blocked_by_local_publication_failure(tmp_path, fake_ollama, fake_models, monkeypatch):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -519,14 +519,14 @@ def test_stale_lease_caller_stop_and_cross_owner_rejection(tmp_path, fake_ollama
 
     conn_a = make_conn(tmp_path)
     conn_b = make_conn(tmp_path, init=False)
-    registry1 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn_a),
+    registry1 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn_a.info.dsn)),
                                 owner_id=OWNER, instance_id='w#1', lease_ttl=0.5)
     _OPEN['registries'].append(registry1)
     session, _ = registry1.start(StartSessionRequest(session_id=SID, task_id='t', idea='idea',
                                                      model_route='ollama', initial_model='phi4'))
     registry1.close()  # heartbeats halted; the lease runs out
     _time.sleep(0.7)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn_b),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn_b.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     registry2.get(SID)  # live holder now
@@ -534,14 +534,14 @@ def test_stale_lease_caller_stop_and_cross_owner_rejection(tmp_path, fake_ollama
     # The stale instance's owner-authorized stop still wins: Stop is an owner
     # decision, not a lease privilege.
     registry1.stop(SID)
-    row = PgSessionStore(conn_b).load_published(SID, OWNER)
+    row = PgSessionStore(managed_pool(conn_b.info.dsn)).load_published(SID, OWNER)
     assert row['control']['stopped'] is True
     # The current holder's writes are fenced from now on.
     with pytest.raises(StopRequested):
         registry2._store.publish_step(registry2.get(SID).pg_claim,
                                       dict(row['control'], sequence=row['control']['sequence'] + 1))
     # A foreign owner cannot stop - or even detect - the session.
-    foreign = PgSessionStore(conn_b)
+    foreign = PgSessionStore(managed_pool(conn_b.info.dsn))
     with pytest.raises(KeyError):
         foreign.stop(SID, '00000000-0000-0000-0000-000000000002')
 
@@ -558,7 +558,7 @@ def test_db_mode_rejects_production_factory_before_any_provider_call(tmp_path, m
     monkeypatch.setattr('httpx.post', record)
     import socket
     monkeypatch.setattr(socket.socket, 'connect', record)
-    store = PgSessionStore(make_conn(tmp_path))
+    store = PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn))
     with pytest.raises(ValueError, match='cannot use the production program factory'):
         SessionRegistry(default_program_factory, session_store=store, owner_id=OWNER, instance_id='g#1')
     assert calls == []
@@ -580,7 +580,7 @@ def test_db_mode_custom_factory_cannot_bypass_provider_guard(tmp_path, monkeypat
         return InterviewApplication(session_id, request.task_id, request.idea,
                                     artifact_root=str(tmp_path / 'artifacts'),
                                     model_route='ollama', initial_model='phi4')
-    registry = SessionRegistry(real_factory, session_store=PgSessionStore(make_conn(tmp_path)),
+    registry = SessionRegistry(real_factory, session_store=PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn)),
                                owner_id=OWNER, instance_id='g#2')
     _OPEN['registries'].append(registry)
     with pytest.raises(UserFacingError, match='does not call providers'):
@@ -600,7 +600,7 @@ def test_registry_crash_mid_advance_staged_pause_no_rebill(tmp_path, fake_ollama
     from vmodel_contracts.interactive import InputResponse
     from interview_engine.errors import UserFacingError
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -610,9 +610,8 @@ def test_registry_crash_mid_advance_staged_pause_no_rebill(tmp_path, fake_ollama
                                                         model_route='ollama', initial_model='phi4'))
     # Every provider call of the first advance is staged with its durable
     # execution point; the saver hook advanced the point past 'bootstrap'.
-    with store.conn.cursor() as cur:
-        cur.execute("SELECT stage, execution_point, response FROM staged_provider_responses WHERE session_id=%s", (SID,))
-        staged = cur.fetchall()
+    with store._borrow() as c:
+        staged = c.execute("SELECT stage, execution_point, response FROM staged_provider_responses WHERE session_id=%s", (SID,)).fetchall()
     assert staged and all(r['response'] is not None for r in staged), staged
     reserves_after_start = len(gw.reserved)
 
@@ -634,14 +633,13 @@ def test_registry_crash_mid_advance_staged_pause_no_rebill(tmp_path, fake_ollama
     assert len(gw.reserved) == reserves_after_start + 1
     # The crashed call was staged under the session's PUBLISHED execution point
     # (never an unpublished intermediate checkpoint), open with response NULL.
-    with store.conn.cursor() as cur:
-        cur.execute("SELECT execution_point, response FROM staged_provider_responses WHERE session_id=%s AND response IS NULL", (SID,))
-        open_rows = cur.fetchall()
+    with store._borrow() as c:
+        open_rows = c.execute("SELECT execution_point, response FROM staged_provider_responses WHERE session_id=%s AND response IS NULL", (SID,)).fetchall()
     assert len(open_rows) == 1 and open_rows[0]['execution_point'] != 'bootstrap', open_rows
 
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -661,7 +659,7 @@ def test_application_pg_uses_store_tenant_claims_not_lease_claim(tmp_path, fake_
     # session - so claiming with it reads every tenant table as empty, the
     # 2026-10-26 'session-row-missing' guard-lock rejection.
     auth_session = '22222222-2222-4222-8222-222222222222'
-    store = PgSessionStore(make_conn(tmp_path), claims=(OWNER, auth_session))
+    store = PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn), claims=(OWNER, auth_session))
     store.create('s1', 'task-1', OWNER)
     claim = store.claim('s1', OWNER, 'inst#1', ttl=60)
     app = InterviewApplication('s1', 'task-1', 'idea', model_route='ollama', initial_model='phi4',
@@ -670,8 +668,10 @@ def test_application_pg_uses_store_tenant_claims_not_lease_claim(tmp_path, fake_
     try:
         assert claim.session_id == 's1' != auth_session
         assert app.saver._claims == (OWNER, auth_session)
-        assert app.saver.conn.claims == (OWNER, auth_session)
-        assert app.saver._write_conn.claims == (OWNER, auth_session)
+        with app.saver._guarded_conn() as c:
+            # every guarded write borrows a pooled conn with claims applied per transaction
+            row = c.execute("select current_setting('request.jwt.claim.sub', true) as sub,"
+                            " current_setting('request.jwt.claim.session_id', true) as sid").fetchone()
+            assert row['sub'] == OWNER and row['sid'] == auth_session
     finally:
-        app.saver.conn.close()
-        app.saver._write_conn.close()
+        pass  # no pinned saver connection remains to close; the pool is conftest-managed

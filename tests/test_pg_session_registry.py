@@ -24,10 +24,10 @@ from test_pg_session_store import MIRRORED_REGISTRY_DDL
 OWNER = '00000000-0000-0000-0000-000000000001'
 
 
-# Every connection and registry a test opens is closed during teardown, BEFORE
-# the throwaway server goes away: no heartbeat thread or socket outlives its
-# Postgres.
-_OPEN = {'servers': [], 'conns': [], 'registries': []}
+# Every pool, connection and registry a test opens is closed during teardown,
+# BEFORE the throwaway server goes away: no heartbeat loop or socket outlives
+# its Postgres.
+_OPEN = {'servers': [], 'conns': [], 'registries': [], 'pools': []}
 
 
 @pytest.fixture(autouse=True)
@@ -38,23 +38,40 @@ def _cleanup_pg():
     for c in _OPEN['conns']:
         try: c.close()
         except Exception: pass
-    _OPEN['registries'].clear(); _OPEN['conns'].clear(); _OPEN['servers'].clear()
+    for pl in _OPEN['pools']:
+        try: pl.close()
+        except Exception: pass
+    _OPEN['registries'].clear(); _OPEN['conns'].clear(); _OPEN['servers'].clear(); _OPEN['pools'].clear()
 
 
 def make_conn(tmp_path, name='pgdata'):
     server = managed_pg_server(str(tmp_path / name))
     _OPEN['servers'].append(server)
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
+    conn._pg_server = server  # so make_pool can build the pool on the same DSN
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.commit()
     _OPEN['conns'].append(conn)
     return conn
 
 
-def make_registry(conn, program=None, instance='test#1', ttl=60.0):
+def make_pool(server, max_size=4):
+    from interview_engine.pg_pool import build_pool
+    pool = build_pool(server.get_uri(), max_size=max_size, name='test')
+    _OPEN['pools'].append(pool)
+    return pool
+
+
+def make_registry(conn, program=None, instance='test#1', ttl=60.0, heartbeat_interval=None):
+    # heartbeat_interval defaults to the production ratio (ttl/3): the shared
+    # loop beats every held lease on one borrowed connection per tick.
+    pool = make_pool(conn._pg_server) if hasattr(conn, '_pg_server') else None
+    if pool is None:
+        raise AssertionError('make_registry needs a conn from make_conn (server-tracked)')
     registry = SessionRegistry(program or (lambda *a: Program()),
-                               session_store=PgSessionStore(conn), owner_id=OWNER,
-                               instance_id=instance, lease_ttl=ttl)
+                               session_store=PgSessionStore(pool), owner_id=OWNER,
+                               instance_id=instance, lease_ttl=ttl,
+                               heartbeat_interval=heartbeat_interval if heartbeat_interval is not None else max(ttl/3.0, 0.05))
     _OPEN['registries'].append(registry)
     return registry
 
@@ -76,7 +93,7 @@ def test_start_respond_persist_round_trip(tmp_path):
     answer = InputResponse(input_id=session.open_input.input_id, value='fake', actor_id='fake')
     _, snapshot = registry.respond(session.session_id, answer)
     assert snapshot.open_input is not None
-    row = PgSessionStore(conn).load_published(session.session_id, OWNER)
+    row = PgSessionStore(make_pool(conn._pg_server)).load_published(session.session_id, OWNER)
     assert row['control']['task_id'] == 'fake' and row['control']['sequence'] == snapshot.sequence
 
 
@@ -96,7 +113,7 @@ def test_live_lease_blocks_second_instance_then_takeover_after_expiry(tmp_path):
 
 def test_takeover_keeps_prior_epoch_control_and_stale_saves_fail_closed(tmp_path):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(make_pool(conn._pg_server))
     first = make_registry(conn, instance='test#1', ttl=0.2)
     session, _ = start(first)
     stale_claim = session.pg_claim
@@ -143,7 +160,7 @@ def test_cross_owner_stop_and_read_are_invisible(tmp_path):
     conn = make_conn(tmp_path)
     registry = make_registry(conn)  # owner-a
     session, _ = start(registry)
-    foreign = SessionRegistry(lambda *a: Program(), session_store=PgSessionStore(conn),
+    foreign = SessionRegistry(lambda *a: Program(), session_store=PgSessionStore(make_pool(conn._pg_server)),
                               owner_id='00000000-0000-0000-0000-000000000002', instance_id='test#9', lease_ttl=60.0)
     with pytest.raises(KeyError):
         foreign.stop(session.session_id)
@@ -188,7 +205,7 @@ def test_heartbeat_holds_lease_through_long_advance(tmp_path):
 def test_lost_heartbeat_marks_session_stopped_and_fails_closed(tmp_path):
     import time
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(make_pool(conn._pg_server))
     first = make_registry(conn, instance='test#1', ttl=0.3)
     session, _ = start(first)
     store.stop(session.session_id, OWNER)  # owner Stop lands from outside
@@ -209,8 +226,8 @@ def test_close_halts_and_joins_heartbeats_before_takeover(tmp_path):
     first = make_registry(conn, instance='test#1', ttl=0.3)
     session, _ = start(first)
     first.close()
-    thread = session.pg_heartbeat_thread
-    assert thread is not None and not thread.is_alive()  # bounded join, no straggler
+    loop = first._hb_thread
+    assert loop is not None and not loop.is_alive()  # shared loop halted and joined, no straggler
     time.sleep(0.35)  # lease lapses only after heartbeats actually stopped
     second = make_registry(conn, instance='test#2', ttl=60.0)
     assert second.get(session.session_id).pg_claim.instance == 'test#2'
@@ -242,32 +259,48 @@ def test_snapshot_read_never_claims_constructs_or_publishes(tmp_path):
         'a read-restored session must not sit in the serve cache (a later serve must claim first)'
 
 
-def test_saver_write_conn_opens_lazily(tmp_path, monkeypatch):
-    # The saver's dedicated guarded-write connection must open on the first
-    # fenced write, not at construction: an idle session should not hold it.
+def test_saver_borrows_per_write_and_returns_to_pool(tmp_path, monkeypatch):
+    # The saver holds NO connection of its own: each fenced write batch checks
+    # one out of the shared pool and returns it, so an idle session holds zero.
     from interview_engine import pg_checkpoint
     from interview_engine.pg_checkpoint import FencedPostgresSaver, LeaseFence
     conn = make_conn(tmp_path, name='pgdata-lazy')
+    pool = make_pool(conn._pg_server, max_size=2)
+    pool.wait(timeout=10)
     opened = []
     real_connect = psycopg.Connection.connect
     def counting_connect(*a, **k):
         opened.append(a); return real_connect(*a, **k)
     monkeypatch.setattr(pg_checkpoint.psycopg.Connection, 'connect', staticmethod(counting_connect))
-    saver = FencedPostgresSaver(conn, lease=LeaseFence(str(uuid4()), 1, 1), claims=None)
-    try:
-        assert opened == [], 'guarded-write connection opened at construction; it must be lazy'
-        saver._write_conn  # first touch connects
-        assert len(opened) == 1
-    finally:
-        saver.close()
+    from interview_engine.pg_checkpoint import bootstrap_checkpoint_schema
+    conn.autocommit = True  # CREATE INDEX CONCURRENTLY needs a non-transaction conn
+    bootstrap_checkpoint_schema(conn)  # superuser test bootstrap; the saver itself never runs DDL
+    conn.autocommit = False
+    import time as _time
+    sid = str(uuid4())
+    conn.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
+                 " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                 (sid, OWNER, 'task1', 1, _time.time(), 1, _time.time()+3600))
+    conn.commit()
+    saver = FencedPostgresSaver(pool, lease=LeaseFence(sid, 1, 1), claims=None)
+    saver.setup()
+    cfg = {'configurable': {'thread_id': 't1', 'checkpoint_ns': '', 'checkpoint_id': 'c1'}}
+    state = {'v': 4, 'ts': '2026-10-26T08:00:00+00:00', 'id': '00000000-0000-4000-8000-000000000001',
+             'channel_values': {}, 'channel_versions': {}, 'versions_seen': {}}
+    saver.put(cfg, state, {'source': 'test'}, {})
+    saver.put(cfg, state, {'source': 'test'}, {})
+    assert len(opened) <= 2, f'saver writes must draw on the bounded pool, not open connections beyond it: {len(opened)} opened'
+    stats = pool.get_stats()
+    assert stats['pool_available'] == stats['pool_size'], \
+        f'saver leaked a checked-out connection between writes: {stats}'
 
 
 def test_connection_budget_fits_pooler():
-    # Supabase pooler session mode: max 15 clients. delivery-api pins
-    # POOL_OPEN_MAX=6 (asserted in delivery-api's own budget test); this
-    # service peaks at ENGINE_PEAK_SESSION_CONNS per served session (registry
-    # serving, lease heartbeat, application base, lazy saver write conn).
-    from interview_engine.http_service import ENGINE_PEAK_SESSION_CONNS
-    assert ENGINE_PEAK_SESSION_CONNS == 4
-    assert 6 + 2 * ENGINE_PEAK_SESSION_CONNS <= 15, \
-        'delivery pool + two concurrent engine sessions must fit the pooler budget'
+    # Supabase pooler session mode: max 15 clients. ONE pool per process now
+    # bounds this service's entire footprint regardless of session count:
+    # delivery-api pins POOL_OPEN_MAX=6 (its own budget test) and injects the
+    # pool when hosting the engine in-process; a standalone engine builds its
+    # own bounded at ENGINE_POOL_MAX.
+    from interview_engine.pg_pool import ENGINE_POOL_MAX
+    assert 6 + ENGINE_POOL_MAX <= 15, \
+        'delivery pool + one engine pool must fit the pooler budget with headroom'

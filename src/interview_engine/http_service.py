@@ -53,8 +53,6 @@ class EngineSession:
     stop_fence: object | None = field(default=None, repr=False, compare=False)
     pg_claim: object | None = field(default=None, repr=False, compare=False)
     pg_stopped: bool = field(default=False, repr=False, compare=False)
-    pg_heartbeat_halt: object | None = field(default=None, repr=False, compare=False)
-    pg_heartbeat_thread: object | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> EngineSnapshot:
         stopped=self.stop_fence.state if self.stop_fence is not None else ('STOP_REQUESTED' if self.pg_stopped else None)
@@ -74,7 +72,7 @@ ENGINE_PEAK_SESSION_CONNS = 4
 
 class SessionRegistry:
     """Thread-safe application port behind the HTTP adapter."""
-    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=30.0,allow_db_provider_dispatch:bool=False):
+    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=150.0,heartbeat_interval:float=60.0,allow_db_provider_dispatch:bool=False):
         if state_dir is not None and session_store is not None:
             raise ValueError('choose file or database session persistence, not both')
         if session_store is not None and program_factory is default_program_factory and not allow_db_provider_dispatch:
@@ -96,65 +94,59 @@ class SessionRegistry:
             instance_id=f"{socket.gethostname()}#{os.getpid()}#{uuid4().hex[:8]}"
         self._instance=instance_id   # execution-instance lease identity, never a bare hostname
         self._lease_ttl=lease_ttl
+        self._heartbeat_interval=heartbeat_interval
+        self._hb_thread=None
+        self._hb_halt=None
         self._lock=RLock()
 
-    def _start_heartbeat(self,session:EngineSession)->None:
-        # While this process serves a session, keep its lease alive so a long
-        # advance cannot be taken over mid-flight. A lost heartbeat (stop or
-        # takeover) marks the session stopped: every later fenced write then
-        # fails closed at the database. Own connection per thread (psycopg
-        # connections are not thread-safe).
-        if self._store is None or session.pg_claim is None:return
-        store=self._store.spawn()
-        claim=session.pg_claim
-        halt=threading.Event()
-        session.pg_heartbeat_halt=halt
-        interval=max(self._lease_ttl/3.0,0.05)
-        def beat():
-            # The lease expiry in every fence statement is the authority: this
-            # loop only extends a live lease. Retries never revive an expired
-            # one (the heartbeat's WHERE clause requires it unexpired), and a
-            # blocked loop lets it lapse - writes then fail closed regardless
-            # of what this thread believed.
-            failures=0
+    def _ensure_heartbeat_loop(self) -> None:
+        # ONE heartbeat loop per registry for every held lease: a lease beat is
+        # one short UPDATE, so all sessions share a tick on one borrowed
+        # connection instead of pinning a connection per session per thread.
+        # What the beat protects: it extends lease_expires_at so a long advance
+        # keeps its lease while the TTL stays short, and it notices stop or
+        # takeover promptly (a lost beat marks the session stopped locally).
+        # Fencing itself never depends on the beat: every fenced write
+        # re-checks (generation, epoch, expiry) in the same statement.
+        if self._store is None:return
+        with self._lock:
+            if self._hb_thread is not None and self._hb_thread.is_alive():return
+            self._hb_halt=threading.Event()
+            self._hb_thread=threading.Thread(target=self._heartbeat_loop,daemon=True,name=f"lease-heartbeat-{self._instance}")
+            self._hb_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        interval=self._heartbeat_interval
+        while not self._hb_halt.wait(interval):
+            with self._lock:
+                claims=[s.pg_claim for s in self._sessions.values()
+                        if s.pg_claim is not None and not s.pg_stopped]
+            if not claims:continue
             try:
-                while not session.pg_stopped and not halt.is_set():
-                    if halt.wait(interval):return   # wakes immediately on close()
-                    if session.pg_stopped:return
-                    try:alive=store.heartbeat(claim,self._lease_ttl)
-                    except Exception:
-                        failures+=1
-                        log.warning('session lease heartbeat failed session=%s failures=%d',claim.session_id,failures,exc_info=True)
-                        if failures>=5:
-                            log.warning('session lease heartbeat giving up session=%s after %d failures - the lease will lapse and fenced writes will fail closed',claim.session_id,failures)
-                            return   # lease expires on its own; fences close
-                        continue
-                    failures=0
-                    if not alive:
-                        log.warning('session lease heartbeat lost session=%s - the lease is no longer held; session marked stopped and fenced writes will fail closed',claim.session_id)
-                        session.pg_stopped=True
-                        return
-            finally:
-                store.conn.close()
-        log.info('session lease heartbeat started session=%s interval=%.1fs ttl=%.1fs',claim.session_id,interval,self._lease_ttl)
-        session.pg_heartbeat_thread=threading.Thread(target=beat,daemon=True,name=f"lease-heartbeat-{claim.session_id}")
-        session.pg_heartbeat_thread.start()
+                lost=self._store.heartbeat_many(claims,self._lease_ttl)
+            except Exception:
+                # Transient failure: the leases lapse on their own and a later
+                # tick reports them lost; fenced writes fail closed regardless.
+                log.warning('lease heartbeat failed instance=%s - beat skipped; leases lapse on their own and fenced writes fail closed',self._instance,exc_info=True)
+                continue
+            if lost:
+                with self._lock:
+                    for claim in lost:
+                        session=self._sessions.get(claim.session_id)
+                        if session is not None and not session.pg_stopped:
+                            log.warning('session lease heartbeat lost session=%s - the lease is no longer held; session marked stopped and fenced writes will fail closed',claim.session_id)
+                            session.pg_stopped=True
 
     def close(self)->None:
-        # Stop serving: halt every heartbeat, join each thread with a bounded
-        # wait, and leave no connection in use. Leases expire on their own; a
-        # live session can then be claimed by another instance. Fences close
-        # every later write from this process even before expiry.
+        # Stop serving: halt the shared heartbeat loop, join it with a bounded
+        # wait, and leave no connection checked out. Leases expire on their
+        # own; a live session can then be claimed by another instance. Fences
+        # close every later write from this process even before expiry.
         with self._lock:sessions=list(self._sessions.values())
-        deadline=time.monotonic()+max(2*self._lease_ttl,1.0)
-        for session in sessions:
-            if session.pg_heartbeat_halt is not None:session.pg_heartbeat_halt.set()
-        for session in sessions:
-            thread=session.pg_heartbeat_thread
-            if thread is not None:
-                remaining=deadline-time.monotonic()
-                thread.join(timeout=max(remaining,0.05))
-                if thread.is_alive():log.warning('lease heartbeat did not join session=%s',session.session_id)
+        if self._hb_halt is not None:self._hb_halt.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=5.0)
+            if self._hb_thread.is_alive():log.warning('lease heartbeat loop did not join instance=%s',self._instance)
         for session in sessions:
             # Voluntary lease release at a committed boundary: the write lock
             # waits out any in-flight turn, so another host can claim
@@ -167,16 +159,13 @@ class SessionRegistry:
                         self._store.release(claim)
                 except Exception:
                     log.warning('lease.release.failed session=%s',session.session_id,exc_info=True)
-        for session in sessions:
-            # Close program-held database connections: no socket outlives the
-            # registry that owns it.
-            saver=getattr(session.program,'saver',None)
-            if saver is not None:
-                try:
-                    if hasattr(saver,'close'):saver.close()
-                    conn=getattr(saver,'conn',None)
-                    if conn is not None:conn.close()
-                except Exception:log.warning('program saver close failed session=%s',session.session_id,exc_info=True)
+        # Programs hold no connections of their own: the saver borrows from
+        # the process pool per operation. The store closes the pool only when
+        # it built it (standalone wiring); an injected shared pool is closed
+        # by its owner.
+        if self._store is not None:
+            try:self._store.close()
+            except Exception:log.warning('session store close failed',exc_info=True)
 
     def _pg_owner(self)->str:
         # Owner identity comes from the authenticated tenant context (or the
@@ -235,7 +224,8 @@ class SessionRegistry:
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session lease held by another live instance")
             session.pg_claim=claim
             log.info("pg.lease.claimed session=%s owner=%s generation=%s epoch=%s lease_ttl=%s dur_ms=%d",session.session_id,owner,claim.generation,claim.epoch,self._lease_ttl,int((time.monotonic()-t_create)*1000))
-            self._start_heartbeat(session)
+            log.info("lease heartbeat started session=%s interval=%.1f ttl=%.1f",session.session_id,self._heartbeat_interval,self._lease_ttl)
+            self._ensure_heartbeat_loop()
         self._ensure_stop_fence(session)
         started=self._event(session,EventType.RUN_STARTED)
         try:
@@ -755,7 +745,8 @@ class SessionRegistry:
             return session  # Stopped sessions never construct or resume a graph.
         if not serve:return self._read_restore(session,payload,check_legacy_pin=self._program_factory is default_program_factory)
         session.pg_claim=claim
-        self._start_heartbeat(session)
+        log.info("lease heartbeat started session=%s interval=%.1f ttl=%.1f",session.session_id,self._heartbeat_interval,self._lease_ttl)
+        self._ensure_heartbeat_loop()
         return self._restore_program(session,payload,published_checkpoint_id=row.get('published_checkpoint_id'))
 
     def _default_pg_program(self,session,request,pinned=None):
@@ -1062,13 +1053,16 @@ def _build_service_app():
         # Staged responses (PR B) landed, so the documented
         # constructor block on provider dispatch is lifted for exactly this wiring.
         from .tenant_worker import pg_session_store
+        from .pg_pool import build_pool
         owner_id=os.environ.get(OWNER_ID_ENV)
         if not owner_id:
             raise RuntimeError(OWNER_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence needs an owner scope')
         session_id=os.environ.get(SESSION_ID_ENV)
         if not session_id:
             raise RuntimeError(SESSION_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence runs under the real auth session - synthetic session authority is never substituted')
-        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(sessions_dsn,owner_id,session_id),owner_id=owner_id,allow_db_provider_dispatch=True))
+        # Standalone deployment: this process builds and owns its pool.
+        pool=build_pool(sessions_dsn)
+        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(pool,owner_id,session_id,close_pool=True),owner_id=owner_id,allow_db_provider_dispatch=True))
     # File persistence only when explicitly chosen; otherwise fail clear at boot.
     if os.environ.get(FILE_SESSIONS_ENV)!='1':
         raise RuntimeError(FILE_SESSIONS_MSG)

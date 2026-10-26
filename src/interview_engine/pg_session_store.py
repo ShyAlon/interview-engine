@@ -65,255 +65,257 @@ class SessionClaim:
 class PgSessionStore:
     """Registry operations against the migration-owned engine_sessions table."""
 
-    def __init__(self, conn: psycopg.Connection, *, claims: tuple[str, str] | None = None):
-        # claims = (owner_id, session_id) for per-transaction tenant claims on
-        # every spawned connection (pg_claims). None only in mirrored-DDL
-        # superuser tests; the production wiring always passes them.
-        self.conn = conn
-        self.claims = claims if claims is not None else getattr(conn, 'claims', None)
-        self._staging_conn = None
-        # One claimed transaction at a time on the dedicated staging
-        # connection: parallel nodes share it, and overlapping Transaction
-        # contexts on a single connection nest and fail out of order.
-        self._staging_lock = threading.Lock()
+    def __init__(self, pool, *, claims: tuple[str, str] | None = None, close_pool: bool = False):
+        # pool: the process connection pool (pg_pool). claims = (owner_id,
+        # session_id) applied per transaction on every checkout (pg_claims);
+        # None only in mirrored-DDL superuser tests. close_pool: True only when
+        # this store built the pool (standalone factory); an injected shared
+        # pool is closed by its owner.
+        self.pool = pool
+        self.claims = claims if claims is not None else getattr(pool, 'claims', None)
+        self._close_pool = close_pool
 
-    def spawn(self) -> "PgSessionStore":
-        # A second store on its own connection: a psycopg connection is not
-        # thread-safe, so a background heartbeat must never share the serving
-        # thread's connection.
-        import psycopg.rows
-        from .pg_diagnostics import tag_stage
-        try:
-            from .pg_claims import connect_claimed, reconnect_dsn
-            if self.claims is not None:
-                return PgSessionStore(connect_claimed(reconnect_dsn(self.conn), *self.claims, autocommit=False))
-            return PgSessionStore(psycopg.connect(reconnect_dsn(self.conn), autocommit=False,
-                                                  row_factory=psycopg.rows.dict_row))
-        except Exception as exc:
-            raise tag_stage(exc, "connect") from exc
+    def _borrow(self):
+        # One borrowed connection per operation; never returned mid-transaction.
+        from .pg_pool import borrow_claimed
+        return borrow_claimed(self.pool, self.claims)
+
+    def heartbeat_many(self, claims: list, ttl: float) -> list:
+        """One tick for every held lease on ONE borrowed connection.
+
+        Returns the claims whose beat matched no row (lease lost: expired,
+        stopped or taken over). The lease expiry checked by every fenced write
+        is the authority; this only extends live leases and reports loss.
+        """
+        lost = []
+        with self._borrow() as conn:
+            for claim in claims:
+                now = time.time()
+                row = conn.execute(
+                    "UPDATE engine_sessions SET lease_expires_at = %(expiry)s, updated_at = %(now)s"
+                    " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                    "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
+                    "   AND lease_expires_at > %(now)s"
+                    " RETURNING 1",
+                    {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                     "epoch": claim.epoch, "instance": claim.instance,
+                     "expiry": now + ttl, "now": now}).fetchone()
+                if row is None:
+                    lost.append(claim)
+            conn.commit()
+        return lost
+
+    def close(self) -> None:
+        if self._close_pool:
+            self.pool.close()
 
     def create(self, session_id: str, task_id: str, owner_id: str) -> None:
-        now = time.time()
-        try:
-            row = self.conn.execute(
-                "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
-                " VALUES (%s,%s,%s,1,%s,0,0)"
-                " ON CONFLICT (session_id) DO NOTHING"
-                " RETURNING session_id",
-                (session_id, owner_id, task_id, now)).fetchone()
-            if row is None:
-                # The delivery app pre-binds its session row at Start
-                # (begin_interview_start -> set_engine_session). Adopt exactly
-                # that row; any other existing row is the real conflict.
-                existing = self.conn.execute(
-                    "SELECT owner_id::text AS owner_id, task_id FROM engine_sessions WHERE session_id = %s",
-                    (session_id,)).fetchone()
-                if existing is None or existing["owner_id"] != owner_id or existing["task_id"] != task_id:
-                    self.conn.rollback()
-                    raise psycopg.errors.UniqueViolation("engine_sessions session_id conflict")
-            self.conn.commit()
-        except Exception as exc:
-            # Never leave the shared serving connection in an aborted
-            # transaction: one failed op must not poison every later claim.
-            self.conn.rollback()
-            from .pg_diagnostics import tag_stage
-            tag_stage(exc, "session insert", self.conn)
-            raise
+        with self._borrow() as conn:
+            now = time.time()
+            try:
+                row = conn.execute(
+                    "INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
+                    " VALUES (%s,%s,%s,1,%s,0,0)"
+                    " ON CONFLICT (session_id) DO NOTHING"
+                    " RETURNING session_id",
+                    (session_id, owner_id, task_id, now)).fetchone()
+                if row is None:
+                    # The delivery app pre-binds its session row at Start
+                    # (begin_interview_start -> set_engine_session). Adopt exactly
+                    # that row; any other existing row is the real conflict.
+                    existing = conn.execute(
+                        "SELECT owner_id::text AS owner_id, task_id FROM engine_sessions WHERE session_id = %s",
+                        (session_id,)).fetchone()
+                    if existing is None or existing["owner_id"] != owner_id or existing["task_id"] != task_id:
+                        conn.rollback()
+                        raise psycopg.errors.UniqueViolation("engine_sessions session_id conflict")
+                conn.commit()
+            except Exception as exc:
+                # Never leave the shared serving connection in an aborted
+                # transaction: one failed op must not poison every later claim.
+                conn.rollback()
+                from .pg_diagnostics import tag_stage
+                tag_stage(exc, "session insert", conn)
+                raise
 
     def claim(self, session_id: str, owner_id: str, instance: str, ttl: float) -> SessionClaim | None:
-        """Win the lease atomically, or return None while another instance holds it.
+        with self._borrow() as conn:
+            """Win the lease atomically, or return None while another instance holds it.
 
-        An expired lease is taken with an epoch bump. A re-claim by the same
-        live instance extends the expiry without a bump, so its own in-flight
-        fenced writes are not invalidated by reentrant requests.
-        """
-        now = time.time()
-        try:
-            row = self.conn.execute(
-                "UPDATE engine_sessions"
-                " SET lease_epoch = CASE WHEN lease_expires_at <= %(now)s THEN lease_epoch + 1 ELSE lease_epoch END,"
-                "     placement_instance = %(instance)s, lease_expires_at = %(expiry)s, updated_at = %(now)s"
-                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-                "   AND (lease_expires_at <= %(now)s OR placement_instance = %(instance)s)"
-                " RETURNING generation, lease_epoch",
-                {"sid": session_id, "owner": owner_id, "instance": instance,
-                 "expiry": now + ttl, "now": now}).fetchone()
-            self.conn.commit()
-        except Exception as exc:
-            # Never leave the shared serving connection aborted.
-            self.conn.rollback()
-            from .pg_diagnostics import tag_stage
-            tag_stage(exc, "claim setup", self.conn)
-            raise
-        if row is None:
-            return None
-        return SessionClaim(session_id, owner_id, row["generation"], row["lease_epoch"], instance)
+            An expired lease is taken with an epoch bump. A re-claim by the same
+            live instance extends the expiry without a bump, so its own in-flight
+            fenced writes are not invalidated by reentrant requests.
+            """
+            now = time.time()
+            try:
+                row = conn.execute(
+                    "UPDATE engine_sessions"
+                    " SET lease_epoch = CASE WHEN lease_expires_at <= %(now)s THEN lease_epoch + 1 ELSE lease_epoch END,"
+                    "     placement_instance = %(instance)s, lease_expires_at = %(expiry)s, updated_at = %(now)s"
+                    " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                    "   AND (lease_expires_at <= %(now)s OR placement_instance = %(instance)s)"
+                    " RETURNING generation, lease_epoch",
+                    {"sid": session_id, "owner": owner_id, "instance": instance,
+                     "expiry": now + ttl, "now": now}).fetchone()
+                conn.commit()
+            except Exception as exc:
+                # Never leave the shared serving connection aborted.
+                conn.rollback()
+                from .pg_diagnostics import tag_stage
+                tag_stage(exc, "claim setup", conn)
+                raise
+            if row is None:
+                return None
+            return SessionClaim(session_id, owner_id, row["generation"], row["lease_epoch"], instance)
 
     def release(self, claim: SessionClaim) -> bool:
-        """Voluntarily end a held lease at a committed boundary so another
-        instance can claim immediately. Identity, generation and epoch must all
-        match, so a stale owner can never release a lease it already lost."""
-        now = time.time()
-        try:
-            row = self.conn.execute(
-                "UPDATE engine_sessions SET lease_expires_at = %(now)s, updated_at = %(now)s"
-                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-                "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
-                " RETURNING 1",
-                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                 "epoch": claim.epoch, "instance": claim.instance, "now": now}).fetchone()
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        return row is not None
+        with self._borrow() as conn:
+            """Voluntarily end a held lease at a committed boundary so another
+            instance can claim immediately. Identity, generation and epoch must all
+            match, so a stale owner can never release a lease it already lost."""
+            now = time.time()
+            try:
+                row = conn.execute(
+                    "UPDATE engine_sessions SET lease_expires_at = %(now)s, updated_at = %(now)s"
+                    " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                    "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
+                    " RETURNING 1",
+                    {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                     "epoch": claim.epoch, "instance": claim.instance, "now": now}).fetchone()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return row is not None
 
     def heartbeat(self, claim: SessionClaim, ttl: float) -> bool:
-        """Extend a held lease (never bumps the epoch). False means it was lost."""
-        now = time.time()
-        try:
-            row = self.conn.execute(
-                "UPDATE engine_sessions SET lease_expires_at = %(expiry)s, updated_at = %(now)s"
-                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-                "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
-                "   AND lease_expires_at > %(now)s"
-                " RETURNING 1",
-                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                 "epoch": claim.epoch, "instance": claim.instance,
-                 "expiry": now + ttl, "now": now}).fetchone()
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        return row is not None
+        with self._borrow() as conn:
+            """Extend a held lease (never bumps the epoch). False means it was lost."""
+            now = time.time()
+            try:
+                row = conn.execute(
+                    "UPDATE engine_sessions SET lease_expires_at = %(expiry)s, updated_at = %(now)s"
+                    " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                    "   AND lease_epoch = %(epoch)s AND placement_instance = %(instance)s"
+                    "   AND lease_expires_at > %(now)s"
+                    " RETURNING 1",
+                    {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                     "epoch": claim.epoch, "instance": claim.instance,
+                     "expiry": now + ttl, "now": now}).fetchone()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return row is not None
 
     def _fence_diagnose(self, claim: SessionClaim, what: str) -> None:
-        """Best-effort read of the current lease row after a fence rejected a
-        write: logs which predicate failed (owner / generation / epoch /
-        expiry) so a swallowed StopRequested is diagnosable from logs alone.
-        Read-only; a failed diagnostic never masks the original rejection."""
-        try:
-            row = self.conn.execute(
-                "SELECT generation, lease_epoch, lease_expires_at, placement_instance"
-                " FROM engine_sessions WHERE session_id = %(sid)s",
-                {"sid": claim.session_id}).fetchone()
-            if row is None:
-                log.warning("lease.fence.rejected what=%s session=%s reason=session-row-missing expected gen=%s epoch=%s",
-                            what, claim.session_id, claim.generation, claim.epoch)
-                return
-            now = time.time()
-            reasons = []
-            if row["generation"] != claim.generation:
-                reasons.append("generation %s != %s" % (row["generation"], claim.generation))
-            if row["lease_epoch"] != claim.epoch:
-                reasons.append("lease_epoch %s != %s" % (row["lease_epoch"], claim.epoch))
-            if not (row["lease_expires_at"] or 0) > now:
-                reasons.append("lease expired %.1fs ago (ttl lapsed)" % (now - (row["lease_expires_at"] or 0)))
-            log.warning("lease.fence.rejected what=%s session=%s reason=%s expected gen=%s epoch=%s instance=%s",
-                        what, claim.session_id, "; ".join(reasons) or "no predicate mismatch (owner or race)",
-                        claim.generation, claim.epoch, row["placement_instance"])
-        except Exception as diag_exc:
-            log.warning("lease.fence.rejected what=%s session=%s diagnostic-read-failed %s: %s",
-                        what, claim.session_id, type(diag_exc).__name__, str(diag_exc)[:200])
+        with self._borrow() as conn:
+            """Best-effort read of the current lease row after a fence rejected a
+            write: logs which predicate failed (owner / generation / epoch /
+            expiry) so a swallowed StopRequested is diagnosable from logs alone.
+            Read-only; a failed diagnostic never masks the original rejection."""
+            try:
+                row = conn.execute(
+                    "SELECT generation, lease_epoch, lease_expires_at, placement_instance"
+                    " FROM engine_sessions WHERE session_id = %(sid)s",
+                    {"sid": claim.session_id}).fetchone()
+                if row is None:
+                    log.warning("lease.fence.rejected what=%s session=%s reason=session-row-missing expected gen=%s epoch=%s",
+                                what, claim.session_id, claim.generation, claim.epoch)
+                    return
+                now = time.time()
+                reasons = []
+                if row["generation"] != claim.generation:
+                    reasons.append("generation %s != %s" % (row["generation"], claim.generation))
+                if row["lease_epoch"] != claim.epoch:
+                    reasons.append("lease_epoch %s != %s" % (row["lease_epoch"], claim.epoch))
+                if not (row["lease_expires_at"] or 0) > now:
+                    reasons.append("lease expired %.1fs ago (ttl lapsed)" % (now - (row["lease_expires_at"] or 0)))
+                log.warning("lease.fence.rejected what=%s session=%s reason=%s expected gen=%s epoch=%s instance=%s",
+                            what, claim.session_id, "; ".join(reasons) or "no predicate mismatch (owner or race)",
+                            claim.generation, claim.epoch, row["placement_instance"])
+            except Exception as diag_exc:
+                log.warning("lease.fence.rejected what=%s session=%s diagnostic-read-failed %s: %s",
+                            what, claim.session_id, type(diag_exc).__name__, str(diag_exc)[:200])
 
     def fenced_save(self, claim: SessionClaim, control: dict, *,
                     published_thread_id: str | None = None,
                     published_checkpoint_ns: str = "",
                     published_checkpoint_id: str | None = None) -> None:
-        """Commit control state and the staged publication pointer under the fence."""
-        try:
-            row = self.conn.execute(
-                "UPDATE engine_sessions"
-                " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
-                "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
-                "     updated_at = %(now)s"
-                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-                "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
-                " RETURNING 1",
-                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                 "epoch": claim.epoch, "control": json.dumps(control), "tid": published_thread_id,
-                 "ns": published_checkpoint_ns, "cid": published_checkpoint_id,
-                 "now": time.time()}).fetchone()
-        except Exception as exc:
-            self.conn.rollback()
-            from .pg_diagnostics import tag_stage
-            tag_stage(exc, "checkpoint save", self.conn)
-            raise
-        if row is None:
-            self.conn.rollback()
-            self._fence_diagnose(claim, "save")
-            raise StopRequested("session lease fence rejected the save")
-        self.conn.commit()
+        with self._borrow() as conn:
+            """Commit control state and the staged publication pointer under the fence."""
+            try:
+                row = conn.execute(
+                    "UPDATE engine_sessions"
+                    " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
+                    "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
+                    "     updated_at = %(now)s"
+                    " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                    "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+                    " RETURNING 1",
+                    {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                     "epoch": claim.epoch, "control": json.dumps(control), "tid": published_thread_id,
+                     "ns": published_checkpoint_ns, "cid": published_checkpoint_id,
+                     "now": time.time()}).fetchone()
+            except Exception as exc:
+                conn.rollback()
+                from .pg_diagnostics import tag_stage
+                tag_stage(exc, "checkpoint save", conn)
+                raise
+            if row is None:
+                conn.rollback()
+                self._fence_diagnose(claim, "save")
+                raise StopRequested("session lease fence rejected the save")
+            conn.commit()
 
     def stop(self, session_id: str, owner_id: str, control: dict | None = None) -> int:
-        """Owner-authorized atomic Stop: stopped control AND generation bump in
-        one transaction. No execution lease, no wait on any worker: a live
-        foreign lease, a blocked advance or a failed earlier publication cannot
-        prevent it. The row lock serializes the bump against any in-flight
-        worker publish - whichever commits second wins the row, and after this
-        transaction every fenced write from the old generation fails.
+        with self._borrow() as conn:
+            """Owner-authorized atomic Stop: stopped control AND generation bump in
+            one transaction. No execution lease, no wait on any worker: a live
+            foreign lease, a blocked advance or a failed earlier publication cannot
+            prevent it. The row lock serializes the bump against any in-flight
+            worker publish - whichever commits second wins the row, and after this
+            transaction every fenced write from the old generation fails.
 
-        The authorization decision belongs to the HTTP boundary; binding the
-        bump to the owner id keeps a foreign tenant from stopping (or even
-        detecting) this session through the store. When the caller serves the
-        session locally it passes the quiesced control (open input cleared,
-        newer sequence); otherwise the staged control is kept and only marked.
-        """
-        row = self.conn.execute(
-            "UPDATE engine_sessions SET generation = generation + 1, lease_expires_at = 0,"
-            " control = COALESCE(%(control)s::jsonb, control, '{}'::jsonb) || %(stopped_marker)s::jsonb,"
-            " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-            " RETURNING generation",
-            {"sid": session_id, "owner": owner_id,
-             "control": json.dumps(control) if control is not None else None,
-             "stopped_marker": '{"stopped": true}',
-             "now": time.time()}).fetchone()
-        self.conn.commit()
-        if row is None:
-            raise KeyError(session_id)
-        return row["generation"]
+            The authorization decision belongs to the HTTP boundary; binding the
+            bump to the owner id keeps a foreign tenant from stopping (or even
+            detecting) this session through the store. When the caller serves the
+            session locally it passes the quiesced control (open input cleared,
+            newer sequence); otherwise the staged control is kept and only marked.
+            """
+            row = conn.execute(
+                "UPDATE engine_sessions SET generation = generation + 1, lease_expires_at = 0,"
+                " control = COALESCE(%(control)s::jsonb, control, '{}'::jsonb) || %(stopped_marker)s::jsonb,"
+                " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                " RETURNING generation",
+                {"sid": session_id, "owner": owner_id,
+                 "control": json.dumps(control) if control is not None else None,
+                 "stopped_marker": '{"stopped": true}',
+                 "now": time.time()}).fetchone()
+            conn.commit()
+            if row is None:
+                raise KeyError(session_id)
+            return row["generation"]
 
     def load_published(self, session_id: str, owner_id: str) -> dict | None:
-        """Restore from the staged publication only - never saver-latest rows."""
-        row = self.conn.execute(
-            "SELECT task_id, generation, control, published_thread_id,"
-            "       published_checkpoint_ns, published_checkpoint_id"
-            " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid",
-            {"sid": session_id, "owner": owner_id}).fetchone()
-        if row is None:
-            return None
-        return dict(row)
-
-    @property
-    def _stage_conn(self):
-        """Dedicated connection for staged provider-response rows.
-
-        A staged row is crash evidence: it must be durable the moment it is
-        written, independent of the step-publish transaction on the main
-        connection (a crash mid-step must never lose the record that a possibly
-        paid call was dispatched). Each method runs one short claimed
-        transaction committed at return, so durability matches the former
-        autocommit behavior exactly while the tenant claims ride the
-        transaction stream (pg_claims). Mutations stay generation-scoped, so a
-        stale pre-takeover writer cannot touch the new generation's rows.
-        """
-        if self._staging_conn is None or self._staging_conn.closed:
-            from .pg_claims import connect_claimed, reconnect_dsn
-            if self.claims is not None:
-                self._staging_conn = connect_claimed(reconnect_dsn(self.conn), *self.claims,
-                                                     autocommit=False)
-            else:
-                self._staging_conn = psycopg.connect(reconnect_dsn(self.conn), autocommit=True,
-                                                     row_factory=psycopg.rows.dict_row)
-        return self._staging_conn
+        with self._borrow() as conn:
+            """Restore from the staged publication only - never saver-latest rows."""
+            row = conn.execute(
+                "SELECT task_id, generation, control, published_thread_id,"
+                "       published_checkpoint_ns, published_checkpoint_id"
+                " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid",
+                {"sid": session_id, "owner": owner_id}).fetchone()
+            if row is None:
+                return None
+            return dict(row)
 
     def staged_log(self, session_id: str, generation: int, *, execution_point: str,
                    node: str, stage: str, item: str = '') -> list[dict]:
         """The ordered staged rows for one logical call sequence: a (stage,item)
         sequence issued by one node under one execution point (the durable
         checkpoint the execution resumed from) in one generation."""
-        with self._staging_lock, self._stage_conn.transaction():
-            with self._stage_conn.cursor() as cur:
+        with self._borrow() as conn, conn.transaction():
+            with conn.cursor() as cur:
                 cur.execute(
                     "SELECT ordinal,attempt_id,request_sha256,response,usage,provider,model FROM staged_provider_responses "
                     "WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s ORDER BY ordinal",
@@ -326,8 +328,8 @@ class PgSessionStore:
         """Open a logical call's staged row BEFORE the ledger attempt is reserved:
         any crash from here on leaves visible evidence instead of an invisible rerun."""
         import time as _time
-        with self._staging_lock, self._stage_conn.transaction():
-            with self._stage_conn.cursor() as cur:
+        with self._borrow() as conn, conn.transaction():
+            with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO staged_provider_responses(owner_id,session_id,generation,execution_point,node,stage,item,ordinal,request_sha256,provider,model,dispatched_at) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -337,8 +339,8 @@ class PgSessionStore:
     def bind_attempt(self, claim: SessionClaim, *, execution_point: str, node: str,
                      stage: str, item: str, ordinal: int, attempt_id: str) -> None:
         """Bind the ledger attempt to the staged row (once)."""
-        with self._staging_lock, self._stage_conn.transaction():
-            with self._stage_conn.cursor() as cur:
+        with self._borrow() as conn, conn.transaction():
+            with conn.cursor() as cur:
                 row = cur.execute(
                     "UPDATE staged_provider_responses SET attempt_id=%s WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND attempt_id IS NULL RETURNING ordinal",
                     (attempt_id, claim.session_id, claim.generation, execution_point, node, stage, item, ordinal)).fetchone()
@@ -350,8 +352,8 @@ class PgSessionStore:
                         response: dict, usage: dict | None) -> None:
         """Stage the raw provider result + measured usage (once) BEFORE settle/handoff."""
         import json as _json, time as _time
-        with self._staging_lock, self._stage_conn.transaction():
-            with self._stage_conn.cursor() as cur:
+        with self._borrow() as conn, conn.transaction():
+            with conn.cursor() as cur:
                 row = cur.execute(
                     "UPDATE staged_provider_responses SET response=%s,usage=%s,completed_at=%s "
                     "WHERE session_id=%s AND generation=%s AND execution_point=%s AND node=%s AND stage=%s AND item=%s AND ordinal=%s AND response IS NULL RETURNING ordinal",
@@ -361,55 +363,57 @@ class PgSessionStore:
             raise PublicationConflict('staged response already completed or missing')
 
     def append_journal(self, claim: SessionClaim, cursor: int, page: dict) -> None:
-        """Append one journal page under the fence.
+        with self._borrow() as conn:
+            """Append one journal page under the fence.
 
-        Pages are immutable evidence keyed by (session, cursor): a duplicate
-        cursor is a no-op, never an overwrite. Part of the same staged
-        publication discipline as control state - a stop or takeover that
-        landed rejects the append with StopRequested.
-        """
-        try:
-            row = self.conn.execute(
-                "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
-                " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
-                " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
-                "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
-                " FOR UPDATE"
-                " ON CONFLICT (session_id, cursor) DO NOTHING"
-                " RETURNING 1",
-                {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                 "epoch": claim.epoch, "cursor": cursor, "page": json.dumps(page),
-                 "now": time.time()}).fetchone()
-            # A duplicate cursor returns no row without the guard failing; detect
-            # fence failure separately so a stale writer never passes silently.
-            if row is None:
-                guard = self.conn.execute(
-                    "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-                    " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s",
+            Pages are immutable evidence keyed by (session, cursor): a duplicate
+            cursor is a no-op, never an overwrite. Part of the same staged
+            publication discipline as control state - a stop or takeover that
+            landed rejects the append with StopRequested.
+            """
+            try:
+                row = conn.execute(
+                    "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+                    " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
+                    " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid AND generation = %(gen)s"
+                    "   AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+                    " FOR UPDATE"
+                    " ON CONFLICT (session_id, cursor) DO NOTHING"
+                    " RETURNING 1",
                     {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                     "epoch": claim.epoch, "now": time.time()}).fetchone()
-                if guard is not None:
-                    self.conn.commit()
-                    return  # page already staged at this cursor; immutable, kept
-                self.conn.rollback()
-                self._fence_diagnose(claim, "journal append")
-                raise StopRequested("session lease fence rejected the journal append")
-            self.conn.commit()
-        except Exception as exc:
-            self.conn.rollback()
-            from .pg_diagnostics import tag_stage
-            tag_stage(exc, "journal append", self.conn)
-            raise
+                     "epoch": claim.epoch, "cursor": cursor, "page": json.dumps(page),
+                     "now": time.time()}).fetchone()
+                # A duplicate cursor returns no row without the guard failing; detect
+                # fence failure separately so a stale writer never passes silently.
+                if row is None:
+                    guard = conn.execute(
+                        "SELECT 1 FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                        " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s",
+                        {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                         "epoch": claim.epoch, "now": time.time()}).fetchone()
+                    if guard is not None:
+                        conn.commit()
+                        return  # page already staged at this cursor; immutable, kept
+                    conn.rollback()
+                    self._fence_diagnose(claim, "journal append")
+                    raise StopRequested("session lease fence rejected the journal append")
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                from .pg_diagnostics import tag_stage
+                tag_stage(exc, "journal append", conn)
+                raise
 
     def read_journal(self, session_id: str, owner_id: str, after: int, limit: int) -> list[dict]:
-        """Committed journal pages for progress reads; cross-owner reads see nothing."""
-        rows = self.conn.execute(
-            "SELECT j.cursor, j.page FROM engine_session_journal j"
-            " JOIN engine_sessions s ON s.session_id = j.session_id"
-            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid AND j.cursor > %(after)s"
-            " ORDER BY j.cursor LIMIT %(limit)s",
-            {"sid": session_id, "owner": owner_id, "after": after, "limit": limit}).fetchall()
-        return [{"cursor": r["cursor"], "page": r["page"]} for r in rows]
+        with self._borrow() as conn:
+            """Committed journal pages for progress reads; cross-owner reads see nothing."""
+            rows = conn.execute(
+                "SELECT j.cursor, j.page FROM engine_session_journal j"
+                " JOIN engine_sessions s ON s.session_id = j.session_id"
+                " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid AND j.cursor > %(after)s"
+                " ORDER BY j.cursor LIMIT %(limit)s",
+                {"sid": session_id, "owner": owner_id, "after": after, "limit": limit}).fetchall()
+            return [{"cursor": r["cursor"], "page": r["page"]} for r in rows]
 
     def publish_step(self, claim: SessionClaim, control: dict, *,
                      journal_cursor: int | None = None,
@@ -419,114 +423,116 @@ class PgSessionStore:
                      published_checkpoint_ns: str = "",
                      published_checkpoint_id: str | None = None,
                      fault_hook=None) -> None:
-        """One transaction per published step: journal page, control state and
-        the checkpoint pointer commit together under the lease fence.
+        with self._borrow() as conn:
+            """One transaction per published step: journal page, control state and
+            the checkpoint pointer commit together under the lease fence.
 
-        Ordering within one lease (epoch/generation fences do not order valid
-        writes): the control payload's integer "sequence" is the step's
-        revision. The lease row is locked FOR UPDATE first, so the revision
-        check below is a real compare-and-swap:
-        - a NEWER sequence commits;
-        - the SAME sequence commits only as an exact replay (control, pointer
-          and journal page all identical to what is committed) and is a no-op;
-        - anything older, or a same-cursor journal page with different bytes,
-          is a conflicting replay: rollback and PublicationConflict.
-        Readers only ever see committed steps: a crash or failure leaves NONE
-        of the three behind (fault_hook exists only to inject a mid-transaction
-        failure in tests).
-        """
-        if "sequence" not in control or not isinstance(control["sequence"], int):
-            raise ValueError('control payload must carry an integer "sequence" revision')
-        params = {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
-                  "epoch": claim.epoch, "now": time.time()}
-        try:
-            row = self.conn.execute(
-                "SELECT control, published_thread_id, published_checkpoint_ns, published_checkpoint_id"
-                " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
-                " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
-                " FOR UPDATE",
-                params).fetchone()
-        except Exception as exc:
-            self.conn.rollback()
-            from .pg_diagnostics import tag_stage
-            tag_stage(exc, "publication guard", self.conn)
-            raise
-        if row is None:
-            self.conn.rollback()
-            self._fence_diagnose(claim, "publication")
-            raise StopRequested("session lease fence rejected the publication")
-        prior = row["control"] or {}
-        prior_seq = prior.get("sequence", 0)
-        new_seq = control["sequence"]
-        if new_seq <= prior_seq:
-            exact = (prior == control
-                     and row["published_thread_id"] == published_thread_id
-                     and row["published_checkpoint_ns"] == published_checkpoint_ns
-                     and row["published_checkpoint_id"] == published_checkpoint_id)
-            if exact:
-                replay_pages = list(journal_pages or [])
+            Ordering within one lease (epoch/generation fences do not order valid
+            writes): the control payload's integer "sequence" is the step's
+            revision. The lease row is locked FOR UPDATE first, so the revision
+            check below is a real compare-and-swap:
+            - a NEWER sequence commits;
+            - the SAME sequence commits only as an exact replay (control, pointer
+              and journal page all identical to what is committed) and is a no-op;
+            - anything older, or a same-cursor journal page with different bytes,
+              is a conflicting replay: rollback and PublicationConflict.
+            Readers only ever see committed steps: a crash or failure leaves NONE
+            of the three behind (fault_hook exists only to inject a mid-transaction
+            failure in tests).
+            """
+            if "sequence" not in control or not isinstance(control["sequence"], int):
+                raise ValueError('control payload must carry an integer "sequence" revision')
+            params = {"sid": claim.session_id, "owner": claim.owner_id, "gen": claim.generation,
+                      "epoch": claim.epoch, "now": time.time()}
+            try:
+                row = conn.execute(
+                    "SELECT control, published_thread_id, published_checkpoint_ns, published_checkpoint_id"
+                    " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
+                    " AND generation = %(gen)s AND lease_epoch = %(epoch)s AND lease_expires_at > %(now)s"
+                    " FOR UPDATE",
+                    params).fetchone()
+            except Exception as exc:
+                conn.rollback()
+                from .pg_diagnostics import tag_stage
+                tag_stage(exc, "publication guard", conn)
+                raise
+            if row is None:
+                conn.rollback()
+                self._fence_diagnose(claim, "publication")
+                raise StopRequested("session lease fence rejected the publication")
+            prior = row["control"] or {}
+            prior_seq = prior.get("sequence", 0)
+            new_seq = control["sequence"]
+            if new_seq <= prior_seq:
+                exact = (prior == control
+                         and row["published_thread_id"] == published_thread_id
+                         and row["published_checkpoint_ns"] == published_checkpoint_ns
+                         and row["published_checkpoint_id"] == published_checkpoint_id)
+                if exact:
+                    replay_pages = list(journal_pages or [])
+                    if journal_page is not None:
+                        replay_pages.append((journal_cursor, journal_page))
+                    for cursor, page in replay_pages:
+                        existing = conn.execute(
+                            "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
+                            {**params, "cursor": cursor}).fetchone()
+                        exact = existing is not None and existing["page"] == page
+                        if not exact:
+                            break
+                if exact:
+                    conn.commit()   # exact replay of a committed step: no-op
+                    return
+                conn.rollback()
+                raise PublicationConflict(
+                    f"stale or conflicting publication for {claim.session_id}: "
+                    f"sequence {new_seq} <= committed {prior_seq}")
+            # All-or-nothing: any failure after the guard lock rolls the whole
+            # step back - journal pages, control and pointer move together or not
+            # at all, and the connection is never left in an aborted transaction.
+            try:
+                pages = list(journal_pages or [])
                 if journal_page is not None:
-                    replay_pages.append((journal_cursor, journal_page))
-                for cursor, page in replay_pages:
-                    existing = self.conn.execute(
-                        "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
-                        {**params, "cursor": cursor}).fetchone()
-                    exact = existing is not None and existing["page"] == page
-                    if not exact:
-                        break
-            if exact:
-                self.conn.commit()   # exact replay of a committed step: no-op
-                return
-            self.conn.rollback()
-            raise PublicationConflict(
-                f"stale or conflicting publication for {claim.session_id}: "
-                f"sequence {new_seq} <= committed {prior_seq}")
-        # All-or-nothing: any failure after the guard lock rolls the whole
-        # step back - journal pages, control and pointer move together or not
-        # at all, and the connection is never left in an aborted transaction.
-        try:
-            pages = list(journal_pages or [])
-            if journal_page is not None:
-                if journal_cursor is None:
-                    raise ValueError("journal page requires its cursor")
-                pages.append((journal_cursor, journal_page))
-            for cursor, page in pages:
-                inserted = self.conn.execute(
-                    "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
-                    " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
-                    " ON CONFLICT (session_id, cursor) DO NOTHING RETURNING 1",
-                    {**params, "cursor": cursor, "page": json.dumps(page)}).fetchone()
-                if inserted is None:
-                    existing = self.conn.execute(
-                        "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
-                        {**params, "cursor": cursor}).fetchone()
-                    if existing is None or existing["page"] != page:
+                    if journal_cursor is None:
+                        raise ValueError("journal page requires its cursor")
+                    pages.append((journal_cursor, journal_page))
+                for cursor, page in pages:
+                    inserted = conn.execute(
+                        "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+                        " VALUES (%(sid)s,%(cursor)s,%(page)s::jsonb,%(now)s)"
+                        " ON CONFLICT (session_id, cursor) DO NOTHING RETURNING 1",
+                        {**params, "cursor": cursor, "page": json.dumps(page)}).fetchone()
+                    if inserted is None:
+                        existing = conn.execute(
+                            "SELECT page FROM engine_session_journal WHERE session_id = %(sid)s AND cursor = %(cursor)s",
+                            {**params, "cursor": cursor}).fetchone()
+                        if existing is None or existing["page"] != page:
+                            raise PublicationConflict(
+                                f"journal cursor {cursor} for {claim.session_id} already holds a different page")
                         raise PublicationConflict(
-                            f"journal cursor {cursor} for {claim.session_id} already holds a different page")
-                    raise PublicationConflict(
-                        f"journal cursor {cursor} for {claim.session_id} belongs to an earlier step")
-            if fault_hook is not None:
-                fault_hook()   # test-only: inject a failure between journal insert and pointer commit
-            self.conn.execute(
-                "UPDATE engine_sessions"
-                " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
-                "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
-                "     updated_at = %(now)s"
-                " WHERE session_id = %(sid)s",
-                {**params, "control": json.dumps(control), "tid": published_thread_id,
-                 "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
-        except BaseException as exc:
-            self.conn.rollback()
-            from .pg_diagnostics import tag_stage
-            tag_stage(exc, "step publication", self.conn)
-            raise
-        self.conn.commit()
+                            f"journal cursor {cursor} for {claim.session_id} belongs to an earlier step")
+                if fault_hook is not None:
+                    fault_hook()   # test-only: inject a failure between journal insert and pointer commit
+                conn.execute(
+                    "UPDATE engine_sessions"
+                    " SET control = %(control)s::jsonb, published_thread_id = %(tid)s,"
+                    "     published_checkpoint_ns = %(ns)s, published_checkpoint_id = %(cid)s,"
+                    "     updated_at = %(now)s"
+                    " WHERE session_id = %(sid)s",
+                    {**params, "control": json.dumps(control), "tid": published_thread_id,
+                     "ns": published_checkpoint_ns, "cid": published_checkpoint_id})
+            except BaseException as exc:
+                conn.rollback()
+                from .pg_diagnostics import tag_stage
+                tag_stage(exc, "step publication", conn)
+                raise
+            conn.commit()
 
     def journal_head(self, session_id: str, owner_id: str) -> int:
-        """Highest committed journal cursor (0 when empty) for cursor allocation."""
-        row = self.conn.execute(
-            "SELECT COALESCE(MAX(j.cursor),0) AS head FROM engine_session_journal j"
-            " JOIN engine_sessions s ON s.session_id = j.session_id"
-            " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid",
-            {"sid": session_id, "owner": owner_id}).fetchone()
-        return row["head"] if isinstance(row, dict) else row[0]
+        with self._borrow() as conn:
+            """Highest committed journal cursor (0 when empty) for cursor allocation."""
+            row = conn.execute(
+                "SELECT COALESCE(MAX(j.cursor),0) AS head FROM engine_session_journal j"
+                " JOIN engine_sessions s ON s.session_id = j.session_id"
+                " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid",
+                {"sid": session_id, "owner": owner_id}).fetchone()
+            return row["head"] if isinstance(row, dict) else row[0]

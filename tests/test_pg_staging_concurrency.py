@@ -9,7 +9,7 @@ import threading
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 import psycopg
 import psycopg.rows
 
@@ -26,7 +26,7 @@ def _store(tmp_path):
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_STAGING_DDL)
     conn.commit()
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     store.create('s1', 'task1', OWNER)
     claim = store.claim('s1', OWNER, 'host#1', ttl=600)
     assert claim is not None

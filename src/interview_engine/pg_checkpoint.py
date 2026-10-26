@@ -116,24 +116,30 @@ class FencedPostgresSaver(PostgresSaver):
         # connection the saver drives. None only in mirrored-DDL superuser
         # tests; the production wiring always passes them.
         self._claims = claims if claims is not None else getattr(conn, 'claims', None)
-        # Guarded writes use a dedicated connection: graph nodes run on worker
-        # threads and the base saver drives its connection in pipeline mode,
-        # so sharing it for fenced statements corrupts the pipeline. It opens
-        # LAZILY on the first guarded write: a session waiting for input must
-        # not hold a pool connection it is not using (pooler budget).
-        self._write_conn_raw = None
+        # Guarded writes borrow one claimed connection+transaction per batch
+        # from the process pool (_guarded_conn): no per-session pinned
+        # connection at all. self.conn may BE the pool - langgraph's base saver
+        # checks out per operation (ConnectionPool is supported natively);
+        # pipeline mode is unavailable on a pool, which costs a few round
+        # trips per checkpoint commit and changes no semantics.
         self._write_lock = threading.Lock()
 
-    @property
-    def _write_conn(self):
-        if self._write_conn_raw is None:
-            from .pg_claims import reconnect_dsn
-            if self._claims is not None:
-                from .pg_claims import connect_claimed
-                self._write_conn_raw = connect_claimed(reconnect_dsn(self.conn), *self._claims, autocommit=False)
-            else:
-                self._write_conn_raw = psycopg.Connection.connect(reconnect_dsn(self.conn), autocommit=False)
-        return self._write_conn_raw
+    @contextmanager
+    def _guarded_conn(self):
+        # One claimed transaction for a guarded write batch: claims ride the
+        # transaction stream; the connection returns to the pool at the end.
+        from .pg_claims import CLAIM_SQL
+        from langgraph.checkpoint.postgres import _internal
+        with _internal.get_connection(self.conn) as conn:
+            try:
+                with conn.transaction():
+                    if self._claims is not None:
+                        conn.execute(CLAIM_SQL, self._claims)
+                    yield conn
+            finally:
+                from psycopg.pq import TransactionStatus
+                if conn.info.transaction_status != TransactionStatus.IDLE:
+                    conn.rollback()
 
     @contextmanager
     def _cursor(self, *, pipeline: bool = False):
@@ -148,21 +154,14 @@ class FencedPostgresSaver(PostgresSaver):
                 yield cur
             return
         from .pg_claims import CLAIM_SQL
-        with self.lock:
-            with self.conn.transaction():
-                # Idempotent: a ClaimedConnection already applied these at BEGIN.
-                self.conn.execute(CLAIM_SQL, self._claims)
-                if pipeline and self.supports_pipeline:
-                    with self.conn.pipeline(), self.conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
-                        yield cur
-                else:
-                    with self.conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
-                        yield cur
-
-    def close(self):
-        if self._write_conn_raw is not None:
-            self._write_conn_raw.close()
-            self._write_conn_raw = None
+        from langgraph.checkpoint.postgres import _internal
+        with self.lock, _internal.get_connection(self.conn) as conn:
+            with conn.transaction():
+                conn.execute(CLAIM_SQL, self._claims)
+                # No pipeline on a pooled connection (langgraph forbids it);
+                # the read paths here are single round trips anyway.
+                with conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
+                    yield cur
 
     def setup(self) -> None:
         # The checkpoint schema is migration-owned (delivery-api pre-records
@@ -187,13 +186,13 @@ class FencedPostgresSaver(PostgresSaver):
                 'checkpoint migration (20261022120000_session_checkpoint_tables); '
                 'the runtime database role never runs DDL')
 
-    def _fence_diagnose(self, what: str) -> None:
+    def _fence_diagnose(self, conn, what: str) -> None:
         """Best-effort read of the current lease row after a guard rejected a
         checkpoint write: logs which predicate failed (generation / epoch /
         expiry) so the rejection is diagnosable from logs alone. Read-only; a
         failed diagnostic never masks the original rejection."""
         try:
-            row = self._write_conn.execute(
+            row = conn.execute(
                 f"SELECT generation, lease_epoch, lease_expires_at FROM {self._lease_table}"
                 " WHERE session_id = %(fence_session)s",
                 {'fence_session': self._lease.session_id}).fetchone()
@@ -217,27 +216,25 @@ class FencedPostgresSaver(PostgresSaver):
             log.warning("lease.fence.rejected what=%s session=%s diagnostic-read-failed %s: %s",
                         what, self._lease.session_id, type(diag_exc).__name__, str(diag_exc)[:200])
 
-    def _fenced(self, sql: str, params: dict):
+    def _fenced(self, conn, sql: str, params: dict):
         merged = dict(params)
         merged.update(self._lease.params())
-        row = self._write_conn.execute(sql, merged).fetchone()
+        row = conn.execute(sql, merged).fetchone()
         guard = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row is not None else 0
         if guard == 0:
-            self._write_conn.rollback()
-            self._fence_diagnose('checkpoint write')
+            self._fence_diagnose(conn, 'checkpoint write')
             raise StopRequested('session lease lost (stop or takeover)')
         return row
 
-    def _guard_lock(self):
-        row = self._write_conn.execute(
+    def _guard_lock(self, conn):
+        row = conn.execute(
             f"SELECT 1 FROM {self._lease_table} WHERE session_id = %(fence_session)s"
             " AND generation = %(fence_generation)s AND lease_epoch = %(fence_epoch)s"
             " AND lease_expires_at > %(fence_now)s FOR UPDATE",
             self._lease.params()).fetchone()
         guard = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row is not None else 0
         if guard == 0:
-            self._write_conn.rollback()
-            self._fence_diagnose('checkpoint guard lock')
+            self._fence_diagnose(conn, 'checkpoint guard lock')
             raise StopRequested('session lease lost (stop or takeover)')
 
     def put(self, config, checkpoint, metadata, new_versions):
@@ -265,10 +262,10 @@ class FencedPostgresSaver(PostgresSaver):
             else:
                 blob_values[k] = copy['channel_values'].pop(k)
         blob_versions = {k: v for k, v in new_versions.items() if k in blob_values}
-        with self._write_lock:
+        with self._write_lock, self._guarded_conn() as conn:
             try:
-                self._guard_lock()
-                with self._write_conn.cursor() as cur:
+                self._guard_lock(conn)
+                with conn.cursor() as cur:
                     if blob_versions:
                         cur.executemany(
                             "INSERT INTO checkpoint_blobs (thread_id, checkpoint_ns, channel, version, type, blob)"
@@ -284,10 +281,7 @@ class FencedPostgresSaver(PostgresSaver):
                         (thread_id, checkpoint_ns, checkpoint['id'], checkpoint_id,
                          Jsonb(copy), Jsonb(get_serializable_checkpoint_metadata(config, metadata))))
             except BaseException:
-                self._write_conn.rollback()
                 raise
-            else:
-                self._write_conn.commit()
         return {'configurable': {'thread_id': thread_id, 'checkpoint_ns': checkpoint_ns,
                                  'checkpoint_id': checkpoint['id']}}
 
@@ -300,22 +294,16 @@ class FencedPostgresSaver(PostgresSaver):
         # batching at interview-session throughput.
         reserved = all(channel in WRITES_IDX_MAP for channel, _ in writes)
         sql = (_UPSERT_WRITES if reserved else _INSERT_WRITES).format(lease_table=self._lease_table)
-        with self._write_lock:
-            try:
-                for idx, (channel, value) in enumerate(writes):
-                    type_, blob = self.serde.dumps_typed(value)
-                    self._fenced(sql, {
-                        'thread_id': config['configurable']['thread_id'],
-                        'checkpoint_ns': config['configurable']['checkpoint_ns'],
-                        'checkpoint_id': config['configurable']['checkpoint_id'],
-                        'task_id': task_id, 'task_path': task_path,
-                        'idx': WRITES_IDX_MAP.get(channel, idx),
-                        'channel': channel, 'type': type_, 'blob': blob})
-            except BaseException:
-                self._write_conn.rollback()
-                raise
-            else:
-                self._write_conn.commit()
+        with self._write_lock, self._guarded_conn() as conn:
+            for idx, (channel, value) in enumerate(writes):
+                type_, blob = self.serde.dumps_typed(value)
+                self._fenced(conn, sql, {
+                    'thread_id': config['configurable']['thread_id'],
+                    'checkpoint_ns': config['configurable']['checkpoint_ns'],
+                    'checkpoint_id': config['configurable']['checkpoint_id'],
+                    'task_id': task_id, 'task_path': task_path,
+                    'idx': WRITES_IDX_MAP.get(channel, idx),
+                    'channel': channel, 'type': type_, 'blob': blob})
 
 def bootstrap_checkpoint_schema(conn) -> None:
     """Explicit one-off schema bootstrap for tests and development superusers.

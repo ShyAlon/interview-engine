@@ -1,3 +1,4 @@
+from conftest import managed_pool
 """Pooler transport regression: startup-option GUCs are not a claim transport.
 
 2026-10-25 live probe (user-run against the preview DSN): host
@@ -84,14 +85,14 @@ def test_production_store_paths_pass_through_option_dropping_transport(monkeypat
     monkeypatch.setattr(pg_claims.psycopg, 'connect', _dropping_connect)
     from interview_engine.tenant_worker import pg_session_store
 
-    store = pg_session_store(f"{_STATE['dsn']} user=delivery_app", A, SESSION_A)
+    from conftest import managed_pool
+    store = pg_session_store(managed_pool(f"{_STATE['dsn']} user=delivery_app"), A, SESSION_A)
     sid = 'ict-' + time.strftime('%H%M%S')
     store.create(sid, 'ict', A)
     claim = store.claim(sid, A, 'transport#1', ttl=60)
     assert claim is not None
-    # Heartbeat path: a SPAWNED connection through the same transport.
-    heartbeat = store.spawn()
-    assert heartbeat.heartbeat(claim, ttl=60) is True
+    # Heartbeat path: one claimed transaction on a borrowed connection per call.
+    assert store.heartbeat(claim, ttl=60) is True
     # Staging path: dedicated connection, one claimed transaction per call.
     store.record_dispatch(claim, execution_point='ep', node='n', stage='s', item='i',
                           ordinal=0, request_sha256='sha', provider='p', model='m')
@@ -112,11 +113,11 @@ def test_checkpoint_saver_paths_pass_through_option_dropping_transport(monkeypat
     from interview_engine.pg_session_store import PgSessionStore
 
     conn = connect_claimed(f"{_STATE['dsn']} user=delivery_app", A, SESSION_A, autocommit=False)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     sid = 'ict-cp-' + time.strftime('%H%M%S')
     store.create(sid, 'ict', A)
     claim = store.claim(sid, A, 'transport#1', ttl=60)
-    saver = FencedPostgresSaver(conn, lease=LeaseFence(sid, claim.generation, claim.epoch))
+    saver = FencedPostgresSaver(managed_pool(conn.info.dsn), lease=LeaseFence(sid, claim.generation, claim.epoch))
     saver.setup()  # migration pre-recorded: a SELECT, no DDL, under the app role
     cfg = {'configurable': {'thread_id': sid, 'checkpoint_ns': '', 'checkpoint_id': ''}}
     checkpoint = {'v': 4, 'ts': '2026-10-22T14:00:00+00:00', 'id': '00000000-0000-4000-8000-0000000000c2',

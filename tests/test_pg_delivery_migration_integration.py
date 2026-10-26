@@ -1,3 +1,4 @@
+from conftest import managed_pool
 """PR A integration: engine store + fenced checkpoint saver against the REAL
 delivery-api migrated schema - every migration applied by delivery-api's own
 pg_harness - connected as delivery_app (NOSUPERUSER, NOBYPASSRLS) with tenant
@@ -64,7 +65,7 @@ def test_store_claim_publish_stop_under_app_role():
     from interview_engine.pg_session_store import PgSessionStore
     from interview_engine.stop_fence import StopRequested
 
-    store = PgSessionStore(app_conn(A))
+    store = PgSessionStore(managed_pool(app_conn(A).info.dsn))
     sid = 'ita-' + time.strftime('%H%M%S')
     store.create(sid, 'ita', A)
     claim = store.claim(sid, A, 'integration#1', ttl=60)
@@ -94,11 +95,11 @@ def test_fenced_checkpoint_roundtrip_under_app_role():
     from interview_engine.pg_session_store import PgSessionStore
 
     conn = app_conn(A)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     sid = 'ita-cp-' + time.strftime('%H%M%S')
     store.create(sid, 'ita', A)
     claim = store.claim(sid, A, 'integration#1', ttl=60)
-    saver = FencedPostgresSaver(conn, lease=LeaseFence(sid, claim.generation, claim.epoch))
+    saver = FencedPostgresSaver(managed_pool(conn.info.dsn), lease=LeaseFence(sid, claim.generation, claim.epoch))
     saver.setup()  # migration pre-recorded v10: a SELECT, no DDL, under the app role
     cfg = {'configurable': {'thread_id': sid, 'checkpoint_ns': '', 'checkpoint_id': ''}}
     checkpoint = {'v': 4, 'ts': '2026-10-22T14:00:00+00:00', 'id': '00000000-0000-4000-8000-0000000000c1',
@@ -113,14 +114,14 @@ def test_fenced_checkpoint_roundtrip_under_app_role():
 def test_cross_owner_invisible_under_rls():
     from interview_engine.pg_session_store import PgSessionStore
 
-    store_a = PgSessionStore(app_conn(A))
+    store_a = PgSessionStore(managed_pool(app_conn(A).info.dsn))
     sid = 'ita-xo-' + time.strftime('%H%M%S')
     store_a.create(sid, 'ita', A)
     claim = store_a.claim(sid, A, 'integration#1', ttl=60)
     store_a.publish_step(claim, {'session_id': sid, 'sequence': 1},
                          journal_pages=[(1, {'cursor': 1, 'stage': 's'})], published_thread_id=sid)
 
-    other = PgSessionStore(app_conn(B))
+    other = PgSessionStore(managed_pool(app_conn(B).info.dsn))
     assert other.load_published(sid, B) is None
     assert other.claim(sid, B, 'integration#2', ttl=60) is None
     assert other.read_journal(sid, B, after=0, limit=10) == []
