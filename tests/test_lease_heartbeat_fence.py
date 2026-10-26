@@ -117,6 +117,17 @@ def test_stop_requested_from_advance_warns_and_marks_stopped(caplog):
         [r.getMessage() for r in caplog.records]
 
 
+def test_swallowed_stop_logs_the_real_cause(caplog):
+    # 2026-10-26 live stall: the swallow hid which fence tripped behind
+    # "reason=stop-requested". The warning must now carry the swallowed
+    # exception's own type and message.
+    store=FakePgStore()
+    with caplog.at_level("DEBUG"):
+        session,_=start(registry(store,FakeProgram(result=StopRequested("session lease lost (stop or takeover)"))))
+    warnings=[r.getMessage() for r in caplog.records if r.levelname=="WARNING"]
+    assert any("stop.swallowed" in m and "cause=StopRequested: session lease lost (stop or takeover)" in m for m in warnings),warnings
+
+
 def test_none_advance_produces_the_exact_observed_shape():
     # A None return from advance() yields RUNNING/open_input=null/sequence=1 -
     # precisely the live 2026-10-25 response. The deployed application's first
@@ -144,3 +155,42 @@ def test_heartbeat_alive_false_marks_stopped_and_overlays_stop():
     time.sleep(0.3)                        # one beat is enough
     assert session.pg_stopped is True
     assert session.snapshot().process_status==ProcessStatus.STOP_REQUESTED
+
+
+def test_heartbeat_start_logs_session_and_timing(caplog):
+    # The heartbeat thread was invisible: a parked session showed no heartbeat
+    # evidence at all. Starting it must log the session and the beat cadence.
+    import logging
+    store=FakePgStore()
+    with caplog.at_level(logging.INFO,logger="interview_engine.http"):
+        session,_=start(registry(store,FakeProgram(delay=0.0),ttl=0.3))
+    infos=[r.getMessage() for r in caplog.records if r.levelname=="INFO"]
+    assert any("lease heartbeat started" in m and "session=" in m and "interval=" in m for m in infos),infos
+
+
+def test_heartbeat_lost_lease_logs_the_takeover(caplog):
+    # 2026-10-26 stall: the alive=False path marked the session stopped in
+    # silence. That is the one line that would have named the cause.
+    import logging
+    store=FakePgStore(heartbeat_alive=False)
+    with caplog.at_level(logging.INFO,logger="interview_engine.http"):
+        session,_=start(registry(store,FakeProgram(delay=0.0),ttl=0.3))
+        time.sleep(0.3)
+    warnings=[r.getMessage() for r in caplog.records if r.levelname=="WARNING"]
+    assert any("lease heartbeat lost" in m and "session=" in m for m in warnings),warnings
+    assert session.pg_stopped is True
+
+
+def test_heartbeat_give_up_logs_the_lapse(caplog):
+    # After 5 consecutive failures the thread exits; that exit must say the
+    # lease will now lapse instead of going quiet.
+    import logging
+    store=FakePgStore(heartbeat_raises=True)
+    with caplog.at_level(logging.INFO,logger="interview_engine.http"):
+        session,_=start(registry(store,FakeProgram(delay=0.0),ttl=0.2))
+        deadline=time.time()+3
+        while time.time()<deadline:
+            if any("giving up" in r.getMessage() for r in caplog.records):break
+            time.sleep(0.1)
+    warnings=[r.getMessage() for r in caplog.records if r.levelname=="WARNING"]
+    assert any("lease heartbeat giving up" in m and "session=" in m for m in warnings),warnings

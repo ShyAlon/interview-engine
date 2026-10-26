@@ -38,6 +38,9 @@ from contextlib import contextmanager
 import psycopg
 from langgraph.checkpoint.base import WRITES_IDX_MAP
 from langgraph.checkpoint.postgres import PostgresSaver
+import logging
+
+log = logging.getLogger("interview_engine.pg_checkpoint")
 
 from .stop_fence import StopRequested
 
@@ -174,6 +177,36 @@ class FencedPostgresSaver(PostgresSaver):
                 'checkpoint migration (20261022120000_session_checkpoint_tables); '
                 'the runtime database role never runs DDL')
 
+    def _fence_diagnose(self, what: str) -> None:
+        """Best-effort read of the current lease row after a guard rejected a
+        checkpoint write: logs which predicate failed (generation / epoch /
+        expiry) so the rejection is diagnosable from logs alone. Read-only; a
+        failed diagnostic never masks the original rejection."""
+        try:
+            row = self._write_conn.execute(
+                f"SELECT generation, lease_epoch, lease_expires_at FROM {self._lease_table}"
+                " WHERE session_id = %(fence_session)s",
+                {'fence_session': self._lease.session_id}).fetchone()
+            if row is None:
+                log.warning("lease.fence.rejected what=%s session=%s reason=session-row-missing expected gen=%s epoch=%s",
+                            what, self._lease.session_id, self._lease.generation, self._lease.epoch)
+                return
+            get = (lambda k: row.get(k) if isinstance(row, dict) else row[{'generation': 0, 'lease_epoch': 1, 'lease_expires_at': 2}[k]])
+            now = self._lease._now()
+            reasons = []
+            if get('generation') != self._lease.generation:
+                reasons.append("generation %s != %s" % (get('generation'), self._lease.generation))
+            if get('lease_epoch') != self._lease.epoch:
+                reasons.append("lease_epoch %s != %s" % (get('lease_epoch'), self._lease.epoch))
+            if not (get('lease_expires_at') or 0) > now:
+                reasons.append("lease expired %.1fs ago (ttl lapsed)" % (now - (get('lease_expires_at') or 0)))
+            log.warning("lease.fence.rejected what=%s session=%s reason=%s expected gen=%s epoch=%s",
+                        what, self._lease.session_id, "; ".join(reasons) or "no predicate mismatch (race)",
+                        self._lease.generation, self._lease.epoch)
+        except Exception as diag_exc:
+            log.warning("lease.fence.rejected what=%s session=%s diagnostic-read-failed %s: %s",
+                        what, self._lease.session_id, type(diag_exc).__name__, str(diag_exc)[:200])
+
     def _fenced(self, sql: str, params: dict):
         merged = dict(params)
         merged.update(self._lease.params())
@@ -181,6 +214,7 @@ class FencedPostgresSaver(PostgresSaver):
         guard = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row is not None else 0
         if guard == 0:
             self._write_conn.rollback()
+            self._fence_diagnose('checkpoint write')
             raise StopRequested('session lease lost (stop or takeover)')
         return row
 
@@ -193,6 +227,7 @@ class FencedPostgresSaver(PostgresSaver):
         guard = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row is not None else 0
         if guard == 0:
             self._write_conn.rollback()
+            self._fence_diagnose('checkpoint guard lock')
             raise StopRequested('session lease lost (stop or takeover)')
 
     def put(self, config, checkpoint, metadata, new_versions):
