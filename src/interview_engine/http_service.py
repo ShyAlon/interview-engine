@@ -191,6 +191,7 @@ class SessionRegistry:
     def start(self, request: StartSessionRequest) -> tuple[EngineSession,InteractiveEvent]:
         session=EngineSession(session_id=str(request.session_id or uuid4()),task_id=request.task_id,sequence=1,
             status=ProcessStatus.RUNNING,next_step=NextStep.RUN,request=request)
+        log.info("session.start.accept session=%s task=%s route=%s",session.session_id,request.task_id,request.model_route)
         from .tenant_worker import _owner
         if _owner.get() is not None:
             import re
@@ -206,17 +207,22 @@ class SessionRegistry:
             self._sessions[session.session_id]=session
         if self._store is not None:
             owner=self._pg_owner()
+            t_create=time.monotonic()
             try:self._store.create(session.session_id,session.task_id,owner)
             except Exception as exc:
                 with self._lock:self._sessions.pop(session.session_id,None)
                 if 'UniqueViolation' in type(exc).__name__ or 'duplicate key' in str(exc):
+                    log.info("pg.registry.refused session=%s reason=duplicate-id",session.session_id)
                     raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session ID already exists")
                 raise
+            log.info("pg.registry.created session=%s task=%s dur_ms=%d",session.session_id,session.task_id,int((time.monotonic()-t_create)*1000))
             claim=self._store.claim(session.session_id,owner,self._instance,self._lease_ttl)
             if claim is None:
                 with self._lock:self._sessions.pop(session.session_id,None)
+                log.info("pg.lease.refused session=%s owner=%s reason=lease-held",session.session_id,owner)
                 raise ProtocolFailure(ProtocolErrorCode.INVALID_RESPONSE,"session lease held by another live instance")
             session.pg_claim=claim
+            log.info("pg.lease.claimed session=%s owner=%s generation=%s epoch=%s lease_ttl=%s dur_ms=%d",session.session_id,owner,claim.generation,claim.epoch,self._lease_ttl,int((time.monotonic()-t_create)*1000))
             self._start_heartbeat(session)
         self._ensure_stop_fence(session)
         started=self._event(session,EventType.RUN_STARTED)
@@ -229,30 +235,38 @@ class SessionRegistry:
                 # Preflight has passed; publish a RUNNING snapshot before
                 # constructing or invoking the potentially slow program.
                 self._publish(session)
+                log.info("session.published session=%s seq=%s status=preflight-running",session.session_id,session.sequence)
                 if self._program_factory is not None:
+                    t_construct=time.monotonic()
+                    log.info("program.construct.begin session=%s",session.session_id)
                     with self._dispatch_guard():
                         if self._store is not None and self._program_factory is default_program_factory:
                             session.program=self._prepare_program(session,lambda:self._default_pg_program(session,request))
                         else:
                             session.program=self._prepare_program(session,lambda:self._program_factory(session.session_id,request))
                     log.info("model.route.resolved session=%s task=%s route=%s stages=%s",session.session_id,request.task_id,request.model_route,json.dumps(getattr(session.program,"model_map",None)))
+                    log.info("program.construct.end session=%s dur_ms=%d",session.session_id,int((time.monotonic()-t_construct)*1000))
                     self._save(session)  # factory/pinned model is now ready, before long advance
                     pending=self._advance(session)
                     with self._control_commit(session):
                         if pending is not None:
                             session.sequence+=1;session.open_input=pending;session.status=ProcessStatus.WAITING_INPUT;session.next_step=NextStep.WAIT_INPUT
+                            log.info("open_input.set session=%s seq=%s status=WAITING_INPUT",session.session_id,session.sequence)
                         self._save(session)
                         self._publish(session)
                 else:
                     with self._control_commit(session):
                         self._save(session)
                         self._publish(session)
+            log.info("start.return session=%s seq=%s status=%s next_step=%s open_input=%s",session.session_id,session.sequence,int(session.status),int(session.next_step),'null' if session.open_input is None else 'set')
             return session,started
         except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
+            log.warning("stop.swallowed session=%s task=%s reason=stop-requested - start returns success with open_input=null",session.session_id,request.task_id)
             session.open_input=None
             return session,started
         except Exception:
             if session.stop_fence is not None and session.stop_fence.requested:
+                log.warning("stop.swallowed session=%s task=%s reason=fence-requested - start returns success with open_input=null",session.session_id,request.task_id)
                 session.open_input=None
                 return session,started
             log.exception("model.route.start.failed session=%s task=%s selected=%s",session.session_id,request.task_id,request.model_route)
@@ -481,12 +495,16 @@ class SessionRegistry:
     def _control_commit(session):
         # Short marker lock, never held over model execution. A result that
         # returned before Stop still cannot commit after the marker lands.
-        if session.stop_fence is None:
+        fenced=session.stop_fence is not None
+        log.info("control_commit.enter session=%s fenced=%s",session.session_id,fenced)
+        if not fenced:
             yield
+            log.info("control_commit.exit session=%s fenced=False",session.session_id)
             return
         with session.stop_fence.marker_guard():
             session.stop_fence.check(session.stop_fence.generation)
             yield
+            log.info("control_commit.exit session=%s fenced=True",session.session_id)
 
     def _dispatch_guard(self):
         # Database persistence never dispatches providers before PR B, no
@@ -510,8 +528,12 @@ class SessionRegistry:
             return program
 
     def _advance(self,session,response=None):
+        log.info("advance.begin session=%s seq=%s",session.session_id,session.sequence)
+        t_advance=time.monotonic()
         with self._dispatch_guard():
-            return self._advance_guarded(session,response)
+            pending=self._advance_guarded(session,response)
+        log.info("advance.end session=%s seq=%s dur_ms=%d pending=%s",session.session_id,session.sequence,int((time.monotonic()-t_advance)*1000),'present' if pending is not None else 'none')
+        return pending
 
     def _advance_guarded(self,session,response=None):
         if session.stop_fence is None:
@@ -642,13 +664,17 @@ class SessionRegistry:
                 if checkpoint_id is None:
                     state=graph.get_state(program.cfg)
                     if state is not None:checkpoint_id=state.config['configurable'].get('checkpoint_id')
+            t_publish=time.monotonic()
             try:
                 self._store.publish_step(session.pg_claim,self._serialize(session),
                     journal_pages=pages,
                     published_thread_id=session.session_id,
                     published_checkpoint_id=checkpoint_id)
                 if pages is not None:journal.acknowledge(len(pages))
-            except StopRequested:session.pg_stopped=True
+                log.info("session.saved session=%s seq=%s pages=%s checkpoint=%s dur_ms=%d outcome=published",session.session_id,session.sequence,len(pages) if pages is not None else 0,'yes' if checkpoint_id else 'no',int((time.monotonic()-t_publish)*1000))
+            except StopRequested:
+                session.pg_stopped=True
+                log.warning("session.save.fenced session=%s seq=%s - publish rejected (stop or takeover); marked stopped",session.session_id,session.sequence)
             return
         path=self._state_path(session.session_id)
         if path is None:return

@@ -4,7 +4,7 @@ No console or transport concerns live here. The service advances the graph until
 it reaches a typed founder-input boundary or completion.
 """
 from __future__ import annotations
-import json,sqlite3
+import json,logging,sqlite3,time
 from contextlib import nullcontext, contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -20,6 +20,9 @@ from .graph import build_graph
 from .progress import ProgressBus,stderr_printer
 from .telemetry import UsageLog,jsonl_sink
 from . import session_models, model_config
+
+_log=logging.getLogger("interview_engine.application")
+
 
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
@@ -43,14 +46,19 @@ class InterviewApplication:
             import psycopg
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
             from .pg_claims import connect_claimed
+            t_pg=time.monotonic();_log.info("pg.connect.begin session=%s",session_id)
             pg_conn=connect_claimed(pg_store.conn.info.dsn,pg_claim.owner_id,pg_claim.session_id,autocommit=True)
+            _log.info("pg.connect.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_pg)*1000))
             from . import model_config as _mc
             self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
+            _log.info("staging.ready session=%s",session_id)
             saver=FencedPostgresSaver(pg_conn,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
                 serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
                 claims=(pg_claim.owner_id,pg_claim.session_id))
+            t_setup=time.monotonic();_log.info("saver.setup.begin session=%s",session_id)
             saver.setup()
+            _log.info("saver.setup.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_setup)*1000))
         else:
             db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
             from .stop_fence import check_execution,guarded_publish
@@ -124,6 +132,7 @@ class InterviewApplication:
     def advance(self,response:InputResponse|None=None):
         from .stop_fence import check_execution
         check_execution()
+        _log.info("advance.enter session=%s finished=%s response=%s",self.session_id,self.finished,'yes' if response is not None else 'no')
         rework_backup=None;rework_input=None
         if response is not None:
             if self.open_input is None or response.input_id!=self.open_input.input_id:raise ValueError('stale input')
@@ -188,7 +197,9 @@ class InterviewApplication:
                     # background, so the step publish could run before the
                     # turn's final checkpoint landed - observed 2026-10-23 as
                     # the published pointer predating the turn's state).
+                    t_invoke=time.monotonic();_log.info("advance.turn.begin session=%s",self.session_id)
                     self.result=self.graph.invoke(self.state,self.cfg,durability='exit')
+                    _log.info("advance.turn.end session=%s dur_ms=%d",self.session_id,int((time.monotonic()-t_invoke)*1000))
                     # Publish provenance: record the checkpoint this advance
                     # produced (its writes are durable at 'exit'). The step
                     # publish references exactly this checkpoint - a
@@ -251,6 +262,7 @@ class InterviewApplication:
                     context={'decision_purpose':'semantic_review','evidence_version':1,'session_id':self.session_id,
                              'evidence_revision':__import__('hashlib').sha256(json.dumps({'semantic_review':review},sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),
                              'evidence':{'semantic_review':review}})
+                _log.info("advance.return session=%s kind=review",self.session_id)
                 return self.open_input
             if self.result.get('conops'):
                 if not self.result['intent_model'].get('founder_register'):
@@ -261,6 +273,7 @@ class InterviewApplication:
                 self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Approve this intent model?',
                     options=[InputOption(value=1,label='Proceed'),InputOption(value=0,label='Edit')],
                     context=self._decision_context('interview_approval'))
+                _log.info("advance.return session=%s kind=approval",self.session_id)
                 return self.open_input
             last=self.result['messages'][-1].content
             if '[INTERVIEW COMPLETE]' in last:self.state={};continue
@@ -270,7 +283,9 @@ class InterviewApplication:
                     options=[InputOption.model_validate(o) for o in decision['options']],rationale_required=decision.get('rationale_required',False),
                     context=self._decision_context('conops_concept'))
             else:self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt=last)
+            _log.info("advance.return session=%s kind=question",self.session_id)
             return self.open_input
+        _log.info("advance.return session=%s kind=none finished=%s result_keys=%s",self.session_id,self.finished,sorted(self.result.keys()) if isinstance(self.result,dict) else type(self.result).__name__)
         return None
 
     def _decision_context(self,purpose:str)->dict:
