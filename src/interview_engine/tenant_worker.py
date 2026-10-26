@@ -25,8 +25,6 @@ _root=ContextVar('interview_worker_root',default=None)
 def current_owner():return _owner.get()
 
 
-def current_session():return _session.get()
-
 
 def worker_root(default:Path)->Path:
     return _root.get() or default
