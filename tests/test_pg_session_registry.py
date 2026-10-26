@@ -214,3 +214,60 @@ def test_close_halts_and_joins_heartbeats_before_takeover(tmp_path):
     time.sleep(0.35)  # lease lapses only after heartbeats actually stopped
     second = make_registry(conn, instance='test#2', ttl=60.0)
     assert second.get(session.session_id).pg_claim.instance == 'test#2'
+
+
+def test_snapshot_read_never_claims_constructs_or_publishes(tmp_path):
+    # The 2026-10-26 pool exhaustion: viewing a parked task resumed its session
+    # through the READ path, which claimed the lease, started a heartbeat and
+    # constructed the full application - pinning ~4 pool connections and the
+    # lease forever (a live heartbeat defeats idle eviction). A read must only
+    # read the staged publication.
+    conn = make_conn(tmp_path)
+    writer = make_registry(conn)
+    session, _ = start(writer)
+    sid = session.session_id
+    writer.close()
+    _OPEN['registries'].remove(writer)
+    reader = make_registry(conn, instance='test#reader')
+    claimed = []
+    real_claim = reader._store.claim
+    def spy_claim(*a, **k):
+        claimed.append(a); return real_claim(*a, **k)
+    reader._store.claim = spy_claim
+    snap = reader.snapshot(sid)
+    assert snap.session_id == sid
+    assert claimed == [], 'snapshot is a read: it must never claim the lease'
+    cached = reader._sessions.get(sid)
+    assert cached is None or cached.pg_claim is None, \
+        'a read-restored session must not sit in the serve cache (a later serve must claim first)'
+
+
+def test_saver_write_conn_opens_lazily(tmp_path, monkeypatch):
+    # The saver's dedicated guarded-write connection must open on the first
+    # fenced write, not at construction: an idle session should not hold it.
+    from interview_engine import pg_checkpoint
+    from interview_engine.pg_checkpoint import FencedPostgresSaver, LeaseFence
+    conn = make_conn(tmp_path, name='pgdata-lazy')
+    opened = []
+    real_connect = psycopg.Connection.connect
+    def counting_connect(*a, **k):
+        opened.append(a); return real_connect(*a, **k)
+    monkeypatch.setattr(pg_checkpoint.psycopg.Connection, 'connect', staticmethod(counting_connect))
+    saver = FencedPostgresSaver(conn, lease=LeaseFence(str(uuid4()), 1, 1), claims=None)
+    try:
+        assert opened == [], 'guarded-write connection opened at construction; it must be lazy'
+        saver._write_conn  # first touch connects
+        assert len(opened) == 1
+    finally:
+        saver.close()
+
+
+def test_connection_budget_fits_pooler():
+    # Supabase pooler session mode: max 15 clients. delivery-api pins
+    # POOL_OPEN_MAX=6 (asserted in delivery-api's own budget test); this
+    # service peaks at ENGINE_PEAK_SESSION_CONNS per served session (registry
+    # serving, lease heartbeat, application base, lazy saver write conn).
+    from interview_engine.http_service import ENGINE_PEAK_SESSION_CONNS
+    assert ENGINE_PEAK_SESSION_CONNS == 4
+    assert 6 + 2 * ENGINE_PEAK_SESSION_CONNS <= 15, \
+        'delivery pool + two concurrent engine sessions must fit the pooler budget'

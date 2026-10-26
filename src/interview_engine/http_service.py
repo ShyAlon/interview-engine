@@ -64,6 +64,14 @@ class EngineSession:
             model_map=getattr(self.program,"model_map",None),route_version=self.route_version,route_history=self.route_history)
 
 
+# Pool connection budget (Supabase pooler, session mode: 15 clients max).
+# delivery-api pins POOL_OPEN_MAX=6; this service holds per SERVED session:
+# registry serving conn, lease heartbeat conn, application base conn, and the
+# saver's write conn (lazy since 2026-10-26: only during fenced writes).
+# Reads of parked sessions hold none. Two concurrent sessions: 6 + 2*4 = 14 <= 15.
+ENGINE_PEAK_SESSION_CONNS = 4
+
+
 class SessionRegistry:
     """Thread-safe application port behind the HTTP adapter."""
     def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=30.0,allow_db_provider_dispatch:bool=False):
@@ -186,7 +194,7 @@ class SessionRegistry:
 
     def snapshot(self,session_id:str)->EngineSnapshot:
         # Active control reads do not touch an in-flight graph or its write lock.
-        session=self.get(session_id)
+        session=self.get(session_id,serve=False)
         if session.published is None:raise KeyError(session_id)
         if session.stop_fence is not None and session.stop_fence.state:return session.snapshot()
         if session.pg_stopped:return session.snapshot()
@@ -280,14 +288,19 @@ class SessionRegistry:
                 self._sessions.pop(session.session_id,None)
             raise
 
-    def get(self, session_id: str) -> EngineSession:
+    def get(self, session_id: str, *, serve: bool = True) -> EngineSession:
+        # serve=False is the READ path (snapshot/status): restore the staged
+        # publication in memory only - never claim the lease, never start a
+        # heartbeat, never construct a graph, never publish. A read of a parked
+        # session must cost zero pool connections and leave the lease alone;
+        # the claimless restore is never cached, so a later serve claims first.
         with self._lock:
             session=self._sessions.get(session_id)
-            if session is None:
-                session=self._load(session_id)
-                if session is not None:self._sessions[session_id]=session
+            if session is None or (serve and self._store is not None and getattr(session,'pg_claim',None) is None):
+                session=self._load(session_id,serve=serve)
+                if session is not None and serve:self._sessions[session_id]=session
             if session is None: raise KeyError(session_id)
-            if session.published is None and (self._store is not None or (self._state_path(session_id) is not None and self._state_path(session_id).exists())):
+            if serve and session.published is None and (self._store is not None or (self._state_path(session_id) is not None and self._state_path(session_id).exists())):
                 self._publish(session)
             return session
 
@@ -688,8 +701,8 @@ class SessionRegistry:
         payload=self._serialize(session)
         temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(payload));temporary.replace(path)
 
-    def _load(self,session_id:str)->EngineSession|None:
-        if self._store is not None:return self._load_pg(session_id)
+    def _load(self,session_id:str,*,serve:bool=True)->EngineSession|None:
+        if self._store is not None:return self._load_pg(session_id,serve=serve)
         path=self._state_path(session_id)
         if path is None or not path.exists():return None
         payload=json.loads(path.read_text())
@@ -697,25 +710,51 @@ class SessionRegistry:
         self._ensure_stop_fence(session)
         if session.stop_fence is not None and session.stop_fence.requested:
             session.open_input=None
+            if not serve:session.published=session.snapshot()
             return session  # No restore, graph construction or implicit resume.
+        if not serve:return self._read_restore(session,payload,check_legacy_pin=True)
         return self._restore_program(session,payload)
 
-    def _load_pg(self,session_id:str)->EngineSession|None:
+    def _read_restore(self,session:EngineSession,payload:dict,*,check_legacy_pin:bool)->EngineSession:
+        # Read-only restore, rebuilt in memory from the published control
+        # payload only: no claim, heartbeat, graph or write. The legacy
+        # admission contract is preserved where the old read path enforced it:
+        # a legacy session with no pinned model route is unreadable (the
+        # snapshot route turns this into 422). File mode always enforced it
+        # (reads constructed); pg mode enforced it under the default factory.
+        if check_legacy_pin and not payload.get("model_map"):
+            raise UserFacingError("legacy session has no pinned model route.","It predates per-session routing.","Start a new session.")
+        # The served snapshot reads model_route/model_map off the constructed
+        # program; a read constructs nothing, so carry the pinned map on a
+        # stand-in. This restore is never cached or served (get(serve=False)).
+        from types import SimpleNamespace
+        session.program=SimpleNamespace(model_route=None,model_map=payload.get("model_map"))
+        session.published=session.snapshot()
+        return session
+
+    def _load_pg(self,session_id:str,*,serve:bool=True)->EngineSession|None:
         # Claim-before-serve: no claim, no restore. The winner restores only
         # from the staged publication (control payload + pointer), never from
         # saver-latest checkpoint rows.
         owner=self._pg_owner()
-        claim=self._store.claim(session_id,owner,self._instance,self._lease_ttl)
-        if claim is None:return None
+        claim=None
+        if serve:
+            claim=self._store.claim(session_id,owner,self._instance,self._lease_ttl)
+            if claim is None:return None
         row=self._store.load_published(session_id,owner)
         if row is None or row.get('control') is None:return None
         payload=dict(row['control'])
         session=self._restore_payload(payload,session_id)
-        session.pg_claim=claim
         if payload.get('stopped'):
             session.pg_stopped=True
             session.open_input=None
+            if not serve:
+                session.published=session.snapshot()
+                return session
+            session.pg_claim=claim
             return session  # Stopped sessions never construct or resume a graph.
+        if not serve:return self._read_restore(session,payload,check_legacy_pin=self._program_factory is default_program_factory)
+        session.pg_claim=claim
         self._start_heartbeat(session)
         return self._restore_program(session,payload,published_checkpoint_id=row.get('published_checkpoint_id'))
 

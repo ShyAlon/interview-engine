@@ -118,14 +118,22 @@ class FencedPostgresSaver(PostgresSaver):
         self._claims = claims if claims is not None else getattr(conn, 'claims', None)
         # Guarded writes use a dedicated connection: graph nodes run on worker
         # threads and the base saver drives its connection in pipeline mode,
-        # so sharing it for fenced statements corrupts the pipeline.
-        if self._claims is not None:
-            from .pg_claims import connect_claimed, reconnect_dsn
-            self._write_conn = connect_claimed(reconnect_dsn(conn), *self._claims, autocommit=False)
-        else:
-            from .pg_claims import reconnect_dsn
-            self._write_conn = psycopg.Connection.connect(reconnect_dsn(conn), autocommit=False)
+        # so sharing it for fenced statements corrupts the pipeline. It opens
+        # LAZILY on the first guarded write: a session waiting for input must
+        # not hold a pool connection it is not using (pooler budget).
+        self._write_conn_raw = None
         self._write_lock = threading.Lock()
+
+    @property
+    def _write_conn(self):
+        if self._write_conn_raw is None:
+            from .pg_claims import reconnect_dsn
+            if self._claims is not None:
+                from .pg_claims import connect_claimed
+                self._write_conn_raw = connect_claimed(reconnect_dsn(self.conn), *self._claims, autocommit=False)
+            else:
+                self._write_conn_raw = psycopg.Connection.connect(reconnect_dsn(self.conn), autocommit=False)
+        return self._write_conn_raw
 
     @contextmanager
     def _cursor(self, *, pipeline: bool = False):
@@ -152,7 +160,9 @@ class FencedPostgresSaver(PostgresSaver):
                         yield cur
 
     def close(self):
-        self._write_conn.close()
+        if self._write_conn_raw is not None:
+            self._write_conn_raw.close()
+            self._write_conn_raw = None
 
     def setup(self) -> None:
         # The checkpoint schema is migration-owned (delivery-api pre-records
