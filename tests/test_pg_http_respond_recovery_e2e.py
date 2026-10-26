@@ -10,6 +10,7 @@ import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
 
+from conftest import managed_pool
 from vmodel_contracts.interactive import ProtocolErrorCode, ProcessStatus
 
 from interview_engine.http_service import SessionRegistry, default_program_factory, create_app

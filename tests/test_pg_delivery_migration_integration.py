@@ -99,7 +99,7 @@ def test_fenced_checkpoint_roundtrip_under_app_role():
     sid = 'ita-cp-' + time.strftime('%H%M%S')
     store.create(sid, 'ita', A)
     claim = store.claim(sid, A, 'integration#1', ttl=60)
-    saver = FencedPostgresSaver(conn, lease=LeaseFence(sid, claim.generation, claim.epoch))
+    saver = FencedPostgresSaver(managed_pool(conn.info.dsn), lease=LeaseFence(sid, claim.generation, claim.epoch))
     saver.setup()  # migration pre-recorded v10: a SELECT, no DDL, under the app role
     cfg = {'configurable': {'thread_id': sid, 'checkpoint_ns': '', 'checkpoint_id': ''}}
     checkpoint = {'v': 4, 'ts': '2026-10-22T14:00:00+00:00', 'id': '00000000-0000-4000-8000-0000000000c1',

@@ -88,7 +88,7 @@ def test_program_driven_to_typed_input_and_completion(tmp_path):
     reply = {'protocol_version': 1, 'input_id': pending['input_id'], 'value': 'players', 'actor_id': 'founder'}
     done = client.post(f"/v1/sessions/{started['snapshot']['session_id']}/inputs/{pending['input_id']}", json=reply).json()
     assert done['snapshot']['process_status'] == ProcessStatus.COMPLETED
-    row = PgSessionStore(_OPEN['conns'][-1]).load_published(started['snapshot']['session_id'], OWNER)
+    row = PgSessionStore(managed_pool(_OPEN['conns'][-1].info.dsn)).load_published(started['snapshot']['session_id'], OWNER)
     assert row['control']['status'] == int(ProcessStatus.COMPLETED)
 
 
@@ -156,7 +156,7 @@ def test_stop_blocks_inputs_and_persists(tmp_path):
     sid = started['snapshot']['session_id']
     pending = started['snapshot']['open_input']
     registry.stop(sid)
-    row = PgSessionStore(_OPEN['conns'][-1]).load_published(sid, OWNER)
+    row = PgSessionStore(managed_pool(_OPEN['conns'][-1].info.dsn)).load_published(sid, OWNER)
     assert row['control']['stopped'] is True
     r = client.post(f"/v1/sessions/{sid}/inputs/{pending['input_id']}", json={
         'protocol_version': 1, 'input_id': pending['input_id'], 'value': 'players', 'actor_id': 'founder'})
