@@ -117,10 +117,11 @@ class FencedPostgresSaver(PostgresSaver):
         # threads and the base saver drives its connection in pipeline mode,
         # so sharing it for fenced statements corrupts the pipeline.
         if self._claims is not None:
-            from .pg_claims import connect_claimed
-            self._write_conn = connect_claimed(conn.info.dsn, *self._claims, autocommit=False)
+            from .pg_claims import connect_claimed, reconnect_dsn
+            self._write_conn = connect_claimed(reconnect_dsn(conn), *self._claims, autocommit=False)
         else:
-            self._write_conn = psycopg.Connection.connect(conn.info.dsn, autocommit=False)
+            from .pg_claims import reconnect_dsn
+            self._write_conn = psycopg.Connection.connect(reconnect_dsn(conn), autocommit=False)
         self._write_lock = threading.Lock()
 
     @contextmanager

@@ -81,10 +81,10 @@ class PgSessionStore:
         import psycopg.rows
         from .pg_diagnostics import tag_stage
         try:
+            from .pg_claims import connect_claimed, reconnect_dsn
             if self.claims is not None:
-                from .pg_claims import connect_claimed
-                return PgSessionStore(connect_claimed(self.conn.info.dsn, *self.claims, autocommit=False))
-            return PgSessionStore(psycopg.connect(self.conn.info.dsn, autocommit=False,
+                return PgSessionStore(connect_claimed(reconnect_dsn(self.conn), *self.claims, autocommit=False))
+            return PgSessionStore(psycopg.connect(reconnect_dsn(self.conn), autocommit=False,
                                                   row_factory=psycopg.rows.dict_row))
         except Exception as exc:
             raise tag_stage(exc, "connect") from exc
@@ -265,12 +265,12 @@ class PgSessionStore:
         stale pre-takeover writer cannot touch the new generation's rows.
         """
         if self._staging_conn is None or self._staging_conn.closed:
+            from .pg_claims import connect_claimed, reconnect_dsn
             if self.claims is not None:
-                from .pg_claims import connect_claimed
-                self._staging_conn = connect_claimed(self.conn.info.dsn, *self.claims,
+                self._staging_conn = connect_claimed(reconnect_dsn(self.conn), *self.claims,
                                                      autocommit=False)
             else:
-                self._staging_conn = psycopg.connect(self.conn.info.dsn, autocommit=True,
+                self._staging_conn = psycopg.connect(reconnect_dsn(self.conn), autocommit=True,
                                                      row_factory=psycopg.rows.dict_row)
         return self._staging_conn
 
