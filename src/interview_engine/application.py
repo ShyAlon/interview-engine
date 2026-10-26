@@ -24,6 +24,23 @@ from . import session_models, model_config
 _log=logging.getLogger("interview_engine.application")
 
 
+def _graph_tenant_claims(pg_store,pg_claim):
+    """(owner, auth-session) tenant claims for the graph's Postgres connections.
+
+    The claims' session GUC must name a live AUTH session: delivery's forced
+    RLS (20261007150000, requi_session_active()) checks
+    request.jwt.claim.session_id against auth.sessions, and the store carries
+    that pair - tenant_worker builds one registry per (owner, auth session).
+    pg_claim.session_id is the INTERVIEW session (the lease fence identity);
+    claiming with it reads every FORCE-RLS tenant table as empty, which was the
+    2026-10-26 'session-row-missing' guard-lock rejection. Claimless stores
+    (mirrored-DDL superuser tests) keep the legacy pair.
+    """
+    claims=getattr(pg_store,'claims',None)
+    if claims is not None:return claims
+    return (pg_claim.owner_id,pg_claim.session_id)
+
+
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
     def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None):
@@ -47,7 +64,8 @@ class InterviewApplication:
             from .pg_checkpoint import FencedPostgresSaver, LeaseFence
             from .pg_claims import connect_claimed, reconnect_dsn
             t_pg=time.monotonic();_log.info("pg.connect.begin session=%s",session_id)
-            pg_conn=connect_claimed(reconnect_dsn(pg_store.conn),pg_claim.owner_id,pg_claim.session_id,autocommit=True)
+            tenant_claims=_graph_tenant_claims(pg_store,pg_claim)
+            pg_conn=connect_claimed(reconnect_dsn(pg_store.conn),*tenant_claims,autocommit=True)
             _log.info("pg.connect.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_pg)*1000))
             from . import model_config as _mc
             self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
@@ -55,7 +73,7 @@ class InterviewApplication:
             saver=FencedPostgresSaver(pg_conn,
                 lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
                 serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
-                claims=(pg_claim.owner_id,pg_claim.session_id))
+                claims=tenant_claims)
             t_setup=time.monotonic();_log.info("saver.setup.begin session=%s",session_id)
             saver.setup()
             _log.info("saver.setup.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_setup)*1000))

@@ -651,3 +651,27 @@ def test_registry_crash_mid_advance_staged_pause_no_rebill(tmp_path, fake_ollama
             restored.program.advance(answer)
     assert len(gw.reserved) == reserves_after_start + 1, 'resume reserved a new attempt for an unknown outcome'
     assert len(fake_models['probing'].replies) == probing_before, 'provider re-called during the paused replay'
+
+
+def test_application_pg_uses_store_tenant_claims_not_lease_claim(tmp_path, fake_ollama, fake_models):
+    # The graph's Postgres connections must carry the store's (owner, auth
+    # session) tenant claims: forced RLS (delivery 20261007150000) admits rows
+    # only while request.jwt.claim.session_id names a live auth session. The
+    # lease claim's session_id is the INTERVIEW session - never an auth
+    # session - so claiming with it reads every tenant table as empty, the
+    # 2026-10-26 'session-row-missing' guard-lock rejection.
+    auth_session = '22222222-2222-4222-8222-222222222222'
+    store = PgSessionStore(make_conn(tmp_path), claims=(OWNER, auth_session))
+    store.create('s1', 'task-1', OWNER)
+    claim = store.claim('s1', OWNER, 'inst#1', ttl=60)
+    app = InterviewApplication('s1', 'task-1', 'idea', model_route='ollama', initial_model='phi4',
+                               artifact_root=str(tmp_path / 'artifacts'),
+                               pg_store=store, pg_claim=claim)
+    try:
+        assert claim.session_id == 's1' != auth_session
+        assert app.saver._claims == (OWNER, auth_session)
+        assert app.saver.conn.claims == (OWNER, auth_session)
+        assert app.saver._write_conn.claims == (OWNER, auth_session)
+    finally:
+        app.saver.conn.close()
+        app.saver._write_conn.close()
