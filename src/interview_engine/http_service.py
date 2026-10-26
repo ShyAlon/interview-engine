@@ -117,14 +117,18 @@ class SessionRegistry:
                     except Exception:
                         failures+=1
                         log.warning('session lease heartbeat failed session=%s failures=%d',claim.session_id,failures,exc_info=True)
-                        if failures>=5:return   # lease expires on its own; fences close
+                        if failures>=5:
+                            log.warning('session lease heartbeat giving up session=%s after %d failures - the lease will lapse and fenced writes will fail closed',claim.session_id,failures)
+                            return   # lease expires on its own; fences close
                         continue
                     failures=0
                     if not alive:
+                        log.warning('session lease heartbeat lost session=%s - the lease is no longer held; session marked stopped and fenced writes will fail closed',claim.session_id)
                         session.pg_stopped=True
                         return
             finally:
                 store.conn.close()
+        log.info('session lease heartbeat started session=%s interval=%.1fs ttl=%.1fs',claim.session_id,interval,self._lease_ttl)
         session.pg_heartbeat_thread=threading.Thread(target=beat,daemon=True,name=f"lease-heartbeat-{claim.session_id}")
         session.pg_heartbeat_thread.start()
 
@@ -260,13 +264,15 @@ class SessionRegistry:
                         self._publish(session)
             log.info("start.return session=%s seq=%s status=%s next_step=%s open_input=%s",session.session_id,session.sequence,int(session.status),int(session.next_step),'null' if session.open_input is None else 'set')
             return session,started
-        except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested:
-            log.warning("stop.swallowed session=%s task=%s reason=stop-requested - start returns success with open_input=null",session.session_id,request.task_id)
+        except __import__('interview_engine.stop_fence',fromlist=['StopRequested']).StopRequested as exc:
+            # The reason string alone used to hide WHICH fence tripped; the
+            # swallowed exception's own message names the raise site.
+            log.warning("stop.swallowed session=%s task=%s reason=stop-requested cause=%s: %s - start returns success with open_input=null",session.session_id,request.task_id,type(exc).__name__,str(exc)[:300])
             session.open_input=None
             return session,started
-        except Exception:
+        except Exception as exc:
             if session.stop_fence is not None and session.stop_fence.requested:
-                log.warning("stop.swallowed session=%s task=%s reason=fence-requested - start returns success with open_input=null",session.session_id,request.task_id)
+                log.warning("stop.swallowed session=%s task=%s reason=fence-requested cause=%s: %s - start returns success with open_input=null",session.session_id,request.task_id,type(exc).__name__,str(exc)[:300])
                 session.open_input=None
                 return session,started
             log.exception("model.route.start.failed session=%s task=%s selected=%s",session.session_id,request.task_id,request.model_route)

@@ -3,10 +3,12 @@
 No signals, graph mutation, artifact deletion or provider cancellation. This is
 an uninstalled primitive; registry/publication/checkpointer wiring is separate.
 """
-import json,os,threading,fcntl
+import json,logging,os,threading,fcntl
 from pathlib import Path
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+log=logging.getLogger("interview_engine.stop_fence")
 
 class StopRequested(RuntimeError):pass
 class SessionWriterBusy(RuntimeError):pass
@@ -140,13 +142,17 @@ class StopFence:
         # Caller must prove no prior process/thread can still write. Loading the
         # marker by itself does not prove this and never unlocks Delete.
         with self.marker_guard():
-            if no_live_worker is not True or self.active or self._external_writer_active():raise StopRequested('worker quiescence unverified')
+            if no_live_worker is not True or self.active or self._external_writer_active():
+                log.warning("stop.fence.tripped site=quiescence path=%s no_live_worker=%s active=%s external_writer=%s",self.path,no_live_worker,self.active,self._external_writer_active())
+                raise StopRequested('worker quiescence unverified')
             self.recovery_pending=False
             return self.state
 
     def check(self,generation):
         with self.marker_guard():
-            if self.requested or generation!=self.generation:raise StopRequested('session stop requested')
+            if self.requested or generation!=self.generation:
+                log.warning("stop.fence.tripped site=check path=%s requested=%s expected_generation=%s seen_generation=%s",self.path,self.requested,self.generation,generation)
+                raise StopRequested('session stop requested')
 
     @contextmanager
     def running(self):
@@ -193,5 +199,7 @@ def track_inflight_worker():
 
 def record_stopped_usage(response,*,stage,provider,model):
     sink=_stopped_usage.get()
-    if sink is None:raise StopRequested('stopped response usage sink unavailable')
+    if sink is None:
+        log.warning("stop.fence.tripped site=stopped-usage-sink stage=%s provider=%s model=%s",stage,provider,model)
+        raise StopRequested('stopped response usage sink unavailable')
     sink(response,stage=stage,provider=provider,model=model)

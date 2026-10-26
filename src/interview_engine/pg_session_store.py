@@ -36,6 +36,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from dataclasses import dataclass
 import psycopg
 
 from .stop_fence import StopRequested
+
+log = logging.getLogger("interview_engine.pg_session_store")
 
 
 class PublicationConflict(Exception):
@@ -184,6 +187,35 @@ class PgSessionStore:
             raise
         return row is not None
 
+    def _fence_diagnose(self, claim: SessionClaim, what: str) -> None:
+        """Best-effort read of the current lease row after a fence rejected a
+        write: logs which predicate failed (owner / generation / epoch /
+        expiry) so a swallowed StopRequested is diagnosable from logs alone.
+        Read-only; a failed diagnostic never masks the original rejection."""
+        try:
+            row = self.conn.execute(
+                "SELECT generation, lease_epoch, lease_expires_at, placement_instance"
+                " FROM engine_sessions WHERE session_id = %(sid)s",
+                {"sid": claim.session_id}).fetchone()
+            if row is None:
+                log.warning("lease.fence.rejected what=%s session=%s reason=session-row-missing expected gen=%s epoch=%s",
+                            what, claim.session_id, claim.generation, claim.epoch)
+                return
+            now = time.time()
+            reasons = []
+            if row["generation"] != claim.generation:
+                reasons.append("generation %s != %s" % (row["generation"], claim.generation))
+            if row["lease_epoch"] != claim.epoch:
+                reasons.append("lease_epoch %s != %s" % (row["lease_epoch"], claim.epoch))
+            if not (row["lease_expires_at"] or 0) > now:
+                reasons.append("lease expired %.1fs ago (ttl lapsed)" % (now - (row["lease_expires_at"] or 0)))
+            log.warning("lease.fence.rejected what=%s session=%s reason=%s expected gen=%s epoch=%s instance=%s",
+                        what, claim.session_id, "; ".join(reasons) or "no predicate mismatch (owner or race)",
+                        claim.generation, claim.epoch, row["placement_instance"])
+        except Exception as diag_exc:
+            log.warning("lease.fence.rejected what=%s session=%s diagnostic-read-failed %s: %s",
+                        what, claim.session_id, type(diag_exc).__name__, str(diag_exc)[:200])
+
     def fenced_save(self, claim: SessionClaim, control: dict, *,
                     published_thread_id: str | None = None,
                     published_checkpoint_ns: str = "",
@@ -209,6 +241,7 @@ class PgSessionStore:
             raise
         if row is None:
             self.conn.rollback()
+            self._fence_diagnose(claim, "save")
             raise StopRequested("session lease fence rejected the save")
         self.conn.commit()
 
@@ -359,6 +392,7 @@ class PgSessionStore:
                     self.conn.commit()
                     return  # page already staged at this cursor; immutable, kept
                 self.conn.rollback()
+                self._fence_diagnose(claim, "journal append")
                 raise StopRequested("session lease fence rejected the journal append")
             self.conn.commit()
         except Exception as exc:
@@ -419,6 +453,7 @@ class PgSessionStore:
             raise
         if row is None:
             self.conn.rollback()
+            self._fence_diagnose(claim, "publication")
             raise StopRequested("session lease fence rejected the publication")
         prior = row["control"] or {}
         prior_seq = prior.get("sequence", 0)
