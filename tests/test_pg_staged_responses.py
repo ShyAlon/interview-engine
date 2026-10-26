@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from contextlib import contextmanager
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 from interview_engine.pg_session_store import PgSessionStore, PublicationConflict
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_STAGING_DDL
 
@@ -27,7 +27,7 @@ def store(tmp_path):
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_STAGING_DDL)
     conn.commit()
-    s = PgSessionStore(conn)
+    s = PgSessionStore(managed_pool(server.get_uri()))
     s.create('s1', 'task1', OWNER_A)
     return s
 
@@ -124,7 +124,6 @@ def test_crash_replay_same_logical_call_reuses_staged_bytes(store, claim, monkey
     msgs = [HumanMessage(content='name the scope')]
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         first = invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
-        store.conn.commit()
     # Process/crash boundary: brand-new staging context (cursors reset), same store.
     with staging_env(store, claim, gw, monkeypatch) as (ctx2, calls2):
         second = invoke(msgs, transport_calls=lambda m, c: _transport(calls2, m, c))
@@ -145,7 +144,6 @@ def test_dispatched_without_response_pauses_no_rerun(store, claim, monkeypatch):
         fp = mc._staging_request_sha(type('C', (), {'provider': 'fake', 'model': 'fake-1', 'max_tokens': 100})(), msgs, 'scope_tiebreak', None)
         store.record_dispatch(claim, execution_point='bootstrap:0', node='', stage='scope_tiebreak', item='', ordinal=0,
                               request_sha256=fp, provider='fake', model='fake-1')
-        store.conn.commit()
         from interview_engine.errors import UserFacingError
         with pytest.raises(UserFacingError, match='result is missing'):
             invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
@@ -159,7 +157,6 @@ def test_diverged_replay_pauses(store, claim, monkeypatch):
     gw = FakeGateway()
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         invoke([HumanMessage(content='original')], transport_calls=lambda m, c: _transport(calls, m, c))
-        store.conn.commit()
     with staging_env(store, claim, gw, monkeypatch) as (ctx2, calls2):
         from interview_engine.errors import UserFacingError
         with pytest.raises(UserFacingError, match='does not match'):
@@ -177,7 +174,6 @@ def test_billable_empty_response_is_staged_and_retry_is_new_attempt(store, claim
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, '   '))
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, '{"ok": true}'))
-        store.conn.commit()
     log = store.staged_log('s1', claim.generation, execution_point='bootstrap:0', node='', stage='scope_tiebreak')
     assert len(log) == 2 and log[0]['response'] is not None and log[1]['response'] is not None
     assert len(gw.reserved) == 2
@@ -192,7 +188,6 @@ def test_serialization_exactness_roundtrip(store, claim, monkeypatch):
                      usage_metadata={'input_tokens': 9, 'output_tokens': 8, 'total_tokens': 17})
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         invoke([HumanMessage(content='use a tool')], transport_calls=lambda m, c: rich)
-        store.conn.commit()
     with staging_env(store, claim, gw, monkeypatch) as (ctx2, calls2):
         replayed = invoke([HumanMessage(content='use a tool')], transport_calls=lambda m, c: _transport(calls2, m, c))
     assert len(calls2) == 0
@@ -207,7 +202,7 @@ def test_completion_is_append_once(store, claim):
     store.complete_staged(c, execution_point='bootstrap:0', node='', stage='s', item='', ordinal=0, response={'v': 1}, usage=None)
     with pytest.raises(PublicationConflict):
         store.complete_staged(c, execution_point='bootstrap:0', node='', stage='s', item='', ordinal=0, response={'v': 2}, usage=None)
-    store.conn.rollback()
+    # borrow guard rolled the failed call back on checkout return
 
 
 def test_replay_settles_unsettled_attempt_from_staged_usage_before_returning(store, claim, monkeypatch):
@@ -222,7 +217,6 @@ def test_replay_settles_unsettled_attempt_from_staged_usage_before_returning(sto
         # Simulate the complete/before-settle crash window: the staged row holds the
         # trusted result+usage, but the ledger attempt never settled.
         gw._settled_usage.clear()
-        store.conn.commit()
     with staging_env(store, claim, gw, monkeypatch) as (ctx2, calls2):
         second = invoke(msgs, transport_calls=lambda m, c: _transport(calls2, m, c))
     assert second.content == '{"answer": 42}'
@@ -240,7 +234,6 @@ def test_replay_pauses_when_staged_settlement_fails(store, claim, monkeypatch):
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
         gw._settled_usage[gw.reserved[0]] = {'input_tokens': 999}  # ledger disagrees
-        store.conn.commit()
     from interview_engine.errors import UserFacingError
     with staging_env(store, claim, gw, monkeypatch) as (ctx2, calls2):
         with pytest.raises(UserFacingError, match='billing is unreconciled'):
@@ -256,7 +249,6 @@ def test_identical_prompt_under_new_execution_point_is_a_new_paid_call(store, cl
     msgs = [HumanMessage(content='same question, later turn')]
     with staging_env(store, claim, gw, monkeypatch) as (ctx, calls):
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
-        store.conn.commit()
         ctx.set_execution_point('checkpoint-2', 0)  # the step committed; a new turn begins
         invoke(msgs, transport_calls=lambda m, c: _transport(calls, m, c))
     assert len(calls) == 2 and len(gw.reserved) == 2

@@ -4,7 +4,7 @@ import time
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed: PG journal tests skip')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 
 import psycopg
 import psycopg.rows
@@ -24,7 +24,7 @@ def make_store(tmp_path):
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_JOURNAL_DDL)
     conn.commit()
-    return PgSessionStore(conn)
+    return PgSessionStore(managed_pool(conn.info.dsn))
 
 
 def signal(session, cursor, label):
@@ -193,7 +193,7 @@ def test_mid_transaction_failure_leaves_no_partial_publication(tmp_path):
                            journal_page=signal('s1', 1, 'one'),
                            published_thread_id='s1', published_checkpoint_id='cp-1',
                            fault_hook=boom)
-    store.conn.rollback()  # caller's duty after an unexpected failure, like a crashed worker
+    # no explicit rollback: the pool borrow guard rolls back anything a failed call left open
     published = store.load_published('s1', OWNER)
     assert published['control'] is None and published['published_checkpoint_id'] is None
     assert store.read_journal('s1', OWNER, 0, 10) == []

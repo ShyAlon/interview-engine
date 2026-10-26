@@ -8,7 +8,7 @@ crashed call pauses with attempt evidence."""
 import pytest
 
 pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
-from conftest import managed_pg_server
+from conftest import managed_pg_server, managed_pool
 import psycopg
 import psycopg.rows
 from typing import Annotated
@@ -40,17 +40,19 @@ def make_store(tmp_path):
     conn.execute(MIRRORED_REGISTRY_DDL)
     conn.execute(MIRRORED_STAGING_DDL)
     conn.commit()
-    store = PgSessionStore(conn)
+    pool = managed_pool(server.get_uri())
+    store = PgSessionStore(pool)
     store.create('s1', 'task1', OWNER)
     claim = store.claim('s1', OWNER, 'host#1', ttl=600)
     assert claim is not None
     saver_conn = psycopg.connect(server.get_uri(), autocommit=True)
     bootstrap_checkpoint_schema(saver_conn)
-    return store, claim, saver_conn
+    saver_conn.close()
+    return store, claim, pool
 
 
-def make_saver(saver_conn, claim):
-    return FencedPostgresSaver(saver_conn, lease=LeaseFence('s1', claim.generation, claim.epoch))
+def make_saver(pool, claim):
+    return FencedPostgresSaver(pool, lease=LeaseFence('s1', claim.generation, claim.epoch))
 
 
 def latest_ckpt(saver):
@@ -90,10 +92,10 @@ def test_loop_crash_after_partial_checkpoint_resume_replays_and_pauses(tmp_path)
     with the same input (the application's real resume shape): the completed
     calls replay WITHOUT provider calls or new ledger attempts; the crashed call
     pauses with its attempt id."""
-    store, claim, saver_conn = make_store(tmp_path)
+    store, claim, pool = make_store(tmp_path)
     gw = FakeGateway()
     staging = mc.StagingContext('s1', store, claim)
-    saver = make_saver(saver_conn, claim)
+    saver = make_saver(pool, claim)
     app = loop_graph(saver, calls := [])
     cfg = {'configurable': {'thread_id': 's1'}}
     token = mc._response_staging.set(staging)
@@ -114,7 +116,7 @@ def test_loop_crash_after_partial_checkpoint_resume_replays_and_pauses(tmp_path)
 
     # Resume: fresh process state (new StagingContext), same anchor, same input.
     staging2 = mc.StagingContext('s1', store, claim)
-    saver2 = make_saver(saver_conn, claim)
+    saver2 = make_saver(pool, claim)
     app3 = loop_graph(saver2, calls2 := [])
     token = mc._response_staging.set(staging2)
     with aa.admission_gateway(gw, required=True):
@@ -126,9 +128,8 @@ def test_loop_crash_after_partial_checkpoint_resume_replays_and_pauses(tmp_path)
     assert calls2 == [], f'completed calls must replay, not re-invoke: {calls2}'
     assert len(gw.reserved) == 7, 'no new ledger attempt during replay+pause'
     # The crashed call's staged row (dispatched, no response) is the pause evidence.
-    with store.conn.cursor() as cur:
-        cur.execute("SELECT node, attempt_id FROM staged_provider_responses WHERE session_id='s1' AND response IS NULL")
-        open_rows = cur.fetchall()
+    with store._borrow() as c:
+        open_rows = c.execute("SELECT node, attempt_id FROM staged_provider_responses WHERE session_id='s1' AND response IS NULL").fetchall()
     assert len(open_rows) == 1 and open_rows[0]['node'] == 'a' and open_rows[0]['attempt_id'] == gw.uncertain_calls[0]
 
 
@@ -136,10 +137,10 @@ def test_parallel_nodes_stage_and_replay_under_their_own_node_identity(tmp_path)
     """Two parallel nodes (same super-step, same stage) stage under distinct node
     identities; a resume of the SAME turn replays each under its own key with no
     provider calls and no new ledger attempts - no cross-node mix."""
-    store, claim, saver_conn = make_store(tmp_path)
+    store, claim, pool = make_store(tmp_path)
     gw = FakeGateway()
     staging = mc.StagingContext('s1', store, claim)
-    saver = make_saver(saver_conn, claim)
+    saver = make_saver(pool, claim)
 
     def parallel_graph(sv, calls):
         g = StateGraph(S)
@@ -164,15 +165,14 @@ def test_parallel_nodes_stage_and_replay_under_their_own_node_identity(tmp_path)
     mc._response_staging.reset(token)
     assert len(calls) == 4
     # Each (execution_point, node) pair staged exactly once per turn: no collision.
-    with store.conn.cursor() as cur:
-        cur.execute("SELECT execution_point, node, count(*) AS n FROM staged_provider_responses GROUP BY 1, 2 ORDER BY 1, 2")
-        rows = cur.fetchall()
+    with store._borrow() as c:
+        rows = c.execute("SELECT execution_point, node, count(*) AS n FROM staged_provider_responses GROUP BY 1, 2 ORDER BY 1, 2").fetchall()
     assert len(rows) == 4 and all(r['n'] == 1 for r in rows)
     assert sorted(r['node'] for r in rows) == ['x', 'x', 'y', 'y']
 
     # Resume turn 2 from the same anchor with the same input: both replay.
     staging2 = mc.StagingContext('s1', store, claim)
-    saver2 = make_saver(saver_conn, claim)
+    saver2 = make_saver(pool, claim)
     calls2 = []
     app2 = parallel_graph(saver2, calls2)
     token = mc._response_staging.set(staging2)

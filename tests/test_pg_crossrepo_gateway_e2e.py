@@ -1,3 +1,4 @@
+from conftest import managed_pool
 """Cross-repo acceptance: the interview engine's staged paid calls against the
 REAL delivery-api WorkerAdmissionGateway + provider-attempt ledger, over the
 REAL migration chain (pg_harness), through the registry respond path and the
@@ -121,7 +122,7 @@ def crossrepo(tmp_path, fake_ollama, fake_models, monkeypatch):
         return _TxGateway(job)
 
     engine_conn = psycopg.connect(dsn, autocommit=False, row_factory=psycopg.rows.dict_row)
-    engine_store = PgSessionStore(engine_conn)
+    engine_store = PgSessionStore(managed_pool(engine_conn.info.dsn))
     _OPEN['conns'].append(engine_conn)
     from interview_engine.pg_checkpoint import bootstrap_checkpoint_schema
     bootstrap = psycopg.connect(dsn, autocommit=True)
@@ -201,7 +202,7 @@ def test_replay_settles_existing_attempt_once_then_zero_ledger_changes(crossrepo
     # the graph sees the result; no new attempt, no provider re-call for it.
     registry.close()
     time.sleep(1.2)
-    registry2 = _registry(PgSessionStore(store.conn), 'w#2', crossrepo['owner'])
+    registry2 = _registry(PgSessionStore(store.pool), 'w#2', crossrepo['owner'])
     with tenant_context(scope):
         with aa.admission_gateway(real_gw, required=True):
             registry2.respond(crossrepo['sid'], answer)
@@ -243,7 +244,7 @@ def test_crash_during_provider_call_marks_uncertain_and_replay_pauses(crossrepo)
     # provider call, no auto-settle of the unknown outcome.
     registry.close()
     time.sleep(1.2)
-    registry2 = _registry(PgSessionStore(store.conn), 'w#2', crossrepo['owner'])
+    registry2 = _registry(PgSessionStore(store.pool), 'w#2', crossrepo['owner'])
     with tenant_context(scope):
         with aa.admission_gateway(real_gw, required=True):
             with pytest.raises(UserFacingError, match='Reconcile|result is missing'):
@@ -315,7 +316,7 @@ def test_http_answer_idempotency_across_restart(crossrepo):
 
     registry.close()
     time.sleep(1.2)
-    registry2 = _registry(PgSessionStore(store.conn), 'w#2', crossrepo['owner'])
+    registry2 = _registry(PgSessionStore(store.pool), 'w#2', crossrepo['owner'])
     client2 = make_client(registry2)
     replayed = respond(client2, open_input['input_id'])
     assert replayed.status_code == 200, replayed.text

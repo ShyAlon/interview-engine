@@ -38,7 +38,7 @@ def _respond(client, input_id, value='customers book online'):
 
 def test_http_respond_crash_retry_restart_and_idempotent_replay(tmp_path, fake_ollama, fake_models):
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True,
                                session_store=store, owner_id=OWNER, instance_id='w#1', lease_ttl=1.0)
     client = _make(registry)
@@ -80,7 +80,7 @@ def test_http_respond_crash_retry_restart_and_idempotent_replay(tmp_path, fake_o
     registry.close()
     time.sleep(1.2)  # let w#1's lease expire so w#2 can claim the restore
     registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True,
-                                session_store=PgSessionStore(conn), owner_id=OWNER,
+                                session_store=PgSessionStore(managed_pool(conn.info.dsn)), owner_id=OWNER,
                                 instance_id='w#2', lease_ttl=60.0)
     client2 = _make(registry2)
     restored = client2.get(f'/v1/sessions/{SID}')

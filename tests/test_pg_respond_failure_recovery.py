@@ -20,7 +20,7 @@ def test_respond_crash_mid_advance_original_error_and_clean_retry(tmp_path, fake
     the SAME answer retries successfully - the response idempotency cache
     reconciles, no double advance."""
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -57,7 +57,7 @@ def test_respond_crash_after_restart_same_behavior(tmp_path, fake_ollama, fake_m
     """The failure path survives a process boundary: crash mid-advance, restore on
     a new registry, re-answer, heal, retry - same durable guarantees."""
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=1.0)
     _OPEN['registries'].append(registry)
@@ -77,7 +77,7 @@ def test_respond_crash_after_restart_same_behavior(tmp_path, fake_ollama, fake_m
 
     registry.close()
     time.sleep(1.2)
-    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(conn),
+    registry2 = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=PgSessionStore(managed_pool(conn.info.dsn)),
                                 owner_id=OWNER, instance_id='w#2', lease_ttl=60.0)
     _OPEN['registries'].append(registry2)
     restored = registry2.get(SID)
@@ -95,7 +95,7 @@ def test_respond_stale_input_fails_before_advance(tmp_path, fake_ollama, fake_mo
     protocol error; nothing moves, no model call."""
     from interview_engine.http_service import ProtocolFailure
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -116,7 +116,7 @@ def test_respond_tail_precommit_failure_evicts_and_retry_advances_once(tmp_path,
     the retry cannot be short-circuited by stale in-memory response idempotency;
     the reloaded session re-advances exactly once."""
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -146,7 +146,7 @@ def test_respond_tail_lost_ack_serves_committed_outcome(tmp_path, fake_ollama, f
     registry reconciles from the durable store and serves the committed outcome;
     the retry is an idempotent accept, never a double advance."""
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
@@ -179,7 +179,7 @@ def test_journal_acknowledge_failure_serves_committed_without_duplicate_pages(tm
     the committed outcome is served and the committed pages are not duplicated on
     the next step."""
     conn = make_conn(tmp_path)
-    store = PgSessionStore(conn)
+    store = PgSessionStore(managed_pool(conn.info.dsn))
     registry = SessionRegistry(default_program_factory, allow_db_provider_dispatch=True, session_store=store, owner_id=OWNER,
                                instance_id='w#1', lease_ttl=60.0)
     _OPEN['registries'].append(registry)
