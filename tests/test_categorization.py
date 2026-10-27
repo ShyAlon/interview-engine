@@ -21,19 +21,41 @@ def test_chain_fails_loudly_after_all_providers():
         ProviderChain('scope',[Provider('rules',error=ValueError('bad'))],lambda _:None).classify(request())
 
 def test_chain_error_names_the_admission_check_that_fired():
-    # Regression: an admission denial reached the operator as "all providers failed
-    # ... stopped by admission/accounting checks" with the check name dropped,
-    # because ProviderChain formatted only str(UserFacingError) == the generic what.
+    # An admission refusal is actionable by the user, so the chain surfaces it as
+    # a UserFacingError: the typed 422 path carries what happened, every
+    # provider's detail (including the check that fired) and the next action.
+    # Before 2026-10-27 the chain raised a bare RuntimeError and the UI showed
+    # only "engine program failed during start: RuntimeError".
     from interview_engine.errors import UserFacingError
     denial=UserFacingError("stage 'scope' was stopped by admission/accounting checks.",
         "unresolved compute accounting requires review",
         "preserve the run evidence and review its ledger; do not retry or blame connectivity.")
     chain=ProviderChain('scope',[Provider('llm',error=denial)],lambda _:None)
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(UserFacingError) as excinfo:
         chain.classify(request())
-    message=str(excinfo.value)
-    assert 'unresolved compute accounting requires review' in message
-    assert 'preserve the run evidence' in message
+    rendered=excinfo.value.render()
+    assert 'all providers failed for scope' in rendered
+    assert 'unresolved compute accounting requires review' in rendered
+    assert 'preserve the run evidence' in rendered
+
+def test_a_mixed_chain_surfaces_the_user_facing_failure_and_the_other_detail():
+    # The rules fallback failing after a user-facing model refusal must not
+    # demote the failure to a bare RuntimeError: the render names both
+    # providers and keeps the actionable next step.
+    from interview_engine.errors import UserFacingError
+    denial=UserFacingError("stage 'scope' was stopped by admission/accounting checks.","bound unreviewed","review the ledger.")
+    chain=ProviderChain('scope',[Provider('llm',error=denial),Provider('rules',error=ValueError('signals silent'))],lambda _:None)
+    with pytest.raises(UserFacingError) as excinfo:
+        chain.classify(request())
+    rendered=excinfo.value.render()
+    assert 'llm' in rendered and 'rules' in rendered and 'signals silent' in rendered
+    assert 'review the ledger.' in rendered
+
+def test_a_chain_of_only_plain_bugs_still_raises_runtimeerror():
+    # Genuine bugs keep the minimal-disclosure 503 (operator header) path.
+    chain=ProviderChain('scope',[Provider('llm',error=TimeoutError()),Provider('rules',error=ValueError('bad'))],lambda _:None)
+    with pytest.raises(RuntimeError,match='all providers failed'):
+        chain.classify(request())
 
 def test_registry_is_global_or_per_slot_config_not_call_site(monkeypatch):
     monkeypatch.setenv('INTERVIEW_ENGINE_CATEGORIZERS','jev,llm,rules')

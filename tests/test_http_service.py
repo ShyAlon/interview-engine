@@ -410,6 +410,25 @@ def test_sparse_conops_failure_is_typed_nonretryable_with_way_forward(make_regis
     assert failed.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE
     assert detail['retryable'] is False and 'Start a new interview' in detail['detail']
 
+def test_start_user_facing_chain_failure_reaches_the_customer_verbatim(tmp_path):
+    """The 2026-10-27 preview failure reached the UI as a bare 'RuntimeError' -
+    the admission refusal's cause and next action existed only in the engine
+    log. A user-facing chain failure travels the typed 422 path in full."""
+    from interview_engine.errors import UserFacingError
+    class RefusedProgram(FakeProgram):
+        def advance(self,response=None):
+            if response is not None:return super().advance(response)
+            raise UserFacingError('all providers failed for scope',
+                "llm: UserFacingError: stage 'scope_tiebreak' was stopped by admission/accounting checks. | likely cause: serialized request bound is unreviewed for ollama/qwen2.5-coder:14b (stage scope_tiebreak)",
+                'preserve the run evidence and review its ledger; do not retry or blame connectivity.')
+    client=authed(create_app(SessionRegistry(lambda session_id,request:RefusedProgram(),state_dir=tmp_path),service_token=TOKEN))
+    r=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'})
+    detail=r.json()['detail']
+    assert r.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE and detail['retryable'] is False
+    assert 'all providers failed for scope' in detail['detail']
+    assert 'bound is unreviewed for ollama/qwen2.5-coder:14b' in detail['detail']
+    assert 'review its ledger' in detail['detail']
+
 class BlockingProgram(FakeProgram):
     def __init__(self,entered,release):
         super().__init__();self.entered=entered;self.release=release
