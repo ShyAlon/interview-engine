@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 from uuid import uuid4
-from requi_child_contract import InterviewAdvance,InterviewAnswer,require_binding
+from requi_child_contract import InterviewAdvance,InterviewAnswer,InterviewRoute,require_binding
 
 
 def published_digest(row):
@@ -27,7 +27,7 @@ def restored_child_step(operation,*,trusted_binding,store,program_factory,broker
     binding=operation.binding
     if store.claims!=(str(binding.owner_id),str(binding.auth_session_id)):
         raise PermissionError('original Auth-session transaction claims required')
-    if not isinstance(operation.operation,(InterviewAdvance,InterviewAnswer)):
+    if not isinstance(operation.operation,(InterviewAdvance,InterviewAnswer,InterviewRoute)):
         raise ValueError('only published interview restore is implemented in phase 2')
     registry=SessionRegistry(program_factory,session_store=store,owner_id=str(binding.owner_id),
         instance_id='child#'+str(uuid4()),allow_db_provider_dispatch=broker is not None)

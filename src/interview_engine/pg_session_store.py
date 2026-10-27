@@ -203,7 +203,7 @@ class PgSessionStore:
         takes epoch+1. No parent live-lease reuse or saver-latest fallback.
         """
         from .child_step import published_digest
-        from requi_child_contract import InterviewAnswer
+        from requi_child_contract import InterviewAnswer,InterviewRoute
         with self._borrow() as conn, conn.transaction():
             row=conn.execute(
                 "SELECT task_id,generation,lease_epoch,lease_expires_at,control,"
@@ -219,13 +219,13 @@ class PgSessionStore:
                 raise PermissionError('published child control stopped or sequence changed')
             if published_digest(row)!=operation.checkpoint_sha256:
                 raise PermissionError('published child checkpoint evidence changed')
-            if isinstance(operation,InterviewAnswer):
+            if isinstance(operation,(InterviewAnswer,InterviewRoute)):
                 pending=control.get('open_input') or {}
                 if str(pending.get('input_id'))!=operation.wait_id:
                     raise PermissionError('published child wait changed')
                 context=pending.get('context') or {}
                 revision=context.get('evidence_revision') or 'engine:'+binding.session_id+':'+str(control['sequence'])
-                if revision!=operation.review_revision:
+                if isinstance(operation,InterviewAnswer) and revision!=operation.review_revision:
                     raise PermissionError('published child review changed')
             epoch=row['lease_epoch']+1
             conn.execute(

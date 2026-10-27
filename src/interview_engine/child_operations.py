@@ -4,7 +4,7 @@ No HTTP server, executable payload or environment authority. A child gives up
 its lease and heartbeat before returning a durable published snapshot.
 """
 from uuid import uuid4
-from requi_child_contract import InterviewStart,InterviewAnswer,InterviewAdvance,require_binding
+from requi_child_contract import InterviewStart,InterviewAnswer,InterviewAdvance,InterviewRoute,require_binding
 
 
 def execute_operation(operation,*,trusted_binding,store,load_request,load_answer,program_factory=None,broker=None):
@@ -50,8 +50,16 @@ def execute_operation(operation,*,trusted_binding,store,load_request,load_answer
                     registry.close()
                     if claim is not None and not store.release(claim):raise PermissionError('child lease release lost')
                 finally:_session.reset(auth);_owner.reset(owner)
-        if not isinstance(body,(InterviewAnswer,InterviewAdvance)):raise ValueError('interview operation required')
+        if not isinstance(body,(InterviewAnswer,InterviewAdvance,InterviewRoute)):raise ValueError('interview operation required')
         with restored_child_step(operation,trusted_binding=b,store=store,program_factory=factory,broker=broker) as step:
+            if isinstance(body,InterviewRoute):
+                from vmodel_contracts.interactive import ModelRouteSwitchRequest
+                request=load_request(body.request_ref)
+                if (not isinstance(request,ModelRouteSwitchRequest) or request.expected_sequence!=body.expected_sequence
+                    or str(request.expected_input_id)!=body.wait_id or request.model_route!=b.provider):
+                    raise PermissionError('durable route request binding differs')
+                _,snapshot=step.registry.switch_route(b.session_id,request)
+                return snapshot
             if isinstance(body,InterviewAnswer):
                 from vmodel_contracts.interactive import InputResponse
                 response=load_answer(body.answer_ref)
