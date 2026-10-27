@@ -333,3 +333,97 @@ def test_adaptive_watchdog_kills_retries_and_cold_start_floor(monkeypatch, capsy
     assert "WARNING boundary=watchdog" in capsys.readouterr().err
     from vmodel_contracts.runtime import AdaptiveCallWatchdog
     assert AdaptiveCallWatchdog(8, 240).deadline("probing") == (240, None)
+
+
+def test_llm_call_end_carries_ollama_keep_alive_and_derived_rate(tmp_path, monkeypatch):
+    """Every ollama call records the keep_alive it was sent under and a derived
+    generation rate, so a Debug ZIP answers 'which call types took how long'
+    without server-side file access."""
+    log = tmp_path / "llm.jsonl"
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(log))
+    monkeypatch.setenv("VMODEL_OLLAMA_KEEP_ALIVE", "45m")
+
+    class M:
+        def invoke(self, messages):
+            time.sleep(0.05)  # latency must round above zero for the derived rate
+            return type("R", (), {"usage_metadata": {"input_tokens": 500, "output_tokens": 250,
+                                                     "total_tokens": 750}})()
+
+    mc.invoke_checked(M(), [], "probing", item="IT-1")
+    end = _read_log(log)[1]
+    assert end["event"] == "llm_call_end" and end["provider"] == "ollama"
+    assert end["keep_alive"] == "45m"
+    assert end["tokens_per_s"] == round(250 / end["latency_s"], 1)
+
+
+def test_llm_call_end_keep_alive_defaults_to_30m(tmp_path, monkeypatch):
+    log = tmp_path / "llm.jsonl"
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(log))
+
+    mc.invoke_checked(type("M", (), {"invoke": lambda self, m: type("R", (), {})()})(), [], "probing")
+    assert _read_log(log)[1]["keep_alive"] == "30m"
+
+
+def test_llm_call_end_omits_keep_alive_for_non_ollama(tmp_path, monkeypatch):
+    log = tmp_path / "llm.jsonl"
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(log))
+    monkeypatch.setenv("INTERVIEW_ENGINE_MODEL_PROBING", "deepseek:deepseek-chat")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+
+    mc.invoke_checked(type("M", (), {"invoke": lambda self, m: type("R", (), {})()})(), [], "probing")
+    assert "keep_alive" not in _read_log(log)[1]
+
+
+def test_llm_call_end_surfaces_native_ollama_timing_when_present(tmp_path, monkeypatch):
+    """The native /api/chat split (load/prompt-eval/generate) is logged in ms when
+    the client surfaces it. The OpenAI-compat endpoint does not return these
+    fields; on that path the timing key is honestly absent, never zeros."""
+    log = tmp_path / "llm.jsonl"
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(log))
+    meta = {"total_duration": 14_200_000_000, "load_duration": 800_000_000,
+            "prompt_eval_duration": 2_100_000_000, "prompt_eval_count": 812,
+            "eval_duration": 11_300_000_000, "eval_count": 256, "done_reason": "stop"}
+
+    class M:
+        def invoke(self, messages):
+            return type("R", (), {"content": "ok", "response_metadata": meta,
+                                  "usage_metadata": {"input_tokens": 812, "output_tokens": 256,
+                                                     "total_tokens": 1068}})()
+
+    mc.invoke_checked(M(), [], "probing")
+    end = _read_log(log)[1]
+    assert end["timing"] == {"total_ms": 14200, "load_ms": 800, "prompt_eval_ms": 2100,
+                             "prompt_eval_count": 812, "eval_ms": 11300, "eval_count": 256}
+
+
+def test_llm_call_end_has_no_timing_key_when_provider_omits_it(tmp_path, monkeypatch):
+    log = tmp_path / "llm.jsonl"
+    monkeypatch.setenv("VMODEL_LLM_LOG", str(log))
+
+    mc.invoke_checked(type("M", (), {"invoke": lambda self, m: type("R", (), {})()})(), [], "probing")
+    assert "timing" not in _read_log(log)[1]
+
+
+def test_call_end_progress_sink_fires_with_call_summary():
+    """One progress event per model call end: the UI stream can show which call
+    type just finished and what it cost, live."""
+    events = []
+    token = mc._progress_call_end.set(events.append)
+    try:
+        class M:
+            def invoke(self, messages):
+                return type("R", (), {"content": "ok",
+                                      "usage_metadata": {"input_tokens": 10, "output_tokens": 5,
+                                                         "total_tokens": 15}})()
+        mc.invoke_checked(M(), [], "probing", item="IT-2")
+    finally:
+        mc._progress_call_end.reset(token)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["stage"] == "probing" and ev["item"] == "IT-2" and ev["provider"] == "ollama"
+    assert ev["usage"]["output_tokens"] == 5 and ev["latency_s"] >= 0
+
+
+def test_call_end_progress_sink_absent_is_free():
+    assert mc._progress_call_end.get() is None
+    assert mc.invoke_checked(FakeModel("done"), [], "probing") == "done"
