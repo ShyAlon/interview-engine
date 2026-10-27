@@ -143,6 +143,7 @@ def _guard_limits() -> tuple[int, int, int]:
 
 _session_llm_log: ContextVar[str | None] = ContextVar("session_llm_log", default=None)
 _progress_heartbeat: ContextVar[object | None] = ContextVar("progress_heartbeat", default=None)
+_progress_call_end: ContextVar[object | None] = ContextVar("progress_call_end", default=None)
 
 def _llm_log_sink() -> str | None:
     """VMODEL_LLM_LOG: unset = off (default, zero cost); 'stderr' = console;
@@ -292,6 +293,30 @@ def _provider_error_detail(exc) -> dict:
 def _usage_of(resp) -> dict:
     usage = getattr(resp, "usage_metadata", None) or {}
     return {k: usage[k] for k in ("input_tokens", "output_tokens", "total_tokens") if k in usage}
+
+
+_OLLAMA_TIMING_NS = (("total_duration", "total_ms"), ("load_duration", "load_ms"),
+                     ("prompt_eval_duration", "prompt_eval_ms"), ("eval_duration", "eval_ms"))
+_OLLAMA_TIMING_COUNTS = ("prompt_eval_count", "eval_count")
+
+
+def _timing_of(resp) -> dict:
+    """Ollama's native /api/chat split (ns -> ms) when the client surfaces it in
+    response_metadata. The OpenAI-compatible endpoint the ollama client uses
+    today does not return these fields (verified against ollama main
+    openai/openai.go: ToChatCompletion emits usage only), so on that path the
+    timing key is honestly absent - never zeros."""
+    meta = getattr(resp, "response_metadata", None) or {}
+    out = {}
+    for src_key, dst_key in _OLLAMA_TIMING_NS:
+        v = meta.get(src_key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[dst_key] = round(v / 1_000_000)
+    for key in _OLLAMA_TIMING_COUNTS:
+        v = meta.get(key)
+        if isinstance(v, int) and not isinstance(v, bool):
+            out[key] = v
+    return out
 
 
 def _rerun_guidance(stage: str) -> str:
@@ -634,8 +659,24 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
                     f"stage '{stage}': '{cfg.provider}/{cfg.model}' returned empty content twice.",
                     "the provider completed both requests without an answer; the raw response envelopes "
                     "are recorded in llm-calls.jsonl.", guidance)
-            _log_llm({"event": "llm_call_end", **base, "latency_s": round(time.monotonic() - t0, 2),
-                      "usage": _usage_of(resp)})
+            latency = round(time.monotonic() - t0, 2)
+            usage = _usage_of(resp)
+            extra = {}
+            if cfg.provider == "ollama":
+                extra["keep_alive"] = _ollama_keep_alive()
+            timing = _timing_of(resp)
+            if timing:
+                extra["timing"] = timing
+            if usage.get("output_tokens") and latency > 0:
+                extra["tokens_per_s"] = round(usage["output_tokens"] / latency, 1)
+            _log_llm({"event": "llm_call_end", **base, "latency_s": latency, "usage": usage, **extra})
+            sink = _progress_call_end.get()
+            if sink is not None:
+                try:
+                    sink({"stage": stage, "item": item, "provider": cfg.provider, "model": cfg.model,
+                          "latency_s": latency, "usage": usage, **extra})
+                except Exception:
+                    pass  # progress is observability; it never breaks a run
             return resp
         except TimeoutError:
             elapsed = time.monotonic() - t0
