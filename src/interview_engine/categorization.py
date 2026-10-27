@@ -111,6 +111,7 @@ class ProviderChain:
             raise ValueError(f"request slot {request.slot!r} does not match chain {self.slot!r}")
         attempted: list[str] = []
         errors: list[str] = []
+        user_facing: list[UserFacingError] = []
         for provider in self.providers:
             attempted.append(provider.name)
             try:
@@ -133,6 +134,7 @@ class ProviderChain:
                 return result
             except Exception as exc:
                 if isinstance(exc, UserFacingError):
+                    user_facing.append(exc)
                     # str(UserFacingError) is only its headline; the check that fired
                     # and the next action live on the exception and must survive into
                     # the operator-facing message.
@@ -143,6 +145,16 @@ class ProviderChain:
                     errors.append(f"{provider.name}: {type(exc).__name__}: {' | '.join([str(exc), *extras])}")
                 else:
                     errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+        if user_facing:
+            # A provider declined with a message built for the user (admission
+            # refusal, missing key, model not pulled, provider down): surface it
+            # through the typed 422 path - what happened, every provider's
+            # detail, the first actionable next step - instead of a bare
+            # RuntimeError that the HTTP boundary can only name by type.
+            raise UserFacingError(
+                f"all providers failed for {self.slot}",
+                "; ".join(errors),
+                user_facing[0].next_action)
         raise RuntimeError(f"all providers failed for {self.slot}: {'; '.join(errors)}")
 
 
