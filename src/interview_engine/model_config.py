@@ -63,6 +63,8 @@ def _env(key: str) -> str | None:
     """One setting lookup: the real environment wins, the repo-local .env
     fills the gap. Every external config read goes through here so a .env
     from the shared config remains available for API keys and endpoints."""
+    from .wire_binding import broker_active
+    if broker_active():return None
     return os.environ.get(key) or _dotenv().get(key)
 
 
@@ -472,8 +474,9 @@ def _preflight(cfg: "StageModel", stage: str) -> None:
     _check_db_dispatch()
     from .errors import UserFacingError
 
+    from .wire_binding import broker_active
     env = _API_KEY_ENV.get(cfg.provider)
-    if env and not _env(env):
+    if env and not _env(env) and not broker_active():
         raise UserFacingError(
             f"stage '{cfg.model}' is routed to provider '{cfg.provider}', but {env} is not set.",
             "no API key in the environment.",
@@ -882,7 +885,7 @@ def build_chat_model(stage: str, schema: dict | None = None):
             else:
                 extra["model_kwargs"] = {"response_format": {"type": "json_schema", "json_schema":
                                          {"name": f"interview_{stage}_turn", "strict": True, "schema": schema}}}
-        from .wire_binding import model_clients,register_model
+        from .wire_binding import model_clients,register_model,broker_active
         installed_clients=model_clients(stage=stage,provider=cfg.provider,model=cfg.model)
         if installed_clients is not None:extra.update(installed_clients)
         if cfg.provider in ("deepseek", "openai") and installed_clients is None:
@@ -901,7 +904,7 @@ def build_chat_model(stage: str, schema: dict | None = None):
             **({"max_retries":0} if installed_clients is not None or os.environ.get("VMODEL_TENANT_OWNER") is not None or os.environ.get("INTERVIEW_ENGINE_TENANTS")=="1" else {}),  # the socket dies with the guardrail deadline
             max_tokens=_max_tokens_limit(cfg.max_tokens),
             base_url=_BASE_URLS[cfg.provider],
-            api_key=(_env(env) or "" if env else "") or "ollama",
+            api_key=("parent-broker-no-secret" if installed_clients is not None and broker_active() else (_env(env) or "" if env else "") or "ollama"),
             **extra,
         )
         if cfg.provider == "deepseek" and schema is not None:

@@ -97,5 +97,8 @@ def per_job_model(factory):
 
 
 def validate_provider(provider):
-    if _binding.get() is not None and provider not in ('deepseek','openai','ollama'):
+    if (_binding.get() is not None or _broker.get() is not None) and provider not in ('deepseek','openai','ollama'):
         raise AdmissionUnavailable('provider has no reviewed SDK wire installation')
+
+
+def broker_active():return _broker.get() is not None
