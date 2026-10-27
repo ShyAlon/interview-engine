@@ -65,3 +65,16 @@ def test_http_requires_token():
     client = TestClient(create_app(service_token=TOKEN))
     assert client.get("/v1/question-quality-config").status_code == 401
     assert client.put("/v1/question-quality-config", json={}).status_code == 401
+
+
+def test_corrupt_saved_config_exposes_safe_fallback_once_and_recovers(tmp_path,caplog):
+    from interview_engine.question_config import ConfigStore,defaults
+    path=tmp_path/'saved.json';store=ConfigStore(path)
+    assert store.get()==defaults() and store.status()['source']=='defaults_missing'
+    path.write_text('{fake-secret')
+    assert store.get()==defaults() and store.get()==defaults()
+    assert store.status()=={'source':'defaults_invalid','category':'JSONDecodeError','fallback':True}
+    assert caplog.text.count('quality_config_fallback')==1
+    assert 'fake-secret' not in caplog.text and str(path) not in caplog.text
+    store.put({'retrieval':{'top_k':2}})
+    assert store.get()['retrieval']['top_k']==2 and not store.status()['fallback']

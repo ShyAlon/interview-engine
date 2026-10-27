@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import threading
 from pathlib import Path
 
+_logger=logging.getLogger(__name__)
 CONFIG_VERSION = 1
 
 DEFAULTS: dict = {
@@ -120,16 +122,29 @@ class ConfigStore:
         self._path = Path(path) if path else None
         self._lock = threading.Lock()
         self._mem: dict = defaults()
+        self._status={'source':'memory','fallback':False}
+        self._warned_invalid=False
 
     def get(self) -> dict:
         with self._lock:
             if self._path is None:
                 return copy.deepcopy(self._mem)
             try:
-                return validate(json.loads(self._path.read_text()))
-            except (FileNotFoundError, ValueError):
-                # Missing or corrupt file: fall back to code defaults, never fail a session.
+                clean=validate(json.loads(self._path.read_text()))
+                self._status={'source':'saved','fallback':False};self._warned_invalid=False
+                return clean
+            except FileNotFoundError:
+                self._status={'source':'defaults_missing','fallback':False}
                 return defaults()
+            except ValueError as error:
+                self._status={'source':'defaults_invalid','category':type(error).__name__,'fallback':True}
+                if not self._warned_invalid:
+                    self._warned_invalid=True
+                    _logger.warning('quality_config_fallback category=%s; using code defaults',type(error).__name__)
+                return defaults()
+
+    def status(self) -> dict:
+        with self._lock:return dict(self._status)
 
     def put(self, cfg: dict) -> dict:
         clean = validate(cfg)
