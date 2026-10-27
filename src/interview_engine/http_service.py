@@ -924,8 +924,11 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
                 raw=_json.dumps(pg_diagnostics.build_operator_block(exc),separators=(",",":")).encode()
                 if len(raw)<=1800:
                     headers["X-Engine-Operator-Diagnostics"]=_b64.urlsafe_b64encode(raw).decode("ascii")
-            except Exception:
+                else:
+                    log.warning("operator_diagnostic_omitted reason=oversize limit_bytes=1800")
+            except Exception as diagnostic_error:
                 headers={}
+                log.warning("operator_diagnostic_omitted reason=build_failed category=%s",type(diagnostic_error).__name__)
             raise HTTPException(503,ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR,detail=f"engine program failed during start: {type(exc).__name__}",retryable=True).model_dump(mode="json"),headers=headers)
         return StartSessionResponse(snapshot=session.snapshot(),accepted_event=event)
 
