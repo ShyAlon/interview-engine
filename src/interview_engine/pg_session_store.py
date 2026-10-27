@@ -168,6 +168,34 @@ class PgSessionStore:
                 return None
             return SessionClaim(session_id, owner_id, row["generation"], row["lease_epoch"], instance)
 
+    def claim_generator_expected(self, binding, instance: str, ttl: float):
+        """Transfer an unleased session to its generator without restoring a graph."""
+        with self._borrow() as conn, conn.transaction():
+            row=conn.execute("SELECT task_id,generation,lease_epoch,lease_expires_at,control FROM engine_sessions WHERE session_id=%s AND owner_id=%s::uuid FOR UPDATE",
+                (binding.session_id,str(binding.owner_id))).fetchone()
+            now=time.time()
+            if (row is None or row['task_id']!=binding.task_id or row['generation']!=binding.generation
+                or row['lease_epoch']!=binding.lease_epoch or row['lease_expires_at']>now or (row['control'] or {}).get('stopped')):
+                raise PermissionError('generator execution binding changed, stopped or still leased')
+            epoch=row['lease_epoch']+1
+            conn.execute("UPDATE engine_sessions SET lease_epoch=%s,placement_instance=%s,lease_expires_at=%s,updated_at=%s WHERE session_id=%s AND owner_id=%s::uuid",
+                (epoch,instance,now+ttl,now,binding.session_id,str(binding.owner_id)))
+            return SessionClaim(binding.session_id,str(binding.owner_id),binding.generation,epoch,instance)
+
+    def claim_start_expected(self, binding, instance: str, ttl: float):
+        """Claim only the parent's empty durable bootstrap row, never overwrite."""
+        with self._borrow() as conn, conn.transaction():
+            row=conn.execute("SELECT task_id,generation,lease_epoch,lease_expires_at,control FROM engine_sessions WHERE session_id=%s AND owner_id=%s::uuid FOR UPDATE",
+                (binding.session_id,str(binding.owner_id))).fetchone()
+            now=time.time()
+            if (row is None or row['task_id']!=binding.task_id or row['generation']!=binding.generation
+                or row['lease_epoch']!=binding.lease_epoch or row['lease_expires_at']>now or row['control']):
+                raise PermissionError('child bootstrap changed, published or still leased')
+            epoch=row['lease_epoch']+1
+            conn.execute("UPDATE engine_sessions SET lease_epoch=%s,placement_instance=%s,lease_expires_at=%s,updated_at=%s WHERE session_id=%s AND owner_id=%s::uuid",
+                (epoch,instance,now+ttl,now,binding.session_id,str(binding.owner_id)))
+            return SessionClaim(binding.session_id,str(binding.owner_id),binding.generation,epoch,instance)
+
     def claim_published_expected(self, binding, operation, instance: str, ttl: float):
         """Compare immutable published evidence and acquire a NEW lease atomically.
 
@@ -175,7 +203,7 @@ class PgSessionStore:
         takes epoch+1. No parent live-lease reuse or saver-latest fallback.
         """
         from .child_step import published_digest
-        from requi_child_contract import InterviewAnswer
+        from requi_child_contract import InterviewAnswer,InterviewRoute
         with self._borrow() as conn, conn.transaction():
             row=conn.execute(
                 "SELECT task_id,generation,lease_epoch,lease_expires_at,control,"
@@ -191,13 +219,13 @@ class PgSessionStore:
                 raise PermissionError('published child control stopped or sequence changed')
             if published_digest(row)!=operation.checkpoint_sha256:
                 raise PermissionError('published child checkpoint evidence changed')
-            if isinstance(operation,InterviewAnswer):
+            if isinstance(operation,(InterviewAnswer,InterviewRoute)):
                 pending=control.get('open_input') or {}
                 if str(pending.get('input_id'))!=operation.wait_id:
                     raise PermissionError('published child wait changed')
                 context=pending.get('context') or {}
                 revision=context.get('evidence_revision') or 'engine:'+binding.session_id+':'+str(control['sequence'])
-                if revision!=operation.review_revision:
+                if isinstance(operation,InterviewAnswer) and revision!=operation.review_revision:
                     raise PermissionError('published child review changed')
             epoch=row['lease_epoch']+1
             conn.execute(

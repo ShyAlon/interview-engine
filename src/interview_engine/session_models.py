@@ -64,7 +64,8 @@ def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None, *
                     "The shared vmodel-contracts price table has no entry for this paid route.",
                     "Choose a supported model or update VMODEL_PRICE_TABLE with verified prices before starting.") from exc
         model_config._preflight(model_config.StageModel(provider,model),stage)
-        if provider=="ollama" and stage==STAGES[0]:
+        from .wire_binding import broker_active
+        if provider=="ollama" and stage==STAGES[0] and not broker_active():
             import httpx
             endpoint=model_config._BASE_URLS["ollama"].rstrip("/")+"/models"
             try:
