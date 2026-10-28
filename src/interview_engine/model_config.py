@@ -157,6 +157,8 @@ def _mask_secrets(value: str) -> str:
     return _re.sub(r"(sk-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]+", r"\1...", str(value))
 
 
+_LLM_SINK_FAILURES: set[str] = set()
+
 def _log_llm(event: dict) -> None:
     """One JSON line per LLM call event. Never logs message content or keys -
     metadata, token usage, and provider error payloads only. Logging must
@@ -171,8 +173,14 @@ def _log_llm(event: dict) -> None:
         else:
             with open(sink, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-    except OSError:
-        pass
+    except OSError as error:
+        # Nonfatal telemetry loss must be visible, but a failing sink must
+        # never disclose its path, event payload or exception message.
+        category=type(error).__name__
+        if category not in _LLM_SINK_FAILURES and len(_LLM_SINK_FAILURES)<16:
+            _LLM_SINK_FAILURES.add(category)
+            import logging
+            logging.getLogger(__name__).warning("llm.log.degraded source=llm-call-file category=%s scope=process-until-restart",category)
 
 
 _CONSOLE_LOCK = threading.Lock()
