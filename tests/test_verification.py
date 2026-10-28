@@ -193,3 +193,21 @@ def test_verification_record_lists_unique_span_uids(monkeypatch, tmp_path):
     uids = [x["uid"] for x in rows[0]["retrieval_spans"]]
     assert uids and len(uids) == len(set(uids))
     assert all("id" in x for x in rows[0]["retrieval_spans"])
+
+
+def test_verification_write_failure_is_safe_bounded_warning(tmp_path,monkeypatch,caplog):
+    import logging
+    log=v.VerificationLog(tmp_path/'verification.jsonl')
+    monkeypatch.setattr('builtins.open',lambda *a,**k:(_ for _ in ()).throw(OSError('private-disk-detail')))
+    with caplog.at_level(logging.WARNING):
+        log.write({'private-project':'text'})
+        log.write({'private-project':'text'})
+    assert caplog.text.count('review.evidence.degraded')==1 and 'OSError' in caplog.text
+    assert 'private-project' not in caplog.text and 'private-disk-detail' not in caplog.text
+
+
+def test_verification_stop_is_not_swallowed_or_reported_as_sink_failure(monkeypatch,tmp_path):
+    from interview_engine.stop_fence import StopRequested
+    log=v.VerificationLog(tmp_path/'v.jsonl')
+    monkeypatch.setattr('interview_engine.stop_fence.guarded_publish',lambda fn:(_ for _ in ()).throw(StopRequested('stop')))
+    with pytest.raises(StopRequested):log.write({})

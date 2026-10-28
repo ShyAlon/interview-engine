@@ -92,3 +92,15 @@ def test_shadow_workers_keep_session_model_route_not_env_fallback(tmp_path,monke
                               tmp_path/'pinned.jsonl').classify(req())
     assert out.provider=='llm'
     assert observed==[('deepseek','deepseek-flash')]*2
+
+
+def test_shadow_write_failure_is_safe_bounded_warning(tmp_path,monkeypatch,caplog):
+    import logging
+    baseline=result('rules','accepted');shadow=ShadowCategorizer(Cat(baseline),Cat(result('typesafe','accepted')),tmp_path/'shadow.jsonl')
+    monkeypatch.setattr('interview_engine.categorization_shadow.os.fsync',lambda fd:(_ for _ in ()).throw(OSError('private-disk-detail')))
+    with caplog.at_level(logging.WARNING):
+        assert shadow.classify(req()) is baseline
+        assert shadow.classify(req()) is baseline
+    assert caplog.text.count('review.evidence.degraded')==1
+    assert 'OSError' in caplog.text
+    assert 'private-disk-detail' not in caplog.text and 'secret founder input' not in caplog.text
