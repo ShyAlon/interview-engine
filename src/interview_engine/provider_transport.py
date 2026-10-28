@@ -112,7 +112,9 @@ class AdmittedTransport(httpx.BaseTransport):
             if response is not None:response.close()
             if not settled:
                 try:self.gateway.uncertain(attempt)
-                except Exception:pass
+                except Exception as error:
+                    from .attempt_admission import _uncertainty_write_failed
+                    _uncertainty_write_failed(error)
             raise
 
     def close(self):self.inner.close()
@@ -131,7 +133,9 @@ class UsageStream(httpx.SyncByteStream):
         if self.finished or self.marked:return
         self.marked=True
         try:self.gateway.uncertain(self.attempt)
-        except Exception:pass
+        except Exception as error:
+            from .attempt_admission import _uncertainty_write_failed
+            _uncertainty_write_failed(error)
 
     def __iter__(self):
         if self.finished:
@@ -250,7 +254,9 @@ class AsyncAdmittedTransport(httpx.AsyncBaseTransport):
             if response is not None:await response.aclose()
             if not settled:
                 try:self.gateway.uncertain(attempt)
-                except Exception:pass
+                except Exception as error:
+                    from .attempt_admission import _uncertainty_write_failed
+                    _uncertainty_write_failed(error)
             raise
 
     async def aclose(self):await self.inner.aclose()
@@ -269,7 +275,9 @@ class AsyncUsageStream(httpx.AsyncByteStream):
         if self.finished or self.marked:return
         self.marked=True
         try:self.gateway.uncertain(self.attempt)
-        except Exception:pass
+        except Exception as error:
+            from .attempt_admission import _uncertainty_write_failed
+            _uncertainty_write_failed(error)
 
     async def __aiter__(self):
         if self.finished:

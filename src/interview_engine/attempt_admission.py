@@ -149,7 +149,8 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
             return response
         except BaseException:
             try:gateway.uncertain(attempt)
-            except Exception:pass  # Never turn a ledger outage into a refund or hide provider failure.
+            except Exception as error:
+                _uncertainty_write_failed(error)
             raise
     gateway,attempt=_reserve(stage,provider,model,messages,max_output_tokens)
     try:
@@ -160,7 +161,8 @@ def admitted_invoke(call,*,stage,provider,model,messages,max_output_tokens,item=
         return response
     except BaseException:
         try:gateway.uncertain(attempt)
-        except Exception:pass  # Never turn a ledger outage into a refund or hide provider failure.
+        except Exception as error:
+            _uncertainty_write_failed(error)
         raise
 
 def admitted_stream(call,*,stage,provider,model,messages,max_output_tokens):
@@ -223,3 +225,11 @@ def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_t
     return admitted_invoke(lambda:chat_model.invoke(messages),stage=stage,provider=provider,
         model=model,messages=messages,max_output_tokens=max_output_tokens,item=item,
         model_params=_model_params_snapshot(chat_model))
+
+
+def _uncertainty_write_failed(error):
+    # Evidence must never replace the original provider/accounting failure.
+    try:
+        import logging
+        logging.getLogger(__name__).warning('attempt.uncertainty_write_failed category=%s',type(error).__name__)
+    except Exception:pass
