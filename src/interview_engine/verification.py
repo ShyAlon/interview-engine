@@ -88,12 +88,15 @@ class VerificationLog:
     """Appends one JSON object per turn, next to usage.jsonl."""
 
     def __init__(self, path: str | Path):
+        from .diagnostic_sink import SinkStatus
+        self._sink_status=SinkStatus('question-verification')
         self.path = Path(path)
         self._lock = threading.Lock()
 
     def write(self, record: dict) -> None:
         from .stop_fence import guarded_publish
-        return guarded_publish(lambda:self._write(record))
+        try:return guarded_publish(lambda:self._write(record))
+        except OSError as error:self._sink_status.failed(error)
 
     def _write(self, record: dict) -> None:
         line = json.dumps({"ts": time.time(), **record}, ensure_ascii=False, sort_keys=True)

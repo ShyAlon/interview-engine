@@ -70,6 +70,8 @@ class ShadowCategorizer:
     verdict so code-owned guards can compare the two sides."""
     def __init__(self, baseline, jev, jsonl_path, usage_log=None, report_path=None, *, session_id=None, schema_id=None, schema_version=None,
                  authoritative=()):
+        from .diagnostic_sink import SinkStatus
+        self._sink_status=SinkStatus('categorization-shadow')
         self.baseline,self.jev,self.path,self.usage_log=baseline,jev,Path(jsonl_path),usage_log
         self.authoritative=frozenset(authoritative);self.last_jev={}
         self.report_path=Path(report_path) if report_path else self.path.with_suffix(".md")
@@ -115,8 +117,8 @@ class ShadowCategorizer:
                 f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
             tmp=self.report_path.with_suffix(self.report_path.suffix+".tmp")
             tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
-        except Exception:
-            pass
+        except Exception as error:
+            self._sink_status.failed(error)
         if use_jev: return shadow
         if base_err: raise base_err
         return base
