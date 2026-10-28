@@ -862,7 +862,7 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
     def get_question_quality_config():
         from . import question_config
         return {"config_version":question_config.CONFIG_VERSION,"config":question_config.current(),
-                "defaults":question_config.defaults()}
+                "defaults":question_config.defaults(),"load_status":question_config.store().status()}
 
     @app.put("/v1/question-quality-config",dependencies=[Depends(authenticate)])
     def put_question_quality_config(body:dict):
