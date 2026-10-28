@@ -19,10 +19,15 @@ from __future__ import annotations
 
 import sys
 import time
+import logging
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from . import model_config as _mc
 from vmodel_contracts.runtime import format_console_line
+
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,21 +44,33 @@ class ProgressEvent:
 
 class ProgressBus:
     """Synchronous fan-out. A broken consumer must never crash a run, so
-    subscriber errors are swallowed by design (progress is observability,
+    subscriber errors are counted and safely reported (progress is observability,
     not control flow)."""
 
     def __init__(self) -> None:
         self._subscribers: list = []
+        self.subscriber_failures: dict[int, int] = {}
+        self._last_warning: dict[int, float] = {}
 
     def subscribe(self, fn) -> None:
         self._subscribers.append(fn)
 
     def emit(self, event: ProgressEvent) -> None:
-        for fn in self._subscribers:
+        for index, fn in enumerate(self._subscribers):
             try:
                 fn(event)
-            except Exception:  # noqa: BLE001 - observability never kills the run
-                pass
+            except Exception as error:  # observability never kills the run
+                self.subscriber_failures[index] = self.subscriber_failures.get(index, 0) + 1
+                now = time.monotonic()
+                if index not in self._last_warning or now - self._last_warning[index] >= 60:
+                    self._last_warning[index] = now
+                    # No event payload, exception text or callable repr in operator logs.
+                    stage = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(event.stage))[:80]
+                    try:
+                        _logger.warning('progress.subscriber_failed subscriber=%d stage=%s category=%s count=%d',
+                                        index, stage, type(error).__name__, self.subscriber_failures[index])
+                    except Exception:
+                        pass  # even a broken diagnostic handler must stay nonfatal
 
 
 @contextmanager
