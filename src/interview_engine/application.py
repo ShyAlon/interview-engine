@@ -130,7 +130,7 @@ class InterviewApplication:
             self.graph=build_graph(log,checkpointer=saver,progress=progress,verification_log=VerificationLog(self.outdir/'verification.jsonl'),conops_enabled=True,raw_output_dir=self.outdir/'debug',
                 session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
         self.checkpointer=saver;self.saver=saver
-        self.cfg={'configurable':{'thread_id':session_id}}
+        self.cfg={'configurable':{'thread_id':session_id,'checkpoint_ns':''}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
         self.state={'messages':[HumanMessage(content=idea)],'submission':submission.model_dump(mode='json')}
         self.result=None;self.open_input=None;self.finished=False
