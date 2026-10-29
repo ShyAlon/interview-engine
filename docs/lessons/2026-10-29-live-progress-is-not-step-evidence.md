@@ -16,7 +16,7 @@ one claims statement (not counted in mirrored-superuser benchmark).
 
 Fail-first new tests: 3 failed in 2.22s, missing class. Final selection of new
 cases and original journal/store/application/recovery suites: 51 passed in
-50.23s (final measured run in PR). No old assertion changed
+49.27s. No old assertion changed
 or removed. Tests cover concurrent allocation, paging, restart, blocked read,
 invalid data, stop, stale generation/epoch, expiry/takeover, scope and mode mixing.
 Delivery tests apply actual migrations and FORCE RLS, check tenant and revoked
