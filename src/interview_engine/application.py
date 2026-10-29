@@ -43,7 +43,7 @@ def _graph_tenant_claims(pg_store,pg_claim):
 
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
-    def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None):
+    def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None,progress_mode:str="buffered"):
         self.produced_checkpoint_id=None
         self.session_id,self.task_id=session_id,task_id
         from .session_runtime import SessionRuntime
@@ -88,8 +88,11 @@ class InterviewApplication:
         self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
         if pg_store is not None:
-            from .pg_journal import BufferedJournal
-            self.progress_journal=BufferedJournal(pg_store,pg_claim,session_id,task_id)
+            from .pg_journal import BufferedJournal, ObservationalJournal
+            if progress_mode not in ('buffered','observational'):
+                raise ValueError('unknown progress mode')
+            journal_class=ObservationalJournal if progress_mode == 'observational' else BufferedJournal
+            self.progress_journal=journal_class(pg_store,pg_claim,session_id,task_id)
         else:
             from .progress_journal import ProgressJournal
             self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)

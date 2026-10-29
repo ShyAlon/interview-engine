@@ -72,7 +72,7 @@ ENGINE_PEAK_SESSION_CONNS = 4
 
 class SessionRegistry:
     """Thread-safe application port behind the HTTP adapter."""
-    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=150.0,heartbeat_interval:float=60.0,allow_db_provider_dispatch:bool=False):
+    def __init__(self,program_factory=None,state_dir:Path|str|None=None,*,session_store=None,owner_id=None,instance_id:str|None=None,lease_ttl:float=150.0,heartbeat_interval:float=60.0,allow_db_provider_dispatch:bool=False,progress_mode:str="buffered"):
         if state_dir is not None and session_store is not None:
             raise ValueError('choose file or database session persistence, not both')
         if session_store is not None and program_factory is default_program_factory and not allow_db_provider_dispatch:
@@ -83,6 +83,11 @@ class SessionRegistry:
             # run. Tests opt in explicitly; no config/env/HTTP route enables
             # database persistence at all (constructor-only wiring).
             raise ValueError('database session persistence cannot use the production program factory until staged responses land (PR B); pass an explicit isolated program_factory')
+        if progress_mode not in ("buffered","observational"):
+            raise ValueError("unknown progress mode")
+        if progress_mode == "observational" and session_store is None:
+            raise ValueError("observational progress requires PG session store")
+        self._progress_mode=progress_mode
         self._allow_db_dispatch=allow_db_provider_dispatch
         self._sessions: dict[str,EngineSession]={}
         self._program_factory=program_factory
@@ -439,7 +444,7 @@ class SessionRegistry:
                 from .application import InterviewApplication
                 candidate=self._prepare_program(session,lambda:InterviewApplication(session.session_id,session.task_id,session.request.idea,
                     artifact_root=str(self._state_dir) if self._state_dir is not None else str(worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))),model_route=request.model_route,pinned_models=target,
-                    pg_store=self._store,pg_claim=session.pg_claim))
+                    pg_store=self._store,pg_claim=session.pg_claim,progress_mode=self._progress_mode))
                 # Read the same durable graph thread; never invoke a model during preflight.
                 checkpoint=candidate.graph.get_state(candidate.cfg)
                 if not checkpoint or not checkpoint.values:
@@ -483,7 +488,7 @@ class SessionRegistry:
                 # existence oracle through the progress API.
                 raise KeyError(session_id)
             rows=self._store.read_journal(session_id,self._pg_owner(),after,limit)
-            events=[ProgressSignal.model_validate(r['page']) for r in rows]
+            events=[ProgressSignal.model_validate({k:v for k,v in r['page'].items() if k != 'journal_mode'}) for r in rows]
             return ProgressPage(events=events, next_cursor=events[-1].cursor if events else after)
         from .progress_journal import ProgressJournal
         self._state_path(session_id)  # validate cloud UUID before any journal path
@@ -760,7 +765,7 @@ class SessionRegistry:
         root=worker_root(artifacts_root(os.environ.get("VMODEL_ARTIFACTS_DIR")))
         return InterviewApplication(session.session_id,request.task_id,request.idea,
             artifact_root=str(root),model_route=request.model_route,pinned_models=pinned,
-            initial_model=request.initial_model,pg_store=self._store,pg_claim=session.pg_claim)
+            initial_model=request.initial_model,pg_store=self._store,pg_claim=session.pg_claim,progress_mode=self._progress_mode)
 
     def _restore_payload(self,payload:dict,session_id:str)->EngineSession:
         request=StartSessionRequest.model_validate(payload["request"])

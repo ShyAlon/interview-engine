@@ -439,6 +439,14 @@ class PgSessionStore:
             landed rejects the append with StopRequested.
             """
             try:
+                guard=conn.execute("SELECT session_id FROM engine_sessions WHERE session_id=%s AND owner_id=%s::uuid"
+                    " AND generation=%s AND lease_epoch=%s AND lease_expires_at > extract(epoch from clock_timestamp()) FOR UPDATE",
+                    (claim.session_id,claim.owner_id,claim.generation,claim.epoch)).fetchone()
+                if guard is None:
+                    raise StopRequested('session lease fence rejected the journal append')
+                self._require_journal_mode(conn,claim.session_id,'buffered')
+                if page.get('journal_mode','buffered') != 'buffered':
+                    raise PublicationConflict('append_journal requires buffered pages')
                 row = conn.execute(
                     "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
                     " SELECT %(sid)s, %(cursor)s, %(page)s::jsonb, %(now)s FROM engine_sessions"
@@ -469,6 +477,54 @@ class PgSessionStore:
                 conn.rollback()
                 from .pg_diagnostics import tag_stage
                 tag_stage(exc, "journal append", conn)
+                raise
+
+    @staticmethod
+    def _require_journal_mode(conn, session_id, mode):
+        # Caller holds the session row lock. Legacy rows are buffered.
+        row=conn.execute("SELECT page FROM engine_session_journal WHERE session_id=%s ORDER BY cursor LIMIT 1",
+                         (session_id,)).fetchone()
+        if row is not None and row['page'].get('journal_mode','buffered') != mode:
+            raise PublicationConflict('cannot mix observational and buffered progress for one session')
+
+    def append_observational_progress(self, claim: SessionClaim, page: dict) -> int:
+        """Allocate + append live progress in one short fenced transaction.
+
+        No control/checkpoint writes. A crashed step may leave observational
+        signals, which never claim to be committed step evidence.
+        """
+        from vmodel_contracts.progress_signal import ProgressSignal
+        signal=ProgressSignal.model_validate({k:v for k,v in page.items() if k != "journal_mode"})  # validate before checkout
+        if signal.session_id != claim.session_id or page.get('journal_mode') != 'observational':
+            raise ValueError('observational progress scope/mode mismatch')
+        params={"sid":claim.session_id,"owner":claim.owner_id,"gen":claim.generation,
+                "epoch":claim.epoch}
+        with self._borrow() as conn:
+            try:
+                row=conn.execute("SELECT task_id FROM engine_sessions WHERE session_id=%(sid)s"
+                    " AND owner_id=%(owner)s::uuid AND generation=%(gen)s AND lease_epoch=%(epoch)s"
+                    " AND lease_expires_at > extract(epoch from clock_timestamp()) FOR UPDATE",params).fetchone()
+                if row is None:
+                    raise StopRequested('session lease fence rejected observational progress')
+                if row['task_id'] != signal.task_id:
+                    raise ValueError('observational progress task mismatch')
+                self._require_journal_mode(conn,claim.session_id,'observational')
+                # The row lock serializes all cursor writers; expiry is checked
+                # again after waiting for the lock, at insertion time.
+                payload=dict(page)
+                inserted=conn.execute("INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
+                    " SELECT %(sid)s,COALESCE(MAX(cursor),0)+1,"
+                    " jsonb_set(%(page)s::jsonb,'{cursor}',to_jsonb(COALESCE(MAX(cursor),0)+1)),"
+                    " extract(epoch from clock_timestamp()) FROM engine_session_journal WHERE session_id=%(sid)s"
+                    " HAVING EXISTS(SELECT 1 FROM engine_sessions WHERE session_id=%(sid)s"
+                    " AND lease_expires_at > extract(epoch from clock_timestamp())) RETURNING cursor",
+                    {**params,'page':json.dumps(payload)}).fetchone()
+                if inserted is None:
+                    raise StopRequested('session lease expired while allocating progress cursor')
+                conn.commit()
+                return inserted['cursor']
+            except BaseException:
+                conn.rollback()
                 raise
 
     def read_journal(self, session_id: str, owner_id: str, after: int, limit: int) -> list[dict]:
@@ -562,6 +618,10 @@ class PgSessionStore:
                     if journal_cursor is None:
                         raise ValueError("journal page requires its cursor")
                     pages.append((journal_cursor, journal_page))
+                if pages:
+                    self._require_journal_mode(conn,claim.session_id,'buffered')
+                    if any(page.get('journal_mode','buffered') != 'buffered' for _,page in pages):
+                        raise PublicationConflict('step publication requires buffered journal pages')
                 for cursor, page in pages:
                     inserted = conn.execute(
                         "INSERT INTO engine_session_journal(session_id,cursor,page,created_at)"
