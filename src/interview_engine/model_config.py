@@ -171,8 +171,10 @@ def _log_llm(event: dict) -> None:
         if sink == "stderr":
             _console_line(line)
         else:
-            with open(sink, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            from .document_diagnostics import configured,append
+            if configured():append(sink,line+"\n")
+            else:
+                with open(sink, "a", encoding="utf-8") as f:f.write(line + "\n")
     except OSError as error:
         # Nonfatal telemetry loss must be visible, but a failing sink must
         # never disclose its path, event payload or exception message.

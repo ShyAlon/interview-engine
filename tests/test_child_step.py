@@ -90,7 +90,10 @@ def test_real_process_restores_and_releases_published_step(tmp_path):
     from delivery_api.child_supervisor import ChildSupervisor
     conn,store,sid,row=setup(tmp_path);op=operation(sid,row)
     events=[]
-    supervisor=ChildSupervisor([sys.executable,str(Path(__file__).with_name('fixtures_child_restore.py')),
+    # The supervisor intentionally strips PYTHONPATH. Use an explicit local source
+    # bootstrap for this uninstalled development checkout, never loosen its env.
+    bootstrap="import sys,runpy;sys.path.insert(0,sys.argv.pop(1));runpy.run_path(sys.argv.pop(1),run_name='__main__')"
+    supervisor=ChildSupervisor([sys.executable,'-c',bootstrap,str(Path(__file__).parents[1]/'src'),str(Path(__file__).with_name('fixtures_child_restore.py')),
         conn._pg_server.get_uri(),json.dumps(op.binding.model_dump(mode='json'))])
     result=asyncio.run(supervisor.run(op,authorize=lambda op:None,on_event=events.append,timeout_seconds=5))
     assert result.reaped and result.returncode==0

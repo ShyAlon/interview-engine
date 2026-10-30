@@ -193,3 +193,28 @@ def test_injected_pool_is_used_and_never_closed(tmp_path):
         tenant_worker._session.reset(stoken);tenant_worker._owner.reset(token)
     router.close()
     assert FakePool.closed is False
+
+
+def test_installed_control_route_bypasses_interview_registry_and_rechecks_each_call(tmp_path):
+    from interview_engine.tenant_worker import _owner,_session
+    import pytest
+    seen=[];active=[True]
+    class NeverRegistry:
+        def __init__(self,*a,**k):raise AssertionError('installed execution must not restore interview graph')
+    class Control:
+        def snapshot(self,sid):return {'sid':sid,'readonly':True}
+        def respond(self,sid,response):raise ValueError('new interview input unavailable')
+    def resolve(name,sid):
+        seen.append((name,sid,_owner.get(),_session.get()))
+        if not active[0]:raise PermissionError('revoked')
+        return getattr(Control(),name) if sid=='installed' else None
+    router=TenantRegistryRouter(NeverRegistry,None,tmp_path,session_dsn='unused',installed_resolver=resolve)
+    owner=_owner.set(A);session=_session.set(SA)
+    try:
+        assert router.snapshot('installed')=={'sid':'installed','readonly':True}
+        with pytest.raises(ValueError,match='new interview'):router.respond('installed',{})
+        active[0]=False
+        with pytest.raises(PermissionError,match='revoked'):router.snapshot('installed')
+        assert len(seen)==3 and all(row[2:]==(A,SA) for row in seen)
+        assert router._registries=={}
+    finally:_owner.reset(owner);_session.reset(session)

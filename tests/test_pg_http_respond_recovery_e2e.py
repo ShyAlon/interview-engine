@@ -14,7 +14,7 @@ from conftest import managed_pool
 from vmodel_contracts.interactive import ProtocolErrorCode, ProcessStatus
 
 from interview_engine.http_service import SessionRegistry, default_program_factory, create_app
-from interview_engine.pg_session_store import PgSessionStore
+from test_pg_application_wiring import PgSessionStore
 from test_http_service import TOKEN, authed
 from test_pg_application_wiring import make_conn, fake_ollama, fake_models, OWNER, SID, _OPEN
 

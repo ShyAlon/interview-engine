@@ -102,7 +102,7 @@ def _clean_single_question(text: str) -> str | None:
     return candidate
 
 
-def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None, evidence_lake=None, verification_log=None):
+def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | None = None, *, conops_enabled: bool = False, raw_output_dir=None, categorizer=None, session_id=None, schema_id=None, schema_version=None, evidence_lake=None, verification_log=None,documents=None):
     from .raw_output import RawOutputLog
     raw_log = RawOutputLog(raw_output_dir)
     # Models are resolved inside the worker job that uses them (see wire_binding.per_job_model), not once here.
@@ -1018,7 +1018,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     retained.append({**finding,'path':[field,index],'original':item});break
         semantic=make_review(candidate['session_id'],'intent',candidate,retained).model_dump(mode='json') if retained else None
         if semantic and raw_output_dir:
-            __import__('interview_engine.stop_fence',fromlist=['guarded_publish']).guarded_publish(lambda:(Path(raw_output_dir).parent/'semantic-review.json').write_text(_json.dumps(semantic,indent=2)))
+            if documents is not None:documents.write('interview/semantic-review.json',_json.dumps(semantic,indent=2).encode())
+            else:__import__('interview_engine.stop_fence',fromlist=['guarded_publish']).guarded_publish(lambda:(Path(raw_output_dir).parent/'semantic-review.json').write_text(_json.dumps(semantic,indent=2)))
         return {"semantic_review":semantic,"semantic_review_resolved":not bool(retained),
                 "intent_model": candidate, "requirement_preview": preview,
                 "distill_warnings": warnings_tp}

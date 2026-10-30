@@ -76,7 +76,8 @@ class ShadowCategorizer:
         self.authoritative=frozenset(authoritative);self.last_jev={}
         self.report_path=Path(report_path) if report_path else self.path.with_suffix(".md")
         self.session_id,self.schema_id,self.schema_version=session_id,schema_id,schema_version
-        self.path.parent.mkdir(parents=True,exist_ok=True)
+        from .document_diagnostics import configured
+        if not configured():self.path.parent.mkdir(parents=True,exist_ok=True)
     def active(self,slot): return self.baseline.active(slot)
     def classify(self,request):
         before=len(self.usage_log.records) if self.usage_log else 0
@@ -113,10 +114,15 @@ class ShadowCategorizer:
             record["authority"]="baseline"
         self.last_jev[request.slot]=shadow if shadow_err is None else None
         try:
-            with self.path.open("a") as f:
-                f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
-            tmp=self.report_path.with_suffix(self.report_path.suffix+".tmp")
-            tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
+            from .document_diagnostics import configured,append,write
+            if configured():
+                append(self.path,json.dumps(record,separators=(",",":"),default=str)+"\n")
+                write(self.report_path,render_report([self.path])+"\n")
+            else:
+                with self.path.open("a") as f:
+                    f.write(json.dumps(record,separators=(",",":"),default=str)+"\n");f.flush();os.fsync(f.fileno())
+                tmp=self.report_path.with_suffix(self.report_path.suffix+".tmp")
+                tmp.write_text(render_report([self.path])+"\n");tmp.replace(self.report_path)
         except Exception as error:
             self._sink_status.failed(error)
         if use_jev: return shadow
@@ -127,7 +133,10 @@ class ShadowCategorizer:
 def read_records(paths):
     records=[]
     for path in paths:
-        with Path(path).open() as f: records += [json.loads(line) for line in f if line.strip()]
+        from .document_diagnostics import configured,read
+        if configured():records += [json.loads(line) for line in read(path).splitlines() if line.strip()]
+        else:
+            with Path(path).open() as f:records += [json.loads(line) for line in f if line.strip()]
     return records
 
 
