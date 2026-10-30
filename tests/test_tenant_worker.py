@@ -95,7 +95,7 @@ def test_stop_same_session_id_is_owner_scoped(tmp_path):
         assert c.get(f'/v1/sessions/{sid}',headers=hb).status_code==404
         assert c.post(f'/v1/sessions/{sid}/stop',headers=hb).status_code==404
         assert c.get(f'/v1/sessions/{sid}',headers=ha).json()['process_status']==ProcessStatus.RUNNING
-        assert c.post(f'/v1/sessions/{sid}/stop',headers=ha).json()['process_status']==ProcessStatus.STOP_REQUESTED
+        assert c.post(f'/v1/sessions/{sid}/stop',headers=ha).json()['process_status']==ProcessStatus.STOPPED
         assert c.post(f'/v1/sessions/{uuid4()}/stop',headers=hb).status_code==404
         assert c.post(f'/v1/sessions/{sid}/stop',headers={'X-Requi-Owner':A}).status_code==401
     assert not list(tmp_path.rglob('stop-request.json'))

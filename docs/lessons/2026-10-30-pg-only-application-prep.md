@@ -59,3 +59,8 @@ real cross-repo gateway + subsequent engine crash test now 4 passed.
 Still preparation, not ready: full gated test batches, dormant binding migration
 and labeling SQLite retirement, and explicit operator recovery / Debug evidence
 for a process crash without writer-exit proof remain to finish. No live writes.
+
+Full-suite split survey across 98 files: third0 304 pass + one stale expected
+Stop status; third1 327 pass; third2 297 pass + one old progress import.
+These were corrected to proven PG STOPPED and real fenced PG journal respectively.
+Focused correction gate recorded separately. No full-suite green claim yet.

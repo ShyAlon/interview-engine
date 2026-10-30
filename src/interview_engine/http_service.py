@@ -134,6 +134,13 @@ class SessionRegistry:
         return release
 
     def _acknowledge_quiescence(self,session):
+        try:self._acknowledge_quiescence_checked(session)
+        except Exception:
+            # Missing proof must remain visible and conservative, never mask
+            # the original provider error or invent quiescence on DB failure.
+            log.warning('session.stop.quiescence_unverified session=%s reason=store-unavailable',session.session_id,exc_info=True)
+
+    def _acknowledge_quiescence_checked(self,session):
         # Caller owns the registry lock; no new writer can enter the gap.
         if (not session.pg_stopped or session.pg_claim is None
                 or self._writers.get(session.session_id,0)>0):return

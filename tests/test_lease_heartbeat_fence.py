@@ -51,6 +51,9 @@ class FakePgStore:
                 if not self.heartbeat_alive or now>=self.expiry:lost.append(claim)
                 else:self.expiry=now+ttl
         return lost
+    def load_published(self,session_id,owner):
+        # This fake models lease loss only, never an authenticated Stop.
+        return {'generation':1,'control':{}}
     def close(self):pass
     def publish_step(self,claim,control,**kwargs):
         with self.lock:
