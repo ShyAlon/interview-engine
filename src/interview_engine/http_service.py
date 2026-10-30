@@ -1047,25 +1047,19 @@ def default_program_factory(session_id,request):
 SESSIONS_DSN_ENV='INTERVIEW_ENGINE_SESSIONS_DSN'
 OWNER_ID_ENV='INTERVIEW_ENGINE_OWNER_ID'
 SESSION_ID_ENV='INTERVIEW_ENGINE_SESSION_ID'
-FILE_SESSIONS_ENV='INTERVIEW_ENGINE_SESSIONS_FILE'
-FILE_SESSIONS_MSG=('database session persistence is the default: set '+SESSIONS_DSN_ENV+
-    ' (plus '+OWNER_ID_ENV+' and '+SESSION_ID_ENV+' outside tenant mode), or explicitly choose file persistence with '+
-    FILE_SESSIONS_ENV+'=1')
+REQUIRED_PG_MSG='PostgreSQL session persistence is required: set '+SESSIONS_DSN_ENV
 
 from vmodel_contracts.runtime import artifacts_root
 
 def _build_service_app():
-    """Service entry wiring, built when the ASGI server actually starts. Database
-    session persistence is the default; file persistence requires the explicit
-    opt-in; a missing choice fails the boot, never silently falls back."""
+    """Service entry wiring. Missing PG refuses before any runtime is built."""
     sessions_dsn=os.environ.get(SESSIONS_DSN_ENV)
+    if not sessions_dsn:raise RuntimeError(REQUIRED_PG_MSG)
     if os.environ.get('INTERVIEW_ENGINE_TENANTS')=='1':
         if not os.environ.get('INTERVIEW_ENGINE_TOKEN') or os.environ.get('INTERVIEW_ENGINE_TOKEN')=='local-interview-engine-token':
             raise RuntimeError('Tenant engine requires a configured private service token')
         from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
-        if not sessions_dsn and os.environ.get(FILE_SESSIONS_ENV)!='1':
-            raise RuntimeError(FILE_SESSIONS_MSG)
-        router=TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1',route_installed=bool(sessions_dsn))
+        router=TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,route_installed=bool(sessions_dsn))
         quality_store=None
         if sessions_dsn:
             from .pg_question_config import PostgresQualityConfig
@@ -1091,10 +1085,6 @@ def _build_service_app():
         registry=SessionRegistry(default_program_factory,session_store=pg_session_store(pool,owner_id,session_id,close_pool=True),owner_id=owner_id,allow_db_provider_dispatch=True)
         from .pg_question_config import PostgresQualityConfig
         return create_app(ScopedInstalledRegistry(registry,pool,artifacts_root(),owner_id,session_id),quality_store=PostgresQualityConfig(pool))
-    # File persistence only when explicitly chosen; otherwise fail clear at boot.
-    if os.environ.get(FILE_SESSIONS_ENV)!='1':
-        raise RuntimeError(FILE_SESSIONS_MSG)
-    return create_app(SessionRegistry(default_program_factory,state_dir=artifacts_root()))
 
 
 class _LazyServiceApp:

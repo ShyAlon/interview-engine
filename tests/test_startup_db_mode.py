@@ -75,15 +75,14 @@ def migrated_dsn():
 def test_startup_without_dsn_or_explicit_file_fails_clear():
     result = run_startup({})
     assert result.returncode != 0
-    assert 'database session persistence is the default' in result.stderr
-    assert 'INTERVIEW_ENGINE_SESSIONS_FILE=1' in result.stderr
+    assert 'PostgreSQL session persistence is required' in result.stderr
+    assert 'INTERVIEW_ENGINE_SESSIONS_DSN' in result.stderr
 
 
-def test_file_mode_runs_when_explicitly_chosen():
+def test_retired_file_mode_refuses_even_when_explicitly_chosen():
     result = run_startup({'INTERVIEW_ENGINE_SESSIONS_FILE': '1'})
-    assert result.returncode == 0, result.stderr
-    assert 'type=SessionRegistry store=None' in result.stdout
-    assert 'state_dir=None' not in result.stdout  # state_dir is the artifacts root
+    assert result.returncode != 0
+    assert 'PostgreSQL session persistence is required' in result.stderr
 
 
 def test_database_mode_wires_store_and_owner(migrated_dsn):
@@ -134,14 +133,14 @@ def test_tenant_mode_passes_dsn_to_router(migrated_dsn):
 def test_tenant_mode_without_dsn_or_explicit_file_fails_clear():
     result = run_startup({'INTERVIEW_ENGINE_TENANTS': '1', 'INTERVIEW_ENGINE_TOKEN': 't#startup-test-token'}, probe=PROBE_TENANT)
     assert result.returncode != 0
-    assert 'database session persistence is the default' in result.stderr
+    assert 'PostgreSQL session persistence is required' in result.stderr
 
 
-def test_tenant_mode_without_dsn_keeps_file_registries_when_explicit():
+def test_tenant_mode_without_dsn_refuses_old_explicit_file_flag():
     result = run_startup({'INTERVIEW_ENGINE_TENANTS': '1', 'INTERVIEW_ENGINE_TOKEN': 't#startup-test-token',
                           'INTERVIEW_ENGINE_SESSIONS_FILE': '1'}, probe=PROBE_TENANT)
-    assert result.returncode == 0, result.stderr
-    assert 'type=TenantRegistryRouter dsn_set=False' in result.stdout
+    assert result.returncode != 0
+    assert 'PostgreSQL session persistence is required' in result.stderr
 
 
 def test_tenant_router_builds_database_registries_per_owner(migrated_dsn):
