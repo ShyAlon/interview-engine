@@ -840,7 +840,7 @@ class ProtocolFailure(Exception):
     def __init__(self,code:ProtocolErrorCode,detail:str):self.code,self.detail=code,detail
 
 
-def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)->FastAPI:
+def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None,quality_store=None)->FastAPI:
     sessions=registry or SessionRegistry()
     from contextlib import asynccontextmanager
     @asynccontextmanager
@@ -851,6 +851,13 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
         close=getattr(sessions,'close',None)
         if close is not None:close()
     app=FastAPI(title="Requi.re interview engine",version="1",lifespan=_lifespan)
+    if quality_store is not None:
+        class QualityStoreBinding:
+            def __init__(self,app):self.app=app
+            async def __call__(self,scope,receive,send):
+                from .question_config import bound_store
+                with bound_store(quality_store):await self.app(scope,receive,send)
+        app.add_middleware(QualityStoreBinding)
     expected_token=service_token if service_token is not None else os.environ.get("INTERVIEW_ENGINE_TOKEN","local-interview-engine-token")
     if not expected_token:raise RuntimeError("INTERVIEW_ENGINE_TOKEN must not be empty")
 
@@ -859,21 +866,26 @@ def create_app(registry:SessionRegistry|None=None,*,service_token:str|None=None)
             raise HTTPException(401,"invalid interview engine service token")
 
 
-    if isinstance(sessions,SessionRegistry) and sessions._state_dir is not None and not os.environ.get("INTERVIEW_ENGINE_QUESTION_QUALITY_CONFIG"):
+    if quality_store is None and isinstance(sessions,SessionRegistry) and sessions._state_dir is not None and not os.environ.get("INTERVIEW_ENGINE_QUESTION_QUALITY_CONFIG"):
         from . import question_config
         question_config.set_store(question_config.ConfigStore(sessions._state_dir/"question_quality.json"))
 
     @app.get("/v1/question-quality-config",dependencies=[Depends(authenticate)])
     def get_question_quality_config():
         from . import question_config
-        return {"config_version":question_config.CONFIG_VERSION,"config":question_config.current(),
-                "defaults":question_config.defaults(),"load_status":question_config.store().status()}
+        try:
+            return {"config_version":question_config.CONFIG_VERSION,"config":question_config.current(),
+                    "defaults":question_config.defaults(),"load_status":question_config.store().status()}
+        except Exception:
+            raise HTTPException(503,"Question quality configuration is unavailable") from None
 
     @app.put("/v1/question-quality-config",dependencies=[Depends(authenticate)])
     def put_question_quality_config(body:dict):
         from . import question_config
         try:saved=question_config.store().put(body.get("config",body) if isinstance(body,dict) else body)
         except question_config.ConfigError as exc:raise HTTPException(422,str(exc))
+        except PermissionError:raise HTTPException(403,"Service configuration is read-only") from None
+        except Exception:raise HTTPException(503,"Question quality configuration is unavailable") from None
         return {"config_version":question_config.CONFIG_VERSION,"config":saved}
 
     @app.get("/v1/model-routes/default",dependencies=[Depends(authenticate)])
@@ -1053,7 +1065,12 @@ def _build_service_app():
         from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
         if not sessions_dsn and os.environ.get(FILE_SESSIONS_ENV)!='1':
             raise RuntimeError(FILE_SESSIONS_MSG)
-        service=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1',route_installed=bool(sessions_dsn)))
+        router=TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1',route_installed=bool(sessions_dsn))
+        quality_store=None
+        if sessions_dsn:
+            from .pg_question_config import PostgresQualityConfig
+            quality_store=PostgresQualityConfig(router.quality_config_pool)
+        service=create_app(router,quality_store=quality_store)
         service.add_middleware(TenantWorkerMiddleware,base=artifacts_root(),require_session=bool(sessions_dsn))
         return service
     if sessions_dsn:
@@ -1072,7 +1089,8 @@ def _build_service_app():
         pool=build_pool(sessions_dsn)
         from .pg_installed_router import ScopedInstalledRegistry
         registry=SessionRegistry(default_program_factory,session_store=pg_session_store(pool,owner_id,session_id,close_pool=True),owner_id=owner_id,allow_db_provider_dispatch=True)
-        return create_app(ScopedInstalledRegistry(registry,pool,artifacts_root(),owner_id,session_id))
+        from .pg_question_config import PostgresQualityConfig
+        return create_app(ScopedInstalledRegistry(registry,pool,artifacts_root(),owner_id,session_id),quality_store=PostgresQualityConfig(pool))
     # File persistence only when explicitly chosen; otherwise fail clear at boot.
     if os.environ.get(FILE_SESSIONS_ENV)!='1':
         raise RuntimeError(FILE_SESSIONS_MSG)
