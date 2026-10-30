@@ -125,3 +125,20 @@ def record_founder_classification(lake: EvidenceLake, *, session_id: str, sequen
             reason=DeadLetterReason.NO_MATCH,raw_text=raw_text,proposed_facet_key=None,created_at=now)
         lake.append_dead_letter(dead)
     return record,dead
+
+
+class DatabaseEvidenceLake(EvidenceLake):
+    """Same evidence contracts, PG documents are the sole source record."""
+    def __init__(self,documents,run_id):
+        self.documents=documents;self.paths=EvidencePaths(Path('evidence'),run_id)
+
+    def bind_session(self,session_id,binding=None):
+        binding=binding or SessionSchemaBinding(session_id=session_id,schema_id=COVERAGE_SCHEMA.schema_id,schema_version=COVERAGE_SCHEMA.schema_version)
+        self.documents.bind('evidence/schema-binding.json',binding.model_dump_json(indent=2).encode())
+        return binding
+
+    def _append(self,stream,row):
+        from .stop_fence import guarded_publish
+        raw=(json.dumps(row,separators=(',',':'),sort_keys=True,default=str)+'\n').encode()
+        self.documents.append('evidence/'+stream+'.jsonl',raw)
+        return self.paths.run/stream/'events.jsonl'

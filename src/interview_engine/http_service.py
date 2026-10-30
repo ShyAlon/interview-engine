@@ -1053,7 +1053,7 @@ def _build_service_app():
         from .tenant_worker import TenantRegistryRouter,TenantWorkerMiddleware
         if not sessions_dsn and os.environ.get(FILE_SESSIONS_ENV)!='1':
             raise RuntimeError(FILE_SESSIONS_MSG)
-        service=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1'))
+        service=create_app(TenantRegistryRouter(SessionRegistry,default_program_factory,artifacts_root(),session_dsn=sessions_dsn,allow_file_sessions=os.environ.get(FILE_SESSIONS_ENV)=='1',route_installed=bool(sessions_dsn)))
         service.add_middleware(TenantWorkerMiddleware,base=artifacts_root(),require_session=bool(sessions_dsn))
         return service
     if sessions_dsn:
@@ -1070,7 +1070,9 @@ def _build_service_app():
             raise RuntimeError(SESSION_ID_ENV+' is required with '+SESSIONS_DSN_ENV+' outside tenant mode: database session persistence runs under the real auth session - synthetic session authority is never substituted')
         # Standalone deployment: this process builds and owns its pool.
         pool=build_pool(sessions_dsn)
-        return create_app(SessionRegistry(default_program_factory,session_store=pg_session_store(pool,owner_id,session_id,close_pool=True),owner_id=owner_id,allow_db_provider_dispatch=True))
+        from .pg_installed_router import ScopedInstalledRegistry
+        registry=SessionRegistry(default_program_factory,session_store=pg_session_store(pool,owner_id,session_id,close_pool=True),owner_id=owner_id,allow_db_provider_dispatch=True)
+        return create_app(ScopedInstalledRegistry(registry,pool,artifacts_root(),owner_id,session_id))
     # File persistence only when explicitly chosen; otherwise fail clear at boot.
     if os.environ.get(FILE_SESSIONS_ENV)!='1':
         raise RuntimeError(FILE_SESSIONS_MSG)

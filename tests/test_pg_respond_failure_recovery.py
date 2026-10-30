@@ -8,9 +8,9 @@ pgserver = pytest.importorskip('pgserver', reason='pgserver not installed')
 
 from vmodel_contracts.interactive import StartSessionRequest, InputResponse
 from interview_engine.http_service import SessionRegistry, default_program_factory
-from interview_engine.pg_session_store import PgSessionStore, PublicationConflict
+from interview_engine.pg_session_store import PublicationConflict
 from conftest import managed_pool
-from test_pg_application_wiring import make_conn, fake_ollama, fake_models, FakeModel, OWNER, SID, _OPEN
+from test_pg_application_wiring import PgSessionStore, make_conn, fake_ollama, fake_models, FakeModel, OWNER, SID, _OPEN
 
 
 def test_respond_crash_mid_advance_original_error_and_clean_retry(tmp_path, fake_ollama, fake_models):

@@ -20,6 +20,7 @@ def make_saver(uri,session='s1',generation=1,epoch=1,expire=3600):
     ctx=PostgresSaver.from_conn_string(uri)
     saver=ctx.__enter__()
     bootstrap_checkpoint_schema(saver.conn)
+    admin=saver.conn
     admin.execute(LEASE_DDL)
     admin.execute("INSERT INTO engine_sessions(session_id,owner_id,task_id,generation,created_at,lease_epoch,lease_expires_at)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",

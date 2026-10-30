@@ -51,9 +51,17 @@ class InterviewApplication:
         self.model_route=model_route
         self.model_map=pinned_models if pinned_models is not None else session_models.resolve(model_route,initial_model) if model_route else None
         if self.model_map is not None:session_models.validate(self.model_map,model_route,preflight=pinned_models is None)
-        self.outdir=artifacts_root(artifact_root)/session_id/'interview';self.outdir.mkdir(parents=True,exist_ok=True)
-        from .evidence import EvidenceLake
-        self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
+        self.outdir=artifacts_root(artifact_root)/session_id/'interview'
+        self.documents=None
+        if pg_store is not None:
+            from .pg_documents import InterviewDocuments
+            from .evidence import DatabaseEvidenceLake
+            self.documents=InterviewDocuments(pg_store,pg_claim,task_id)
+            self.evidence=DatabaseEvidenceLake(self.documents,task_id)
+        else:
+            self.outdir.mkdir(parents=True,exist_ok=True)
+            from .evidence import EvidenceLake
+            self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
         self.schema_binding=self.evidence.bind_session(session_id)
         if pg_store is not None:
             # Database mode: the graph checkpoints into Postgres through the
@@ -84,7 +92,7 @@ class InterviewApplication:
                 def put_writes(self,*args,**kwargs):
                     return guarded_publish(lambda:super(FencedSqliteSaver,self).put_writes(*args,**kwargs))
             saver=FencedSqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
-        log=UsageLog(session_id,sink=jsonl_sink(self.outdir/'usage.jsonl'))
+        log=UsageLog(session_id,sink=(lambda usage:self.documents.append('interview/usage.jsonl',(usage.model_dump_json()+'\n').encode())) if self.documents is not None else jsonl_sink(self.outdir/'usage.jsonl'))
         self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
         if pg_store is not None:
@@ -128,7 +136,7 @@ class InterviewApplication:
         with self._runtime_context():
             from .verification import VerificationLog
             self.graph=build_graph(log,checkpointer=saver,progress=progress,verification_log=VerificationLog(self.outdir/'verification.jsonl'),conops_enabled=True,raw_output_dir=self.outdir/'debug',
-                session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence)
+                session_id=session_id,schema_id=self.schema_binding.schema_id,schema_version=self.schema_binding.schema_version,evidence_lake=self.evidence,documents=self.documents)
         self.checkpointer=saver;self.saver=saver
         self.cfg={'configurable':{'thread_id':session_id,'checkpoint_ns':''}}
         submission=IntakeSubmission(free_text=idea,founder_id='http-founder',submission_id=session_id)
@@ -184,7 +192,7 @@ class InterviewApplication:
                 if any(d.actor!=response.actor_id for d in reviewed.decisions):raise ValueError('semantic decision actor mismatch')
                 resolved=reviewed.resolved_candidate(IntentModel.model_validate)
                 self.graph.update_state(self.cfg,{'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True})
-                __import__('interview_engine.stop_fence',fromlist=['guarded_publish']).guarded_publish(lambda:(self.outdir/'semantic-review.json').write_text(reviewed.model_dump_json(indent=2)))
+                self._publish_document(lambda:self._write_document('semantic-review.json',reviewed.model_dump_json(indent=2)))
                 self.result={**self.result,'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True}
                 self.open_input=None;self.state={}
             if self.open_input is not None and self.open_input.kind==InputKind.APPROVAL:
@@ -200,9 +208,10 @@ class InterviewApplication:
                 if value == 0:
                     # Archive before changing the checkpoint. Rework ConOps only;
                     # the reviewed intent and its source transcript remain intact.
-                    archive=self.outdir/'review-history';archive.mkdir(exist_ok=True)
+                    archive=self.outdir/'review-history'
+                    if getattr(self,'documents',None) is None:archive.mkdir(exist_ok=True)
                     from .stop_fence import guarded_publish
-                    guarded_publish(lambda:(archive/f'{self.open_input.input_id}.json').write_text(json.dumps(
+                    self._publish_document(lambda:self._write_document(f'review-history/{self.open_input.input_id}.json',json.dumps(
                         {'intent_model':self.result['intent_model'],'conops':self.result['conops'],
                          'guidance':response.rationale or ''},ensure_ascii=False,indent=2)))
                     rework_backup=dict(self.result);rework_input=self.open_input
@@ -342,13 +351,25 @@ class InterviewApplication:
         return {'decision_purpose':purpose,'evidence_version':1,'session_id':self.session_id,
                 'evidence_revision':hashlib.sha256(raw.encode('utf-8')).hexdigest(),'evidence':evidence}
 
-    def _finish(self):
+    def _publish_document(self,call):
+        # PG writes lock and validate task + lease in their own connection.
+        # An outer delivery task lock would wait on itself across two pools.
+        if getattr(self,'documents',None) is not None:return call()
         from .stop_fence import guarded_publish
-        return guarded_publish(self._finish_outputs)
+        return guarded_publish(call)
+
+    def _finish(self):
+        return self._publish_document(self._finish_outputs)
+
+    def _write_document(self,name,text):
+        if getattr(self,'documents',None) is not None:return self.documents.write('interview/'+name,text.encode())
+        return (self.outdir/name).write_text(text)
 
     def _finish_outputs(self):
         intent=IntentModel.model_validate(self.result['intent_model']);conops=ConOpsDocument.model_validate(self.result['conops'])
-        if intent.founder_register:
-            (self.outdir/'founder-decisions.json').write_text(intent.founder_register.model_dump_json(indent=2))
-        (self.outdir/'intent_model.json').write_text(intent.model_dump_json(indent=2));(self.outdir/'conops.json').write_text(conops.model_dump_json(indent=2))
-        (self.outdir/'conops.md').write_text(render_conops(conops));self.finished=True;self.open_input=None
+        values={'intent_model.json':intent.model_dump_json(indent=2),'conops.json':conops.model_dump_json(indent=2),'conops.md':render_conops(conops)}
+        if intent.founder_register:values['founder-decisions.json']=intent.founder_register.model_dump_json(indent=2)
+        if getattr(self,'documents',None) is not None:self.documents.write_many({'interview/'+name:text.encode() for name,text in values.items()})
+        else:
+            for name,text in values.items():self._write_document(name,text)
+        self.finished=True;self.open_input=None

@@ -152,22 +152,21 @@ def test_signal_heavy_benchmark_records_query_and_checkout_cost(tmp_path):
 
 
 def test_actual_application_observational_mode_is_explicit(tmp_path,monkeypatch):
-    from test_pg_application_wiring import make_conn,FakeModel
+    from test_pg_application_wiring import make_conn,FakeModel,PgSessionStore,OWNER
     from interview_engine.application import InterviewApplication
-    from interview_engine.pg_session_store import PgSessionStore
     from interview_engine.pg_journal import ObservationalJournal
     from conftest import managed_pool
     from interview_engine import model_config
     monkeypatch.setattr('httpx.get',lambda *a,**k:type('Response',(),{'raise_for_status':lambda self:None,'json':lambda self:{'data':[{'id':'phi4'}]}})())
     monkeypatch.setattr(model_config,'build_chat_model',lambda *a,**k:FakeModel([]))
     store=PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn))
-    store.create('live','task',OWNER_A)
-    claim=store.claim('live',OWNER_A,'worker',ttl=60)
+    store.create('live','task',OWNER)
+    claim=store.claim('live',OWNER,'worker',ttl=60)
     app=InterviewApplication('live','task','idea',model_route='ollama',initial_model='phi4',
         artifact_root=str(tmp_path/'artifacts'),pg_store=store,pg_claim=claim,progress_mode='observational')
     try:
         assert isinstance(app.progress_journal,ObservationalJournal)
         append(app.progress_journal)
-        assert len(store.read_journal('live',OWNER_A,0,100))==1
+        assert len(store.read_journal('live',OWNER,0,100))==1
     finally:
         if hasattr(app,'close'):app.close()

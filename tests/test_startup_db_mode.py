@@ -89,7 +89,7 @@ def test_file_mode_runs_when_explicitly_chosen():
 def test_database_mode_wires_store_and_owner(migrated_dsn):
     result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': migrated_dsn, 'INTERVIEW_ENGINE_OWNER_ID': OWNER, 'INTERVIEW_ENGINE_SESSION_ID': SESSION})
     assert result.returncode == 0, result.stderr
-    assert 'type=SessionRegistry store=PgSessionStore' in result.stdout
+    assert 'type=ScopedInstalledRegistry store=PgSessionStore' in result.stdout
     assert ('owner=%s' % OWNER) in result.stdout
 
 

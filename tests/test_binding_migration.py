@@ -47,8 +47,12 @@ def test_dry_run_no_mutations_apply_stamp_only_full_backup_and_repeat(tmp_path):
  assert json.loads(Path(applied['audit']).read_text())['status']=='applied'
  assert migrate(tmp_path,path,True)['status']=='current';assert len(list((tmp_path/'migration-backups').iterdir()))==1
 
-def test_old_snapshot_is_typed_nonretryable_and_apply_restores_exact_input(tmp_path):
+def test_read_only_snapshot_preserves_control_and_old_binding_blocks_mutation_until_apply(tmp_path):
  path,payload,pending=fixture(tmp_path)
+ from interview_engine.session_models import resolve
+ payload['model_map']=resolve('ollama','phi4')
+ state=tmp_path/payload['session_id']/'interview/http-session.json'
+ state.write_text(json.dumps(payload))
  class Program:
   def __init__(self,sid,request):
    self.model_route=request.model_route;self.finished=False
@@ -56,8 +60,14 @@ def test_old_snapshot_is_typed_nonretryable_and_apply_restores_exact_input(tmp_p
   def advance(self,response):self.finished=True;return None
  registry=SessionRegistry(lambda sid,r:Program(sid,r),state_dir=tmp_path)
  client=TestClient(create_app(registry,service_token='test'),headers={'X-Interview-Engine-Token':'test'})
- old=client.get('/v1/sessions/cef8ed07-0894-4f4e-bd40-2455fbfd0fa3');assert old.status_code==422
- detail=old.json()['detail'];assert 'Session needs binding migration' in detail['detail'] and detail['retryable'] is False
+ # Snapshot reads published control only, without graph or schema mutation.
+ old=client.get('/v1/sessions/cef8ed07-0894-4f4e-bd40-2455fbfd0fa3');assert old.status_code==200
+ assert old.json()['sequence']==7 and old.json()['open_input']['input_id']==str(pending.input_id)
+ # Mutation still constructs the program and refuses the old binding.
+ reply=InputResponse(input_id=pending.input_id,expected_sequence=7,value='Founders',actor_id='owner')
+ refused=client.post('/v1/sessions/cef8ed07-0894-4f4e-bd40-2455fbfd0fa3/inputs/'+str(pending.input_id),json=reply.model_dump(mode='json'))
+ assert refused.status_code==422
+ detail=refused.json()['detail'];assert 'Session needs binding migration' in detail['detail'] and detail['retryable'] is False
  assert '0.19.0' in detail['detail'] and CONTRACT_VERSION in detail['detail']
  assert json.loads(path.read_text())['contract_version']=='0.19.0'
  migrate(tmp_path,path,True)

@@ -79,3 +79,49 @@ def test_registry_revoked_between_reads_never_writes_stop(tmp_path):
         with pytest.raises(PermissionError):registry.stop(anchor.execution_session_id)
         assert not (root/'interview/stop-request.json').exists()
     finally:_owner.reset(token)
+
+
+def test_pg_installed_control_requires_current_binding_and_no_anchor_file(tmp_path):
+    from interview_engine.installed_execution import load_database_installed_execution_control
+    from types import SimpleNamespace
+    root,anchor,sha=fixture(tmp_path);(root/'execution-generation.json').unlink();active=[True]
+    def read():return {'anchor':anchor,'anchor_sha256':sha} if active[0] else None
+    fence=SimpleNamespace(generation=2)
+    control=load_database_installed_execution_control(root,expected_anchor=anchor,expected_anchor_sha256=sha,
+        read_binding=read,fence_factory=lambda expected_root,expected_anchor: fence)
+    assert control.fence is fence and control.validate()['document_sha256']==sha
+    with pytest.raises(ValueError,match='new interview input'):control.reject_interview_mutation()
+    active[0]=False
+    with pytest.raises(PermissionError):control.validate()
+    assert not (root/'execution-generation.json').exists()
+
+
+def test_pg_installed_control_rejects_hash_and_owner_before_fence_factory(tmp_path):
+    from interview_engine.installed_execution import load_database_installed_execution_control
+    root,anchor,sha=fixture(tmp_path);calls=[]
+    with pytest.raises(ValueError,match='digest'):
+        load_database_installed_execution_control(root,expected_anchor=anchor,expected_anchor_sha256='f'*64,
+            read_binding=lambda:{'anchor':anchor,'anchor_sha256':'f'*64},fence_factory=lambda *a:calls.append(1))
+    foreign=root.parent/'foreign'
+    with pytest.raises(ValueError,match='namespace'):
+        load_database_installed_execution_control(foreign,expected_anchor=anchor,expected_anchor_sha256=sha,
+            read_binding=lambda:{'anchor':anchor,'anchor_sha256':sha},fence_factory=lambda *a:calls.append(1))
+    assert calls==[]
+
+
+def test_pg_registry_rechecks_bound_owner_and_blocks_mutation_without_files(tmp_path):
+    from interview_engine.installed_execution import InstalledExecutionRegistry
+    from interview_engine.tenant_worker import _owner
+    from types import SimpleNamespace
+    root,anchor,sha=fixture(tmp_path);(root/'execution-generation.json').unlink();active=[True];seen=[]
+    def read(owner,sid):
+        seen.append((owner,sid));return {'anchor':anchor,'anchor_sha256':sha} if active[0] else None
+    registry=InstalledExecutionRegistry(tmp_path,read_binding=read,fence_factory=lambda root,anchor:SimpleNamespace(generation=2))
+    token=_owner.set(anchor.owner_id)
+    try:
+        assert registry.get(anchor.execution_session_id).anchor==anchor
+        with pytest.raises(ValueError,match='new interview input'):registry.respond(anchor.execution_session_id,{})
+        active[0]=False
+        with pytest.raises(PermissionError):registry.get(anchor.execution_session_id)
+        assert len(seen)>=5 and not (root/'execution-generation.json').exists()
+    finally:_owner.reset(token)

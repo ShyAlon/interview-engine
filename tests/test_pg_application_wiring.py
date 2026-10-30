@@ -25,9 +25,22 @@ from interview_engine.application import InterviewApplication
 from interview_engine.http_service import SessionRegistry, default_program_factory
 from interview_engine.pg_checkpoint import FencedPostgresSaver
 from interview_engine.pg_journal import BufferedJournal
-from interview_engine.pg_session_store import PgSessionStore
+from interview_engine.pg_session_store import PgSessionStore as NativePgSessionStore
 from interview_engine.stop_fence import StopRequested
 from test_pg_session_store import MIRRORED_REGISTRY_DDL, MIRRORED_JOURNAL_DDL, MIRRORED_STAGING_DDL
+
+# The application now persists workflow documents in the migration-owned table.
+# This harness mirrors only schema; production forced-RLS coverage lives in
+# delivery-api's tests against the complete migrations and real auth claims.
+class PgSessionStore(NativePgSessionStore):
+    def __init__(self,pool,**kwargs):
+        kwargs.setdefault('claims',(OWNER,'22222222-2222-4222-8222-222222222222'))
+        super().__init__(pool,**kwargs)
+    def create(self,session_id,task_id,owner_id):
+        with self._borrow() as conn,conn.transaction():
+            conn.execute('INSERT INTO tasks(task_id,engine_session_id,generation) VALUES (%s,%s,1) ON CONFLICT DO NOTHING',(task_id,session_id))
+        return super().create(session_id,task_id,owner_id)
+
 
 OWNER = '00000000-0000-0000-0000-000000000001'
 SID = '11111111-1111-4111-8111-111111111111'
@@ -54,6 +67,8 @@ def make_conn(tmp_path, name='pgdata', init=True):
     conn = psycopg.connect(server.get_uri(), autocommit=False, row_factory=psycopg.rows.dict_row)
     if init:
         conn.execute(MIRRORED_REGISTRY_DDL)
+        conn.execute("CREATE TABLE tasks(task_id TEXT PRIMARY KEY,engine_session_id TEXT,generation INTEGER NOT NULL,stop_requested_at DOUBLE PRECISION)")
+        conn.execute("CREATE TABLE generator_documents(execution_session_id TEXT NOT NULL REFERENCES engine_sessions(session_id),owner_id UUID NOT NULL,auth_session_id UUID NOT NULL,generation INTEGER NOT NULL,document_key TEXT NOT NULL,payload BYTEA,sha256 TEXT,updated_at DOUBLE PRECISION NOT NULL,PRIMARY KEY(execution_session_id,document_key),CHECK((payload IS NULL)=(sha256 IS NULL)))")
         conn.execute(MIRRORED_JOURNAL_DDL)
         conn.execute(MIRRORED_STAGING_DDL)
         conn.commit()

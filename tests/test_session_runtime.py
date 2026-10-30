@@ -19,6 +19,7 @@ def test_application_always_binds_private_runtime_with_or_without_models(tmp_pat
     application.model_map=pinned
     application.outdir=tmp_path
     application._heartbeat_signal=lambda *args:None
+    application._call_end_signal=lambda *args:None
     application.usage_log=SimpleNamespace(record=lambda *args:None)
     assert current() is None
     with application._runtime_context():

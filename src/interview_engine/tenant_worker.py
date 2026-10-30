@@ -74,8 +74,10 @@ class TenantRegistryRouter:
     new scope requests are rejected rather than closing anyone's active
     interview."""
 
-    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False,pool=None):
+    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False,pool=None,installed_resolver=None,route_installed=False):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
+        self._installed_resolver=installed_resolver
+        self._route_installed=route_installed
         self._session_dsn=session_dsn
         # One pool per process/DSN shared by every tenant registry: claims are
         # applied per checkout (pg_claims), so one pool serves all tenants
@@ -173,6 +175,22 @@ class TenantRegistryRouter:
         self._pool=None
 
     def __getattr__(self,name):
+        if self._route_installed and self._installed_resolver is None:
+            with self._lock:
+                if self._pool is None:
+                    from .pg_pool import build_pool
+                    self._pool=build_pool(self._session_dsn)
+                from .pg_installed_router import InstalledControlRouter
+                self._installed_resolver=InstalledControlRouter(self._pool,self.base).resolve
+        if self._installed_resolver is not None and name in ('get','snapshot','respond','switch_route','stop','reconcile_stopped','progress'):
+            def route(session_id,*args,**kwargs):
+                target=self._installed_resolver(name,session_id)
+                if target is not None:return target(session_id,*args,**kwargs)
+                return self._normal_attribute(name)(session_id,*args,**kwargs)
+            return route
+        return self._normal_attribute(name)
+
+    def _normal_attribute(self,name):
         registry=self._registry()
         key=(_owner.get(),_session.get() if self._session_dsn is not None else None)
         attr=getattr(registry,name)
