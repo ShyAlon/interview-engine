@@ -43,3 +43,11 @@ def test_registry_refuses_missing_pg_before_any_state_path(tmp_path):
 def test_retired_sqlite_progress_module_absent():
     import importlib.util
     assert importlib.util.find_spec('interview_engine.progress_journal') is None
+
+
+def test_sqlite_operator_paths_and_dependency_are_retired():
+    from pathlib import Path
+    root=Path(__file__).parents[1]
+    assert not (root/'scripts/migrate-session-bindings.py').exists()
+    assert not (root/'scripts/enrich-all-categorization-shadow.py').exists()
+    assert 'langgraph-checkpoint-sqlite' not in (root/'pyproject.toml').read_text()

@@ -1,7 +1,6 @@
 """Buffered progress journal for database-backed sessions.
 
-File mode appends every progress signal to progress.sqlite the moment it is
-emitted. In database mode a signal becomes durable ONLY with its step: signals
+A buffered signal becomes durable ONLY with its step: signals
 buffer during an advance and commit inside the step's publish_step transaction
 (control + journal pages + checkpoint pointer together). A crash mid-advance
 leaves no half-step of journal pages.

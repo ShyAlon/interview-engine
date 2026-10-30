@@ -64,3 +64,37 @@ Full-suite split survey across 98 files: third0 304 pass + one stale expected
 Stop status; third1 327 pass; third2 297 pass + one old progress import.
 These were corrected to proven PG STOPPED and real fenced PG journal respectively.
 Focused correction gate recorded separately. No full-suite green claim yet.
+
+Final gate after fixes and operator-path retirement: all 99 test files split
+into three non-overlapping batches, DELIVERY_TEST_DELIVERY_SOURCE enabled:
+300 + 312 + 313 = 925 passed, no skips/deselections. Collection verified separately.
+Hosted CI remains unverified. No runtime/script SQLite import remains and its
+package dependency is removed. The source technology catalog is unaffected.
+
+Explicit final retirement accounting:
+- Delete tests/test_binding_migration.py's nine legacy operator executions:
+  dry-run/apply/backup/repeat; read-only snapshot plus stamp application; schema
+  and identity conflict; scan/services-stopped gate; interrupted backup; missing
+  checkpoint/unsupported stamp/symlink; concurrent changed source; interrupted
+  final audit; true binding drift. The 0.19-to-0.20 stamp-only file migration
+  itself is retired, not ported. New immutable binding drift/migration-refusal
+  test preserves the retained no-silent-rewrite behavior, not migration support.
+- Remove the SQLite checkpoint input and bulk discovery helper from labeling
+  enrichment. One latest-local-checkpoint reader execution is retired; explicit
+  exported transcript enrichment remains and is tested, with hashes unguessed.
+- HTTP memory/file parametrized repetitions retired; all shared test functions
+  still execute on PG. Explicit file-start cases become refusal tests. The one
+  tenant file-router success execution is retired. Missing-store Stop route
+  test becomes constructor refusal, since unsupported registry never starts.
+- Graph crash/resume test renamed and uses real fenced PG, not MemorySaver.
+
+Crash recovery: process death before acknowledgement intentionally leaves
+STOP_REQUESTED. Existing Debug engine.process_status_name shows this; a direct
+projection test proves both statuses remain visible. Offline operator recovery
+requires the exact stopped owner/session/generation/old epoch/old process ID,
+with dry-run default and explicit --apply --writers-terminated attestation.
+Operator must terminate the actual process and accepted provider threads first;
+a timeout, lease expiry or new registry is never proof. Script changes only
+quiescence JSON under a row lock, no new schema/role/public route/resume. It is
+not an automatic process-death detector and was exercised only on disposable PG.
+The agent did not run this script on live state. README gives the recovery path.
