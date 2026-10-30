@@ -40,6 +40,11 @@ def _graph_tenant_claims(pg_store,pg_claim):
     return (pg_claim.owner_id,pg_claim.session_id)
 
 
+def durable_progress_signal(event):
+    """Persist meaningful boundaries, not elapsed-time/model-call duplicates."""
+    return event.status == "failed" or (event.status != "heartbeat" and not event.stage.startswith("llm_call:"))
+
+
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
     def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None,progress_mode:str="buffered"):
@@ -81,31 +86,21 @@ class InterviewApplication:
         self._pg_store=pg_store;self._pg_claim=pg_claim
         if not hasattr(self,'_staging'):self._staging=None
         def journal_signal(ev):
+            if not durable_progress_signal(ev):return
             # The interview graph emits intent and ConOps stages through one bus.
             phase = "conops" if "conops" in ev.stage.lower() or "concept" in ev.stage.lower() else "intent"
             self.progress_journal.append(phase_key=phase,stage=ev.stage,label=ev.label,
                 status=ev.status if ev.status in ("started","completed","failed","heartbeat","item_started","item_completed") else "heartbeat",detail=ev.detail,completed=ev.completed,total=ev.total)
         progress.subscribe(journal_signal)
         def heartbeat_signal(stage, label, elapsed):
-            self.progress_journal.append(phase_key="conops" if "conops" in stage.lower() else "intent",
-                stage=stage,label=label,status="heartbeat",detail=f"Model call still running, {elapsed:.0f}s elapsed")
+            # model_config already prints transient heartbeat lines. Never open
+            # a fenced database transaction just to persist an elapsed clock.
+            pass
         self._heartbeat_signal=heartbeat_signal
         def call_end_signal(ev):
-            # One journal entry per finished model call: which call type, how
-            # long, what it produced - the live answer to 'what is it doing'.
-            stage=str(ev.get("stage") or "")
-            label=f"Model call '{stage}'" + (f" [{ev['item']}]" if ev.get("item") else "") + " finished"
-            parts=[f"{ev.get('latency_s',0):.1f}s"]
-            usage=ev.get("usage") or {}
-            if usage:
-                parts.append(f"{usage.get('input_tokens','?')} in / {usage.get('output_tokens','?')} out tokens")
-            if ev.get("tokens_per_s"):
-                parts.append(f"{ev['tokens_per_s']:.1f} tok/s")
-            timing=ev.get("timing") or {}
-            if timing:
-                parts.append(f"load {timing.get('load_ms','?')}ms, prompt {timing.get('prompt_eval_ms','?')}ms, generate {timing.get('eval_ms','?')}ms")
-            self.progress_journal.append(phase_key="conops" if "conops" in stage.lower() else "intent",
-                stage=f"llm_call:{stage}",label=label,status="completed",detail=" · ".join(parts))
+            # model_config logs the call; UsageLog/accounting retain paid work.
+            # The journal only needs graph stage/item boundaries and failures.
+            pass
         self._call_end_signal=call_end_signal
         with self._runtime_context():
             from .verification import VerificationLog
