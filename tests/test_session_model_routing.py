@@ -36,18 +36,18 @@ def test_deepseek_requires_key(monkeypatch):
     with pytest.raises(Exception,match='DEEPSEEK_API_KEY'):
         session_models.validate(session_models.resolve('deepseek'))
 
-def test_http_preflight_422_before_session_created(monkeypatch,tmp_path):
+def test_http_preflight_422_before_session_created(monkeypatch,tmp_path,pg_registry):
     import interview_engine.http_service as service
     monkeypatch.setattr(model_config,'_env',lambda key:None)
     monkeypatch.setattr(service,'default_program_factory',service.default_program_factory)
-    registry=SessionRegistry(service.default_program_factory,state_dir=tmp_path)
+    registry=pg_registry(service.default_program_factory,allow_db_provider_dispatch=True)
     client=TestClient(create_app(registry,service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
     response=client.post('/v1/sessions',json=StartSessionRequest(task_id='t',idea='idea',model_route='deepseek').model_dump(mode='json'))
     assert response.status_code==422
-    assert not list(tmp_path.iterdir())
+    assert not list(tmp_path.rglob('http-session.json'))
     assert not registry._sessions
 
-def test_pinned_map_written_and_restored_after_environment_change(monkeypatch,tmp_path):
+def test_pinned_map_written_and_restored_after_environment_change(monkeypatch,tmp_path,pg_registry):
     from interview_engine import http_service as service
     class Program:
         finished=False
@@ -55,17 +55,19 @@ def test_pinned_map_written_and_restored_after_environment_change(monkeypatch,tm
         def __init__(self,route,models):self.model_route,self.model_map=route,models
         def advance(self,response=None):return None
     def factory(sid,request):
-        path=tmp_path/sid/'interview'/'http-session.json'
-        models=json.loads(path.read_text())['model_map'] if path.exists() else session_models.resolve(request.model_route)
+        row=pg_registry.store.load_published(sid,pg_registry.owner)
+        models=row['control']['model_map'] if row and row['control'] else session_models.resolve(request.model_route)
         session_models.validate(models)
         return Program(request.model_route,models)
     monkeypatch.setattr(model_config,'_env',lambda key:'test-key' if key=='DEEPSEEK_API_KEY' else None)
-    registry=SessionRegistry(factory,state_dir=tmp_path)
+    registry=pg_registry(factory,lease_ttl=.1,allow_db_provider_dispatch=True)
     session,_=registry.start(StartSessionRequest(task_id='t',idea='idea',model_route='deepseek'))
-    saved=json.loads((tmp_path/session.session_id/'interview'/'http-session.json').read_text())
+    saved=pg_registry.store.load_published(session.session_id,pg_registry.owner)['control']
     assert saved['model_map']['probing']==['deepseek','deepseek-flash']
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else 'test-key' if key=='DEEPSEEK_API_KEY' else None)
-    restored=SessionRegistry(factory,state_dir=tmp_path).get(session.session_id)
+    registry.close()
+    import time;time.sleep(.15)
+    restored=pg_registry(factory,allow_db_provider_dispatch=True).get(session.session_id)
     assert restored.program.model_map['probing']==['deepseek','deepseek-flash']
 
 def test_ollama_preflight_missing_model(monkeypatch):
@@ -122,10 +124,10 @@ def test_http_ollama_env_pins_phi4_and_usage_route(monkeypatch):
         assert recorded[0]['provider']=='ollama' and recorded[0]['model']=='qwen2.5-coder:14b'
 
 
-def test_http_route_preview_and_start_share_env_resolution(monkeypatch):
+def test_http_route_preview_and_start_share_env_resolution(monkeypatch,pg_registry):
     monkeypatch.setattr(model_config,'_env',lambda key:'ollama:phi4' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
-    client=TestClient(create_app(service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
+    client=TestClient(create_app(pg_registry(),service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
     response=client.get('/v1/model-routes/ollama')
     assert response.status_code==200
     assert set(tuple(pair) for pair in response.json()['model_map'].values())=={('ollama','qwen2.5-coder:14b')}
@@ -166,11 +168,11 @@ def test_partial_shared_env_inherits_phi4_for_unset_expert_opinion(monkeypatch):
         assert model_config.for_stage('expert_opinion').model=='qwen2.5-coder:14b'
 
 
-def test_route_preview_with_divergent_legacy_defaults_allows_explicit_choice(monkeypatch):
+def test_route_preview_with_divergent_legacy_defaults_allows_explicit_choice(monkeypatch,pg_registry):
     settings={'INTERVIEW_ENGINE_MODEL_PROBING':'ollama:phi4','INTERVIEW_ENGINE_MODEL_EXPERT_OPINION':'ollama:qwen2.5-coder:14b'}
     monkeypatch.setattr(model_config,'_env',lambda key:settings.get(key))
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
-    client=TestClient(create_app(service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
+    client=TestClient(create_app(pg_registry(),service_token=TOKEN),headers={'X-Interview-Engine-Token':TOKEN})
     assert client.get('/v1/model-routes/ollama').status_code==200
     default=client.get('/v1/model-routes/default')
     assert default.status_code==422

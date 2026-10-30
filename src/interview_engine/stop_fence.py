@@ -15,6 +15,14 @@ class SessionWriterBusy(RuntimeError):pass
 _check=ContextVar('cooperative_stop_check',default=None)
 _current=ContextVar('cooperative_stop_fence',default=None)
 _stopped_usage=ContextVar('cooperative_stopped_usage_sink',default=None)
+_inflight_tracker=ContextVar('pg_inflight_writer_tracker',default=None)
+
+@contextmanager
+def inflight_writer_tracker(register):
+    token=_inflight_tracker.set(register)
+    try:yield
+    finally:_inflight_tracker.reset(token)
+
 
 @contextmanager
 def execution_fence(check):
@@ -186,14 +194,21 @@ def track_inflight_worker():
     A graph timeout does not prove its provider thread has stopped. Do not check
     Stop here: an accepted response must still settle its usage after Stop.
     """
+    tracker=_inflight_tracker.get()
+    pg_release=tracker() if tracker is not None else lambda:None
     fence=_current.get()
-    if fence is None:return lambda:None
-    with fence.lock:fence._writer_enter()
+    if fence is None:return pg_release
+    try:
+        with fence.lock:fence._writer_enter()
+    except BaseException:
+        pg_release();raise
     released=False
     def release():
         nonlocal released
         with fence.lock:
-            if not released:fence._writer_exit();released=True
+            if not released:
+                try:fence._writer_exit()
+                finally:released=True;pg_release()
     return release
 
 

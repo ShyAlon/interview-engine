@@ -11,62 +11,14 @@ PG_OWNER='00000000-0000-0000-0000-000000000001'
 def authed(app):return TestClient(app,headers={'X-Interview-Engine-Token':TOKEN})
 
 
-@pytest.fixture(params=['memory','pg'])
-def make_registry(request,tmp_path):
-    # Run the original session/HTTP contract tests against both backends:
-    # the in-memory/file default and database persistence. One pgserver
-    # database per test; each registry gets its own store over it.
-    regs=[]
-    if request.param=='memory':
-        def mk(*a,**k):
-            r=SessionRegistry(*a,**k);regs.append(r);return r
-        yield mk
-        return
-    from conftest import managed_pg_server, managed_pool
-    from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
-    from interview_engine.pg_session_store import PgSessionStore
-    server=managed_pg_server(str(tmp_path/'pgdata'))
-    conn=psycopg.connect(server.get_uri(),autocommit=False,row_factory=psycopg.rows.dict_row)
-    conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
-    n=[0]
-    def mk(*a,**k):
-        n[0]+=1
-        k.setdefault('session_store',PgSessionStore(managed_pool(conn.info.dsn)));k.setdefault('owner_id',PG_OWNER)
-        k.setdefault('instance_id',f't#{n[0]}');k.setdefault('lease_ttl',60.0)
-        r=SessionRegistry(*a,**k);regs.append(r);return r
-    mk.tmpdir=tmp_path
-    yield mk
-    for r in regs:r.close()
-    conn.close()
+@pytest.fixture
+def make_registry(pg_registry):
+    return pg_registry
 
 
-@pytest.fixture(params=['file','pg'])
-def make_persistent_registry(request,tmp_path):
-    # Restart-persistence tests: file mode and database mode.
-    regs=[]
-    if request.param=='file':
-        def mk(*a,**k):
-            k['state_dir']=tmp_path
-            r=SessionRegistry(*a,**k);regs.append(r);return r
-        mk.tmpdir=tmp_path
-        yield mk
-        return
-    from conftest import managed_pg_server, managed_pool
-    from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
-    from interview_engine.pg_session_store import PgSessionStore
-    server=managed_pg_server(str(tmp_path/'pgdata'))
-    conn=psycopg.connect(server.get_uri(),autocommit=False,row_factory=psycopg.rows.dict_row)
-    conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
-    n=[0]
-    def mk(*a,**k):
-        n[0]+=1
-        k.setdefault('session_store',PgSessionStore(managed_pool(conn.info.dsn)));k.setdefault('owner_id',PG_OWNER)
-        k.setdefault('instance_id',f't#{n[0]}');k.setdefault('lease_ttl',60.0)
-        r=SessionRegistry(*a,**k);regs.append(r);return r
-    mk.tmpdir=tmp_path
-    yield mk
-    for r in regs:r.close()
-    conn.close()
+@pytest.fixture
+def make_persistent_registry(pg_registry):
+    return pg_registry
 
 
 def test_start_session_returns_typed_http_contract(make_registry):
@@ -118,11 +70,12 @@ def test_http_session_drives_program_to_typed_input_and_completion(make_registry
     assert done['snapshot']['process_status']==ProcessStatus.COMPLETED
 
 
-def test_service_rejects_missing_and_incorrect_tokens():
- app=create_app(service_token=TOKEN);payload={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}
+def test_service_rejects_missing_and_incorrect_tokens(pg_registry):
+ app=create_app(pg_registry(),service_token=TOKEN);payload={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'}
  assert TestClient(app).post('/v1/sessions',json=payload).status_code==401
  assert TestClient(app,headers={'X-Interview-Engine-Token':'wrong'}).post('/v1/sessions',json=payload).status_code==401
  assert authed(app).post('/v1/sessions',json=payload).status_code==201
+
 
 
 class FailOnceProgram(FakeProgram):
@@ -172,12 +125,13 @@ def test_registry_restores_open_input_after_engine_restart(make_persistent_regis
     assert snapshot.process_status==ProcessStatus.COMPLETED
 
 
-def test_conops_tradeoff_options_cross_typed_http_contract():
+def test_conops_tradeoff_options_cross_typed_http_contract(pg_registry,):
     from vmodel_contracts.interactive import InputOption
     option={'value':'1','label':'Progressive web app','summary':'Installable web experience',
         'advantages':['Fast rollout','One codebase'],'disadvantages':['Platform limits']}
     typed=InputOption.model_validate(option)
     assert typed.advantages==option['advantages'] and typed.disadvantages==option['disadvantages']
+
 
 
 class UserActionProgram(FakeProgram):
@@ -267,10 +221,9 @@ def test_switched_session_restores_route_input_and_idempotency(monkeypatch,make_
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
     def factory(sid,request):
         program=SwitchableProgram(request.model_route)
-        path=make_persistent_registry.tmpdir/sid/'interview'/'http-session.json'
-        if path.exists():
-            stored=__import__('json').loads(path.read_text())
-            program.model_map=stored['model_map']
+        row=make_persistent_registry.store.load_published(sid,PG_OWNER)
+        if row and row['control']:
+            program.model_map=row['control']['model_map']
         return program
     first=make_persistent_registry(factory,lease_ttl=1.0);client=authed(create_app(first,service_token=TOKEN))
     started=client.post('/v1/sessions',json={'task_id':'task','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=started['session_id']
@@ -290,7 +243,7 @@ def test_switched_session_restores_route_input_and_idempotency(monkeypatch,make_
     assert len(retry.json()['snapshot']['route_history'])==1
 
 
-def test_legacy_qwen_pin_can_switch_to_phi4_same_provider(monkeypatch,tmp_path):
+def test_legacy_qwen_pin_can_switch_to_phi4_same_provider(monkeypatch,tmp_path,pg_registry):
     from interview_engine import session_models
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
     class OldProgram(SwitchableProgram):
@@ -299,16 +252,21 @@ def test_legacy_qwen_pin_can_switch_to_phi4_same_provider(monkeypatch,tmp_path):
             self.model_map={stage:('ollama','qwen2.5-coder:14b') for stage in session_models.STAGES}
         def candidate_for_route(self,route,models):
             other=SwitchableProgram(route);other.model_map=models;other.pending=self.pending;return other
-    first=SessionRegistry(lambda sid,request:OldProgram(),state_dir=tmp_path);client=authed(create_app(first,service_token=TOKEN))
+    first=pg_registry(lambda sid,request:OldProgram(),lease_ttl=.1);client=authed(create_app(first,service_token=TOKEN))
     old=client.post('/v1/sessions',json={'task_id':'pre-existing','idea':'idea','model_route':'ollama'}).json()['snapshot']
-    sid=old['session_id'];path=tmp_path/sid/'interview'/'http-session.json'
-    saved=__import__('json').loads(path.read_text());saved.pop('route_version',None);saved.pop('route_history',None);path.write_text(__import__('json').dumps(saved))
+    sid=old['session_id']
+    saved=pg_registry.store.load_published(sid,PG_OWNER)['control'];saved.pop('route_version',None);saved.pop('route_history',None)
+    # Seed an older PG control shape, without changing its pinned model.
+    with pg_registry.store._borrow() as conn:
+        conn.execute('UPDATE engine_sessions SET control=%s::jsonb WHERE session_id=%s',(__import__('json').dumps(saved),sid));conn.commit()
+    first.close()
+    import time;time.sleep(.15)
     def factory(sid,request):
-        value=__import__('json').loads((tmp_path/sid/'interview'/'http-session.json').read_text()) if (tmp_path/sid/'interview'/'http-session.json').exists() else {}
+        value=pg_registry.store.load_published(sid,PG_OWNER)['control']
         program=OldProgram()
         if value.get('model_map'):program.model_map=value['model_map']
         return program
-    restarted=SessionRegistry(factory,state_dir=tmp_path);other=authed(create_app(restarted,service_token=TOKEN))
+    restarted=pg_registry(factory);other=authed(create_app(restarted,service_token=TOKEN))
     before=other.get(f'/v1/sessions/{sid}').json()
     assert before['route_version']==0 and before['model_map']['probing']==['ollama','qwen2.5-coder:14b']
     response=other.post(f'/v1/sessions/{sid}/model-route',json={'model_route':'ollama','model':'phi4','expected_sequence':before['sequence'],
@@ -317,7 +275,7 @@ def test_legacy_qwen_pin_can_switch_to_phi4_same_provider(monkeypatch,tmp_path):
     assert response.json()['snapshot']['model_map']['probing']==['ollama','phi4']
     assert response.json()['snapshot']['open_input']['input_id']==before['open_input']['input_id']
 
-def test_failed_legacy_input_stays_switchable_after_restart(monkeypatch,tmp_path):
+def test_failed_legacy_input_stays_switchable_after_restart(monkeypatch,tmp_path,pg_registry):
     from interview_engine import session_models
     monkeypatch.setattr(session_models,'validate',lambda models,route=None:None)
     class LegacyError(SwitchableProgram):
@@ -329,12 +287,14 @@ def test_failed_legacy_input_stays_switchable_after_restart(monkeypatch,tmp_path
         def candidate_for_route(self,route,models):
             new=SwitchableProgram(route);new.pending=self.pending;new.model_map=models;return new
     factory=lambda sid,request:LegacyError()
-    registry=SessionRegistry(factory,state_dir=tmp_path);client=authed(create_app(registry,service_token=TOKEN))
+    registry=pg_registry(factory,lease_ttl=.1);client=authed(create_app(registry,service_token=TOKEN))
     before=client.post('/v1/sessions',json={'task_id':'old','idea':'idea','model_route':'ollama'}).json()['snapshot'];sid=before['session_id']
     bad=client.post(f'/v1/sessions/{sid}/inputs/{before["open_input"]["input_id"]}',json={
       'input_id':before['open_input']['input_id'],'value':'answer','actor_id':'founder'})
     assert bad.status_code==503
-    restored=SessionRegistry(factory,state_dir=tmp_path);state=authed(create_app(restored,service_token=TOKEN)).get(f'/v1/sessions/{sid}').json()
+    registry.close()
+    import time;time.sleep(.15)
+    restored=pg_registry(factory);state=authed(create_app(restored,service_token=TOKEN)).get(f'/v1/sessions/{sid}').json()
     assert state['process_status']==ProcessStatus.WAITING_INPUT and state['open_input']['input_id']==before['open_input']['input_id']
     switched=restored.switch_route(sid,__import__('vmodel_contracts.interactive',fromlist=['ModelRouteSwitchRequest']).ModelRouteSwitchRequest(
       model_route='ollama',model='phi4',expected_sequence=state['sequence'],expected_input_id=state['open_input']['input_id'],
@@ -342,15 +302,12 @@ def test_failed_legacy_input_stays_switchable_after_restart(monkeypatch,tmp_path
     assert switched[1].model_map['probing']==('ollama','phi4')
 
 
-def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path):
+def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path,pg_registry):
     from interview_engine import session_models
     from interview_engine.errors import UserFacingError
-    from interview_engine.http_service import default_program_factory
+    from interview_engine.http_service import EngineSession
     from vmodel_contracts.interactive import StartSessionRequest
     old={stage:["ollama","qwen2.5-coder:14b"] for stage in session_models.STAGES}
-    path=tmp_path/"legacy"/"interview"/"http-session.json";path.parent.mkdir(parents=True);path.write_text(__import__("json").dumps({"model_map":old}))
-    monkeypatch.setattr("interview_engine.http_service.artifacts_root",lambda arg=None:tmp_path)
-    monkeypatch.setattr("interview_engine.application.artifacts_root",lambda arg=None:tmp_path)
     calls=[]
     def preflight(cfg,stage):
         calls.append(cfg.model)
@@ -361,37 +318,29 @@ def test_restored_old_pin_does_not_preflight_retired_model(monkeypatch,tmp_path)
             session_models.validate(kwargs["pinned_models"],kwargs["model_route"],preflight=False)
             self.model_map=kwargs["pinned_models"]
     monkeypatch.setattr("interview_engine.application.InterviewApplication",StubApplication)
-    restored=default_program_factory("legacy",StartSessionRequest(task_id="old",idea="idea",model_route="ollama"))
+    registry=pg_registry(allow_db_provider_dispatch=True)
+    session=EngineSession(session_id='legacy',task_id='old')
+    restored=registry._default_pg_program(session,StartSessionRequest(task_id="old",idea="idea",model_route="ollama"),old)
     assert restored.model_map==old and calls==[]
 
 
-def test_expected_unpinned_legacy_snapshot_logs_one_info_without_traceback(tmp_path,caplog):
- import json,logging
- from interview_engine.errors import UserFacingError
- from interview_engine.http_service import default_program_factory
- from vmodel_contracts.interactive import StartSessionRequest
- path=tmp_path/'old'/'interview'/'http-session.json';path.parent.mkdir(parents=True)
- path.write_text(json.dumps({'session_id':'old','task_id':'legacy-task','phase_id':1,'sequence':2,
-  'status':40,'next_step':40,'open_input':None,'responses':[],
-  'request':StartSessionRequest(task_id='legacy-task',idea='old idea',model_route='ollama').model_dump(mode='json')}))
- def factory(sid,request):
-  from interview_engine import http_service
-  # The real restore guard is in default_program_factory, but it needs only
-  # the persisted session file, no model provider or graph to reject safely.
-  return default_program_factory(sid,request)
- from interview_engine import http_service
- original=http_service.artifacts_root
- http_service.artifacts_root=lambda arg=None:tmp_path
- try:
-  client=authed(create_app(SessionRegistry(factory,state_dir=tmp_path),service_token=TOKEN))
-  with caplog.at_level(logging.INFO,logger='interview_engine.http'):
-   response=client.get('/v1/sessions/old')
- finally:http_service.artifacts_root=original
- assert response.status_code==422
- assert 'legacy session has no pinned model route' in response.json()['detail']['detail']
- lines=[record for record in caplog.records if record.name=='interview_engine.http']
- assert len(lines)==1 and lines[0].levelno==logging.INFO
- assert 'legacy_unpinned' in lines[0].getMessage() and not lines[0].exc_info
+def test_expected_unpinned_legacy_snapshot_logs_one_info_without_traceback(pg_registry,caplog):
+    import json,logging
+    from interview_engine.http_service import default_program_factory
+    from vmodel_contracts.interactive import StartSessionRequest
+    sid=str(uuid4());seed=pg_registry()
+    session,_=seed.start(StartSessionRequest(session_id=sid,task_id='legacy-task',idea='old idea',model_route='ollama'))
+    seed.close()
+    registry=pg_registry(default_program_factory,allow_db_provider_dispatch=True)
+    client=authed(create_app(registry,service_token=TOKEN))
+    with caplog.at_level(logging.INFO,logger='interview_engine.http'):
+        response=client.get('/v1/sessions/'+sid)
+    assert response.status_code==422
+    assert 'legacy session has no pinned model route' in response.json()['detail']['detail']
+    lines=[record for record in caplog.records if record.name=='interview_engine.http']
+    assert len(lines)==1 and lines[0].levelno==logging.INFO
+    assert 'legacy_unpinned' in lines[0].getMessage() and not lines[0].exc_info
+
 def test_sparse_conops_failure_is_typed_nonretryable_with_way_forward(make_registry):
     from interview_engine.errors import UserFacingError
     class SparseProgram(FakeProgram):
@@ -410,7 +359,7 @@ def test_sparse_conops_failure_is_typed_nonretryable_with_way_forward(make_regis
     assert failed.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE
     assert detail['retryable'] is False and 'Start a new interview' in detail['detail']
 
-def test_start_user_facing_chain_failure_reaches_the_customer_verbatim(tmp_path):
+def test_start_user_facing_chain_failure_reaches_the_customer_verbatim(pg_registry,tmp_path):
     """The 2026-10-27 preview failure reached the UI as a bare 'RuntimeError' -
     the admission refusal's cause and next action existed only in the engine
     log. A user-facing chain failure travels the typed 422 path in full."""
@@ -421,13 +370,14 @@ def test_start_user_facing_chain_failure_reaches_the_customer_verbatim(tmp_path)
             raise UserFacingError('all providers failed for scope',
                 "llm: UserFacingError: stage 'scope_tiebreak' was stopped by admission/accounting checks. | likely cause: serialized request bound is unreviewed for ollama/qwen2.5-coder:14b (stage scope_tiebreak)",
                 'preserve the run evidence and review its ledger; do not retry or blame connectivity.')
-    client=authed(create_app(SessionRegistry(lambda session_id,request:RefusedProgram(),state_dir=tmp_path),service_token=TOKEN))
+    client=authed(create_app(pg_registry(lambda session_id,request:RefusedProgram()),service_token=TOKEN))
     r=client.post('/v1/sessions',json={'protocol_version':1,'task_id':'t','idea':'i','model_route':'m'})
     detail=r.json()['detail']
     assert r.status_code==422 and detail['code']==ProtocolErrorCode.INVALID_RESPONSE and detail['retryable'] is False
     assert 'all providers failed for scope' in detail['detail']
     assert 'bound is unreviewed for ollama/qwen2.5-coder:14b' in detail['detail']
     assert 'review its ledger' in detail['detail']
+
 
 class BlockingProgram(FakeProgram):
     def __init__(self,entered,release):
@@ -439,12 +389,12 @@ class BlockingProgram(FakeProgram):
         self.finished=True;return None
 
 
-def test_model_advance_does_not_block_snapshot_other_sessions_or_progress(tmp_path):
+def test_model_advance_does_not_block_snapshot_other_sessions_or_progress(pg_registry,tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     from vmodel_contracts.interactive import StartSessionRequest,InputResponse
     entered=Event();release=Event();program=BlockingProgram(entered,release)
-    registry=SessionRegistry(lambda sid,request:program,state_dir=tmp_path)
+    registry=pg_registry(lambda sid,request:program)
     first,_=registry.start(StartSessionRequest(task_id='first',idea='first',model_route='deepseek'))
     other,_=registry.start(StartSessionRequest(task_id='second',idea='second',model_route='deepseek'))
     prior=registry.snapshot(first.session_id);pending=prior.open_input
@@ -462,20 +412,21 @@ def test_model_advance_does_not_block_snapshot_other_sessions_or_progress(tmp_pa
             duplicate=executor.submit(registry.respond,first.session_id,response)
             import time
             time.sleep(.03);assert not duplicate.done()
-            from interview_engine.progress_journal import ProgressJournal
-            ProgressJournal(tmp_path,first.session_id,'first').append(phase_key='intent',stage='probe',label='still working',status='heartbeat')
+            from interview_engine.pg_journal import ObservationalJournal
+            ObservationalJournal(registry._store,first.pg_claim,first.session_id,'first').append(phase_key='intent',stage='probe',label='still working',status='heartbeat')
             page=executor.submit(registry.progress,first.session_id,0).result(timeout=.5)
             assert page.events
         finally:release.set()
         accepted,done=submitted.result(timeout=2)
         _,replayed=duplicate.result(timeout=2)
     assert done.process_status==ProcessStatus.COMPLETED and replayed.sequence==done.sequence
-    saved=__import__('json').loads((tmp_path/first.session_id/'interview'/'http-session.json').read_text())
+    saved=registry._store.load_published(first.session_id,PG_OWNER)['control']
     assert len(saved['responses'])==1 and saved['sequence']==done.sequence
     assert registry.snapshot(first.session_id).sequence==done.sequence
 
 
-def test_blocked_model_start_exposes_running_snapshot_and_other_session(tmp_path):
+
+def test_blocked_model_start_exposes_running_snapshot_and_other_session(pg_registry,tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     from vmodel_contracts.interactive import StartSessionRequest
@@ -485,7 +436,7 @@ def test_blocked_model_start_exposes_running_snapshot_and_other_session(tmp_path
             entered.set()
             if not release.wait(5):raise RuntimeError('test start never released')
             return self.pending
-    registry=SessionRegistry(lambda sid,request:BlockingStart(),state_dir=tmp_path)
+    registry=pg_registry(lambda sid,request:BlockingStart())
     request=StartSessionRequest(task_id='first',idea='first',model_route='deepseek',session_id=uuid4())
     with ThreadPoolExecutor(max_workers=2) as executor:
         started=executor.submit(registry.start,request)
@@ -501,6 +452,7 @@ def test_blocked_model_start_exposes_running_snapshot_and_other_session(tmp_path
             assert registry.snapshot(str(other_request.session_id)).process_status==ProcessStatus.RUNNING
         finally:release.set()
         started.result(timeout=2);other.result(timeout=2)
+
 
 def test_failed_blocked_advance_restores_published_input_and_sequence(make_persistent_registry):
     from concurrent.futures import ThreadPoolExecutor
@@ -530,29 +482,27 @@ def test_failed_blocked_advance_restores_published_input_and_sequence(make_persi
     assert after.sequence==before.sequence and after.open_input==before.open_input
     assert after.process_status==ProcessStatus.WAITING_INPUT
     assert not session.responses
-    if registry._store is not None:
-        assert registry._store.load_published(session.session_id,PG_OWNER)['control']['sequence']==before.sequence
-    else:
-        assert __import__('json').loads((make_persistent_registry.tmpdir/session.session_id/'interview'/'http-session.json').read_text())['sequence']==before.sequence
+    assert registry._store.load_published(session.session_id,PG_OWNER)['control']['sequence']==before.sequence
 
 
-def test_snapshot_read_cannot_mutate_published_control():
+def test_snapshot_read_cannot_mutate_published_control(pg_registry):
     from vmodel_contracts.interactive import StartSessionRequest
-    registry=SessionRegistry(lambda sid,request:FakeProgram())
+    registry=pg_registry(lambda sid,request:FakeProgram())
     session,_=registry.start(StartSessionRequest(task_id='first',idea='idea',model_route='deepseek'))
     read=registry.snapshot(session.session_id)
     read.open_input.options.append(InputOption(value='bogus',label='Bogus'))
     assert not registry.snapshot(session.session_id).open_input.options
 
-def test_blocked_http_submit_allows_concurrent_http_snapshot_and_progress(tmp_path):
+
+def test_blocked_http_submit_allows_concurrent_http_snapshot_and_progress(pg_registry,tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
-    from interview_engine.progress_journal import ProgressJournal
-    entered=Event();release=Event();registry=SessionRegistry(lambda sid,req:BlockingProgram(entered,release),state_dir=tmp_path)
+    from interview_engine.pg_journal import ObservationalJournal
+    entered=Event();release=Event();registry=pg_registry(lambda sid,req:BlockingProgram(entered,release))
     app=create_app(registry,service_token=TOKEN)
     started=authed(app).post('/v1/sessions',json={'task_id':'t','idea':'i','model_route':'deepseek'}).json()['snapshot']
     sid=started['session_id'];input_id=started['open_input']['input_id']
-    ProgressJournal(tmp_path,sid,'t').append(phase_key='intent',stage='probing',label='Started',status='started')
+    ObservationalJournal(registry._store,registry.get(sid).pg_claim,sid,'t').append(phase_key='intent',stage='probing',label='Started',status='started')
     with ThreadPoolExecutor(max_workers=3) as pool:
         work=pool.submit(lambda:authed(app).post(f'/v1/sessions/{sid}/inputs/{input_id}',json={
             'input_id':input_id,'expected_sequence':started['sequence'],'value':'yes','actor_id':'founder'}))

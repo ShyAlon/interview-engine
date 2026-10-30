@@ -31,3 +31,15 @@ def test_router_requires_pg_without_file_escape_hatch(tmp_path):
         with pytest.raises(RuntimeError,match='PostgreSQL session persistence is required'):
             router._registry()
     finally:_owner.reset(token)
+
+
+def test_registry_refuses_missing_pg_before_any_state_path(tmp_path):
+    from interview_engine.http_service import SessionRegistry
+    with pytest.raises(ValueError,match='PG session store required'):
+        SessionRegistry(state_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_retired_sqlite_progress_module_absent():
+    import importlib.util
+    assert importlib.util.find_spec('interview_engine.progress_journal') is None

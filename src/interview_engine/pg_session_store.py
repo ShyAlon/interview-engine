@@ -154,6 +154,7 @@ class PgSessionStore:
                     "     placement_instance = %(instance)s, lease_expires_at = %(expiry)s, updated_at = %(now)s"
                     " WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
                     "   AND (lease_expires_at <= %(now)s OR placement_instance = %(instance)s)"
+                    "   AND COALESCE(control->>'stopped','false') != 'true'"
                     " RETURNING generation, lease_epoch",
                     {"sid": session_id, "owner": owner_id, "instance": instance,
                      "expiry": now + ttl, "now": now}).fetchone()
@@ -351,8 +352,8 @@ class PgSessionStore:
             newer sequence); otherwise the staged control is kept and only marked.
             """
             row = conn.execute(
-                "UPDATE engine_sessions SET generation = generation + 1, lease_expires_at = 0,"
-                " control = COALESCE(%(control)s::jsonb, control, '{}'::jsonb) || %(stopped_marker)s::jsonb,"
+                "UPDATE engine_sessions SET generation = CASE WHEN control->>'stopped'='true' THEN generation ELSE generation + 1 END, lease_expires_at = 0,"
+                " control = CASE WHEN control->>'stopped'='true' THEN control ELSE COALESCE(%(control)s::jsonb, control, '{}'::jsonb) || %(stopped_marker)s::jsonb END,"
                 " updated_at = %(now)s WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid"
                 " RETURNING generation",
                 {"sid": session_id, "owner": owner_id,
@@ -363,6 +364,23 @@ class PgSessionStore:
             if row is None:
                 raise KeyError(session_id)
             return row["generation"]
+
+    def acknowledge_stop_quiescent(self,claim:SessionClaim,stopped_generation:int)->bool:
+        """Only the actual stopped writer can prove its exit, never a takeover.
+
+        The registry calls this after its last writer exits. Expiry/restart is
+        not proof. Owner, stopped generation, old lease epoch and instance all
+        match in one update. A foreign/stale registry cannot acknowledge it.
+        """
+        if stopped_generation != claim.generation+1:return False
+        with self._borrow() as conn:
+            row=conn.execute(
+                "UPDATE engine_sessions SET control=control || '{\"stop_quiescent\":true}'::jsonb, updated_at=%s "
+                "WHERE session_id=%s AND owner_id=%s::uuid AND generation=%s "
+                "AND lease_epoch=%s AND placement_instance=%s AND control->>'stopped'='true' RETURNING generation",
+                (time.time(),claim.session_id,claim.owner_id,stopped_generation,claim.epoch,claim.instance)).fetchone()
+            conn.commit()
+            return row is not None
 
     def load_published(self, session_id: str, owner_id: str) -> dict | None:
         with self._borrow() as conn:

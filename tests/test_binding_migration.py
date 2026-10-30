@@ -47,7 +47,7 @@ def test_dry_run_no_mutations_apply_stamp_only_full_backup_and_repeat(tmp_path):
  assert json.loads(Path(applied['audit']).read_text())['status']=='applied'
  assert migrate(tmp_path,path,True)['status']=='current';assert len(list((tmp_path/'migration-backups').iterdir()))==1
 
-def test_read_only_snapshot_preserves_control_and_old_binding_blocks_mutation_until_apply(tmp_path):
+def test_read_only_snapshot_preserves_control_and_old_binding_blocks_mutation_until_apply(tmp_path,pg_registry):
  path,payload,pending=fixture(tmp_path)
  from interview_engine.session_models import resolve
  payload['model_map']=resolve('ollama','phi4')
@@ -58,7 +58,12 @@ def test_read_only_snapshot_preserves_control_and_old_binding_blocks_mutation_un
    self.model_route=request.model_route;self.finished=False
    self.evidence=EvidenceLake(tmp_path/'evidence-lake',request.task_id);self.binding=self.evidence.bind_session(sid)
   def advance(self,response):self.finished=True;return None
- registry=SessionRegistry(lambda sid,r:Program(sid,r),state_dir=tmp_path)
+ registry=pg_registry(lambda sid,r:Program(sid,r))
+ # The migration fixture remains a legacy operator-script test, but the HTTP
+ # boundary reads an explicitly seeded PG publication, never the file state.
+ pg_registry.store.create(payload['session_id'],payload['task_id'],pg_registry.owner)
+ claim=pg_registry.store.claim(payload['session_id'],pg_registry.owner,registry._instance,60)
+ pg_registry.store.publish_step(claim,payload,published_thread_id=payload['session_id'])
  client=TestClient(create_app(registry,service_token='test'),headers={'X-Interview-Engine-Token':'test'})
  # Snapshot reads published control only, without graph or schema mutation.
  old=client.get('/v1/sessions/cef8ed07-0894-4f4e-bd40-2455fbfd0fa3');assert old.status_code==200
