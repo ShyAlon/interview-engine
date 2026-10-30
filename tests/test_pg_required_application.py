@@ -21,3 +21,13 @@ def test_service_file_opt_in_never_bypasses_required_pg(monkeypatch,tenant):
     monkeypatch.setenv('INTERVIEW_ENGINE_TOKEN','private-test-token-123456789')
     with pytest.raises(RuntimeError,match='PostgreSQL session persistence is required'):
         _build_service_app()
+
+
+def test_router_requires_pg_without_file_escape_hatch(tmp_path):
+    from interview_engine.tenant_worker import TenantRegistryRouter,_owner
+    router=TenantRegistryRouter(object,None,tmp_path)
+    token=_owner.set('00000000-0000-0000-0000-000000000001')
+    try:
+        with pytest.raises(RuntimeError,match='PostgreSQL session persistence is required'):
+            router._registry()
+    finally:_owner.reset(token)

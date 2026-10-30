@@ -2,8 +2,7 @@
 
 With INTERVIEW_ENGINE_SESSIONS_DSN set, session persistence uses the
 delivery-api-owned Postgres registry. Without it the boot fails clear and
-names the explicit file opt-in (INTERVIEW_ENGINE_SESSIONS_FILE=1): file
-persistence is never a silent fallback. An unreachable database, a missing
+refuses even the retired file opt-in: file persistence is never a fallback. An unreachable database, a missing
 placement migration, or a single-tenant deployment without an owner scope
 also stop the boot instead of failing mid-interview.
 
@@ -232,29 +231,17 @@ def test_parallel_sessions_of_one_owner_coexist(migrated_dsn):
         router.close()
 
 
-def test_tenant_router_without_dsn_requires_explicit_file_opt_in(tmp_path):
+def test_tenant_router_without_dsn_refuses(tmp_path):
     from interview_engine import tenant_worker
     from interview_engine.http_service import SessionRegistry
     router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, tmp_path)
     token = tenant_worker._owner.set(OWNER)
     try:
-        with pytest.raises(RuntimeError, match='database session persistence is the default'):
+        with pytest.raises(RuntimeError, match='PostgreSQL session persistence is required'):
             router._registry()
     finally:
         tenant_worker._owner.reset(token)
 
-
-def test_tenant_router_file_mode_unchanged(tmp_path):
-    from interview_engine import tenant_worker
-    from interview_engine.http_service import SessionRegistry
-    router = tenant_worker.TenantRegistryRouter(SessionRegistry, lambda *a: None, tmp_path, allow_file_sessions=True)
-    token = tenant_worker._owner.set(OWNER)
-    try:
-        registry = router._registry()
-    finally:
-        tenant_worker._owner.reset(token)
-    assert registry._store is None
-    assert registry._state_dir is not None
 
 
 def test_relogin_builds_fresh_registry_and_writes_succeed(migrated_dsn):

@@ -74,7 +74,7 @@ class TenantRegistryRouter:
     new scope requests are rejected rather than closing anyone's active
     interview."""
 
-    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,allow_file_sessions:bool=False,pool=None,installed_resolver=None,route_installed=False):
+    def __init__(self,registry_type,factory,base:Path,*,session_dsn:str|None=None,pool=None,installed_resolver=None,route_installed=False):
         self.registry_type,self.factory,self.base=registry_type,factory,base.resolve()
         self._installed_resolver=installed_resolver
         self._route_installed=route_installed
@@ -86,7 +86,6 @@ class TenantRegistryRouter:
         # standalone the router builds its own from session_dsn and owns it.
         self._pool=pool
         self._owns_pool=pool is None
-        self._allow_file_sessions=allow_file_sessions
         self._registries={}
         self._used={}
         self._inflight={}
@@ -129,10 +128,10 @@ class TenantRegistryRouter:
     def _registry(self):
         owner=_owner.get()
         if owner is None:raise PermissionError('worker owner scope required')
-        session=None
-        if self._session_dsn is not None:
-            session=_session.get()
-            if session is None:raise PermissionError('worker session scope required')
+        if self._session_dsn is None:
+            raise RuntimeError('PostgreSQL session persistence is required: configure the sessions DSN')
+        session=_session.get()
+        if session is None:raise PermissionError('worker session scope required')
         key=(owner,session)
         root=worker_root(self.base)
         with self._lock:
@@ -140,23 +139,18 @@ class TenantRegistryRouter:
             if key not in self._registries:
                 if len(self._registries)>=self._cap:
                     raise RuntimeError('tenant registry capacity reached (%d active scopes); no idle registry can be retired - retry after active interviews settle'%self._cap)
-                if self._session_dsn is None:
-                    if not self._allow_file_sessions:
-                        raise RuntimeError('database session persistence is the default: configure the sessions DSN, or explicitly choose file persistence')
-                    self._registries[key]=self.registry_type(self.factory,state_dir=root)
-                else:
-                    # Database session persistence opts into provider dispatch:
-                    # staged responses (PR B) landed, so the documented
-                    # constructor block is lifted for exactly this wiring.
-                    ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','150.0'))
-                    if self._pool is None:
-                        from .pg_pool import build_pool
-                        self._pool=build_pool(self._session_dsn)  # standalone: router-owned
-                    self._registries[key]=self.registry_type(self.factory,
-                        session_store=pg_session_store(self._pool,owner,session),owner_id=owner,
-                        lease_ttl=ttl,
-                        allow_db_provider_dispatch=True)
-                    log.info("registry.constructed owner=%s session=%s mode=pg lease_ttl=%s",owner,session,ttl)
+                # Database session persistence opts into provider dispatch:
+                # staged responses (PR B) landed, so the documented
+                # constructor block is lifted for exactly this wiring.
+                ttl=float(os.environ.get('INTERVIEW_ENGINE_LEASE_TTL','150.0'))
+                if self._pool is None:
+                    from .pg_pool import build_pool
+                    self._pool=build_pool(self._session_dsn)  # standalone: router-owned
+                self._registries[key]=self.registry_type(self.factory,
+                    session_store=pg_session_store(self._pool,owner,session),owner_id=owner,
+                    lease_ttl=ttl,
+                    allow_db_provider_dispatch=True)
+                log.info("registry.constructed owner=%s session=%s mode=pg lease_ttl=%s",owner,session,ttl)
                 self._inflight[key]=0
             self._used[key]=time.monotonic()
             return self._registries[key]
@@ -200,7 +194,7 @@ class TenantRegistryRouter:
 
     def _normal_attribute(self,name):
         registry=self._registry()
-        key=(_owner.get(),_session.get() if self._session_dsn is not None else None)
+        key=(_owner.get(),_session.get())
         attr=getattr(registry,name)
         if not callable(attr):return attr
         def guarded(*args,**kwargs):
