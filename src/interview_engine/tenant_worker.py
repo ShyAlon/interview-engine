@@ -174,6 +174,14 @@ class TenantRegistryRouter:
             self._pool.close()
         self._pool=None
 
+    def quality_config_pool(self):
+        """The same lazy router-owned pool used by every session and config read."""
+        with self._lock:
+            if self._pool is None:
+                from .pg_pool import build_pool
+                self._pool=build_pool(self._session_dsn)
+            return self._pool
+
     def __getattr__(self,name):
         if self._route_installed and self._installed_resolver is None:
             with self._lock:

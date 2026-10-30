@@ -16,6 +16,8 @@ import logging
 import os
 import threading
 from pathlib import Path
+from contextvars import ContextVar
+from contextlib import contextmanager
 
 _logger=logging.getLogger(__name__)
 CONFIG_VERSION = 1
@@ -162,8 +164,17 @@ class ConfigStore:
 _store = ConfigStore(os.environ.get("INTERVIEW_ENGINE_QUESTION_QUALITY_CONFIG") or None)
 
 
+_bound = ContextVar('question_quality_store', default=None)
+
+@contextmanager
+def bound_store(value):
+    token=_bound.set(value)
+    try:yield value
+    finally:_bound.reset(token)
+
+
 def store() -> ConfigStore:
-    return _store
+    return _bound.get() or _store
 
 
 def set_store(new: ConfigStore) -> None:
@@ -173,4 +184,4 @@ def set_store(new: ConfigStore) -> None:
 
 def current() -> dict:
     """The config a session reads at start."""
-    return _store.get()
+    return store().get()
