@@ -14,3 +14,12 @@ Writer quiescence must use the same cross-process PG lease as execution. An
 empty directory or missing file lock does not prove a deadline/provider thread
 has exited. Engine quiescence does not settle provider holds or finish running
 jobs; those remain separate checks before final stopped confirmation.
+
+PG canonical output is not proof that diagnostic storage is PG-only. Bind raw
+output, verification, decision audits, shadow records/reports and model-call
+metadata to the exact session document adapter too. The adapter owns lease,
+auth and Stop checks on each write. Never wrap that independent connection in
+an outer task publication transaction. Fail-first tests poison the outer guard,
+retain exact bytes/full shadow input, reject path escape and clear nested legacy
+bindings so one session cannot inherit another's backend. Real PG tests cover
+lease takeover and Stop; the connected graph forbids JSONL/raw local copies.

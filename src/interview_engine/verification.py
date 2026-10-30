@@ -95,12 +95,15 @@ class VerificationLog:
 
     def write(self, record: dict) -> None:
         from .stop_fence import guarded_publish
-        try:return guarded_publish(lambda:self._write(record))
+        from .document_diagnostics import configured
+        try:return self._write(record) if configured() else guarded_publish(lambda:self._write(record))
         except OSError as error:self._sink_status.failed(error)
 
     def _write(self, record: dict) -> None:
         line = json.dumps({"ts": time.time(), **record}, ensure_ascii=False, sort_keys=True)
         with self._lock:
+            from .document_diagnostics import configured,append
+            if configured():return append(self.path,line+"\n")
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.path, "a") as f:
                 f.write(line + "\n")

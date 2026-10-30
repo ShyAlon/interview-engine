@@ -9,6 +9,8 @@ class RawOutputLog:
         self.counts: dict[str,int] = {}
 
     def write(self, stage: str, label: str, raw: str) -> Path | None:
+        from .document_diagnostics import configured
+        if configured():return self._write(stage,label,raw)
         from .stop_fence import guarded_publish
         return guarded_publish(lambda:self._write(stage,label,raw))
 
@@ -17,7 +19,10 @@ class RawOutputLog:
             return None
         slug = re.sub(r"[^a-z0-9]+", "-", label.casefold()).strip("-") or "output"
         key=f"{stage}-{slug}"; self.counts[key]=self.counts.get(key,0)+1
-        self.root.mkdir(parents=True,exist_ok=True)
         path=self.root/f"{key}-attempt-{self.counts[key]}.raw.txt"
-        path.write_text(raw)
+        from .document_diagnostics import configured,write
+        if configured():write(path,raw)
+        else:
+            self.root.mkdir(parents=True,exist_ok=True)
+            path.write_text(raw)
         return path

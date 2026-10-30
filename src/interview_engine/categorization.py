@@ -93,6 +93,8 @@ AuditSink = Callable[[DecisionAudit], None]
 def jsonl_audit_sink(path: str | Path) -> AuditSink:
     path = Path(path)
     def write(record: DecisionAudit) -> None:
+        from .document_diagnostics import configured,append
+        if configured():return append(path,json.dumps(asdict(record),separators=(",",":"))+"\n")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as f:
             f.write(json.dumps(asdict(record), separators=(",", ":")) + "\n")

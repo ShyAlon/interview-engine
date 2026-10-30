@@ -166,7 +166,8 @@ class InterviewApplication:
         usage_token=_stopped_usage.set(stopped_usage)
         try:
             from .session_runtime import use
-            with use(self.runtime), session_models.use(self.model_map) if self.model_map is not None else nullcontext():
+            from .document_diagnostics import bind as bind_diagnostics
+            with bind_diagnostics(getattr(self,'documents',None),self.outdir.parent),use(self.runtime), session_models.use(self.model_map) if self.model_map is not None else nullcontext():
                 yield
         finally:
             if staging_token is not None:model_config._response_staging.reset(staging_token)
