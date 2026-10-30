@@ -5,8 +5,8 @@ from interview_engine import pg_diagnostics
 
 
 @pytest.mark.parametrize('mode,reason',[('oversize','oversize'),('broken','build_failed')])
-def test_start_diagnostic_omission_is_safe_visible_and_keeps_minimal_503(monkeypatch,caplog,mode,reason):
-    registry=SessionRegistry()
+def test_start_diagnostic_omission_is_safe_visible_and_keeps_minimal_503(pg_registry,monkeypatch,caplog,mode,reason):
+    registry=pg_registry()
     def start(request):raise RuntimeError('original')
     monkeypatch.setattr(registry,'start',start)
     def block(error):

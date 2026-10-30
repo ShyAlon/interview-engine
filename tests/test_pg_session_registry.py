@@ -304,3 +304,101 @@ def test_connection_budget_fits_pooler():
     from interview_engine.pg_pool import ENGINE_POOL_MAX
     assert 6 + ENGINE_POOL_MAX <= 15, \
         'delivery pool + one engine pool must fit the pooler budget with headroom'
+
+
+def test_stop_during_factory_never_advances_late_program(tmp_path):
+    entered=threading.Event();release=threading.Event()
+    class Late:
+        def advance(self,*args):pytest.fail('stopped factory must never advance')
+    def factory(*args):
+        entered.set();assert release.wait(3);return Late()
+    conn=make_conn(tmp_path);registry=make_registry(conn,program=factory)
+    sid=str(uuid4())
+    with ThreadPoolExecutor() as pool:
+        future=pool.submit(registry.start,StartSessionRequest(session_id=sid,task_id='factory',idea='fake',model_route='local'))
+        try:
+            assert entered.wait(2)
+            stopped=registry.stop(sid)
+            assert stopped.process_status==ProcessStatus.STOP_REQUESTED
+        finally:release.set()
+        session,_=future.result(timeout=3)
+    assert session.pg_stopped and session.open_input is None
+
+
+def test_stop_in_post_advance_gap_preserves_control_and_response_absence(tmp_path):
+    conn=make_conn(tmp_path);registry=make_registry(conn)
+    session,_=start(registry)
+    prior_sequence=session.sequence;advance=registry._advance
+    def gap(*args,**kwargs):
+        pending=advance(*args,**kwargs)
+        assert registry.stop(session.session_id).process_status==ProcessStatus.STOP_REQUESTED
+        return pending
+    registry._advance=gap
+    response=InputResponse(input_id=session.open_input.input_id,value='late',actor_id='fake')
+    _,state=registry.respond(session.session_id,response)
+    assert state.process_status==ProcessStatus.STOP_REQUESTED
+    assert session.responses=={} and session.open_input is None
+    # Input acceptance and Stop each advance sequence, never the late result.
+    assert session.sequence==prior_sequence+2
+    durable=registry._store.load_published(session.session_id,OWNER)['control']
+    assert durable['responses']==[] and durable['open_input'] is None and durable['stopped']
+
+
+def test_direct_publish_after_stop_cannot_change_control_state(tmp_path):
+    from vmodel_contracts.interactive import EventType,NextStep
+    from interview_engine.stop_fence import StopRequested
+    conn=make_conn(tmp_path);registry=make_registry(conn)
+    session,_=start(registry);registry.stop(session.session_id)
+    before=(session.sequence,session.phase_id,session.status,session.open_input)
+    durable=registry._store.load_published(session.session_id,OWNER)['control']
+    with pytest.raises(StopRequested):
+        registry.publish(session.session_id,EventType.INPUT_REQUESTED,phase_id=10,
+            status=ProcessStatus.WAITING_INPUT,next_step=NextStep.WAIT_INPUT,
+            input_request=InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='late'))
+    assert (session.sequence,session.phase_id,session.status,session.open_input)==before
+    assert registry._store.load_published(session.session_id,OWNER)['control']==durable
+
+
+def test_quiescence_requires_actual_writer_and_exact_stop_identity(tmp_path):
+    from dataclasses import replace
+    conn=make_conn(tmp_path);registry=make_registry(conn)
+    session,_=start(registry);claim=session.pg_claim;store=registry._store
+    generation=store.stop(session.session_id,OWNER)
+    assert store.claim(session.session_id,OWNER,'takeover',60) is None
+    for wrong in (replace(claim,owner_id='00000000-0000-0000-0000-000000000002'),
+                  replace(claim,generation=claim.generation+1),
+                  replace(claim,epoch=claim.epoch+1),replace(claim,instance='foreign')):
+        assert not store.acknowledge_stop_quiescent(wrong,generation)
+    assert not store.acknowledge_stop_quiescent(claim,generation+1)
+    assert not store.load_published(session.session_id,OWNER)['control'].get('stop_quiescent')
+    # A restarted reader cannot invent the original process's writer-exit proof.
+    fresh=make_registry(conn,instance='fresh')
+    assert fresh.reconcile_stopped(session.session_id).process_status==ProcessStatus.STOP_REQUESTED
+    assert store.acknowledge_stop_quiescent(claim,generation)
+    assert fresh.snapshot(session.session_id).process_status==ProcessStatus.STOPPED
+    assert store.stop(session.session_id,OWNER)==generation
+    assert store.load_published(session.session_id,OWNER)['control']['stop_quiescent']
+
+
+def test_timed_out_provider_thread_keeps_stop_requested_until_actual_exit(tmp_path):
+    from interview_engine.model_config import _run_with_deadline
+    entered=threading.Event();release=threading.Event()
+    class Slow:
+        finished=False
+        def advance(self,response=None):
+            if response is None:return InputRequest(input_id=uuid4(),kind=InputKind.TEXT,prompt='wait')
+            def provider():entered.set();assert release.wait(5)
+            return _run_with_deadline(provider,.05,'fake')
+    conn=make_conn(tmp_path);registry=make_registry(conn,program=lambda *a:Slow())
+    session,_=start(registry)
+    answer=InputResponse(input_id=session.open_input.input_id,value='late',actor_id='fake')
+    try:
+        with pytest.raises(TimeoutError):registry.respond(session.session_id,answer)
+        assert entered.is_set()
+        assert registry.stop(session.session_id).process_status==ProcessStatus.STOP_REQUESTED
+        assert registry.reconcile_stopped(session.session_id).process_status==ProcessStatus.STOP_REQUESTED
+    finally:release.set()
+    import time
+    end=time.monotonic()+2
+    while registry.snapshot(session.session_id).process_status!=ProcessStatus.STOPPED and time.monotonic()<end:time.sleep(.01)
+    assert registry.snapshot(session.session_id).process_status==ProcessStatus.STOPPED

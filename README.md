@@ -29,12 +29,12 @@ Pipeline map: [PROCESS.md in the meta repo](https://github.com/ShyAlon/vmodel-sp
 
 ## Running, progress, and crash-resume
 
-`python -m interview_engine.cli "your idea"` prints a live progress line per
-stage (`-> Interviewing (turn 3)...` / `ok ... [12.4s]`) driven by structured
-`ProgressEvent`s (progress.py) - the same stream the UI will consume
-(ADR-0010). Checkpoints persist to `out/<session>/checkpoints.sqlite`: if
-anything crashes, `python -m interview_engine.cli --session <id>` resumes
-exactly where it stopped - completed stages are never re-paid (ADR-0011).
+Host execution emits progress per stage through structured `ProgressEvent`s
+(progress.py), the same stream consumed by the UI
+(ADR-0010). Authenticated host execution persists checkpoints in PostgreSQL.
+Interrupted work restores only from the published checkpoint under a fresh
+valid lease. Standalone file-session execution and old-session migration are
+retired.
 
 ## Model routing
 
@@ -161,3 +161,37 @@ dropped.
 Run `./scripts/test-local.sh` from any directory. It creates a reusable `.venv`, installs the development dependencies and runs the same tests as the PR workflow using Python 3.12. Install Python 3.12 first, and make sure your Git authentication can read private `ShyAlon/vmodel-contracts` where it is a dependency.
 
 For a standalone wheel build of this repository, run `./scripts/build-local.sh` (requires Python 3.12 and pip). This writes to `dist/` and does not publish or deploy anything.
+
+### PostgreSQL-only sessions and Stop recovery
+
+Session startup requires `INTERVIEW_ENGINE_SESSIONS_DSN` and authenticated owner
+and auth-session scope. The former file-session opt-in, file progress journal,
+SQLite checkpoint reader and stamp-only binding migration are retired. Old
+sessions are not migrated or resumed. Transcript-based categorization enrichment
+remains supported; explicitly export the transcript first.
+
+Stop fences the old generation immediately. `STOP_REQUESTED` means the writer's
+exit is not yet proven, including accepted provider threads that outlive a call
+timeout. The serving registry acknowledges `STOPPED` only after those writers
+actually exit. The Debug window's engine `process_status_name` shows this
+unchanged protocol state. A restart or lease expiry never implies quiescence.
+
+If the original registry crashed before acknowledging exit, Stop deliberately
+stays `STOP_REQUESTED`. An operator must terminate the exact old process and all
+of its accepted provider threads first. Inspect the stopped row's owner, session,
+generation, lease epoch and placement instance, then run the offline recovery
+script with the operator DSN in `INTERVIEW_ENGINE_SESSIONS_DSN`:
+
+```bash
+python scripts/confirm-stopped-writer-exit.py --owner OWNER --session SESSION \
+  --generation STOPPED_GENERATION --epoch OLD_EPOCH --instance OLD_INSTANCE
+```
+
+That command is a read-only dry run. After verifying actual process/thread exit,
+repeat it with `--apply --writers-terminated`. The script compares the exact
+stopped identity under row lock and only records operator-confirmed quiescence;
+it never resumes the session, changes its generation, or grants a new lease.
+The flag is an operator attestation, not an automatic process-death detector.
+Never use a timeout, network loss or lease expiry as this proof. If identity
+changed, stop and inspect it again rather than editing the expected values until
+an update succeeds. No public recovery endpoint exists.

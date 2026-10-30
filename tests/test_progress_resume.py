@@ -1,6 +1,5 @@
 """Progress events, distillation repair/retry, and crash-resume from disk checkpoints."""
 import json
-import sqlite3
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -144,28 +143,31 @@ def test_distill_retries_once_with_schema_feedback(fake_models):
     assert IntentModel.model_validate(r["intent_model"]).problem_statement == "founders rewrite forever"
 
 
-def test_crash_resume_from_disk_checkpoint(tmp_path, fake_models):
-    from langgraph.checkpoint.sqlite import SqliteSaver
+def test_crash_resume_from_pg_checkpoint(tmp_path, fake_models):
+    from test_pg_checkpoint import make_saver
+    from conftest import managed_pg_server
+    server=managed_pg_server(tmp_path/'resume-pg')
+    ctx,saver,admin=make_saver(server.get_uri())
 
     # two-turn interview: question first, so the first invoke pauses for input
     fake_models["probing"] = FakeModel([
         '{"question": "What problem does it solve?", "covered": [], "thin": [], "skipped": [], "complete": false}',
         "[INTERVIEW COMPLETE]"])
-    db = str(tmp_path / "cp.sqlite")
     cfg = {"configurable": {"thread_id": "s-resume"}}
-    g1 = build_graph(UsageLog("s"), checkpointer=SqliteSaver(sqlite3.connect(db, check_same_thread=False)))
+    g1 = build_graph(UsageLog("s"), checkpointer=saver)
     r1 = run_one_turn(g1, cfg)
     assert r1["messages"][-1].content == "What problem does it solve?"
     assert "intent_model" not in r1  # paused for the founder's answer
 
-    # simulate the crash: drop everything in-process, rebuild from the same db
+    # Rebuild graph over the same real fenced PG checkpoint.
     del g1
-    g2 = build_graph(UsageLog("s"), checkpointer=SqliteSaver(sqlite3.connect(db, check_same_thread=False)))
+    g2 = build_graph(UsageLog("s"), checkpointer=saver)
     saved = g2.get_state(cfg)
     assert saved.values["messages"], "checkpoint must survive process death"
     r2 = g2.invoke({"messages": [HumanMessage(content="it solves rewrite hell")]}, cfg)
     assert "intent_model" in r2, "resume continued the interview to distillation"
     assert r2.get("turn_count") == 2  # continued, not restarted
+    ctx.__exit__(None,None,None)
 
 
 def test_state_is_json_native_no_msgpack_warning(fake_models, recwarn):
@@ -439,12 +441,19 @@ def test_legacy_graph_checkpoint_switches_pinned_model_and_resumes(monkeypatch,t
     def build(stage,**kwargs):
         return RoutedModel() if stage=='probing' else FakeModel(['{"is_web_app":true,"archetype":"saas_crud","confidence":0.9,"reason":"web app"}'] if stage=='scope_tiebreak' else [json.dumps(NEEDS_REPLY),json.dumps(SCOPE_REPLY),json.dumps(PREVIEW_REPLY)])
     monkeypatch.setattr(model_config,'build_chat_model',build)
-    registry=SessionRegistry(default_program_factory,state_dir=tmp_path)
+    from test_pg_application_wiring import make_conn,OWNER,_OPEN,PgSessionStore
+    from conftest import managed_pool
+    conn=make_conn(tmp_path);store=PgSessionStore(managed_pool(conn.info.dsn))
+    registry=SessionRegistry(default_program_factory,session_store=store,owner_id=OWNER,allow_db_provider_dispatch=True)
+    _OPEN['registries'].append(registry)
     session,_=registry.start(StartSessionRequest(task_id='legacy-task',idea='App for surf schools',model_route='ollama',initial_model='qwen2.5-coder:14b'))
     assert session.open_input and seen==[('ollama','qwen2.5-coder:14b')]
-    path=tmp_path/session.session_id/'interview'/'http-session.json'
-    saved=json.loads(path.read_text());saved.pop('route_version');saved.pop('route_history');path.write_text(json.dumps(saved))
-    restarted=SessionRegistry(default_program_factory,state_dir=tmp_path)
+    saved=store.load_published(session.session_id,OWNER)['control'];saved.pop('route_version');saved.pop('route_history')
+    with store._borrow() as c:
+        c.execute('UPDATE engine_sessions SET control=%s::jsonb WHERE session_id=%s',(json.dumps(saved),session.session_id));c.commit()
+    registry.close()
+    restarted=SessionRegistry(default_program_factory,session_store=store,owner_id=OWNER,allow_db_provider_dispatch=True)
+    _OPEN['registries'].append(restarted)
     old=restarted.get(session.session_id)
     assert old.program.graph.get_state(old.program.cfg).values['messages']
     request=ModelRouteSwitchRequest(model_route='ollama',model='phi4',actor_id='founder',expected_sequence=old.sequence,

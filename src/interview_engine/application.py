@@ -4,13 +4,12 @@ No console or transport concerns live here. The service advances the graph until
 it reaches a typed founder-input boundary or completion.
 """
 from __future__ import annotations
-import json,logging,sqlite3,time
+import json,logging,time
 from contextlib import nullcontext, contextmanager
 from pathlib import Path
 from uuid import uuid4
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from langgraph.checkpoint.sqlite import SqliteSaver
 from vmodel_contracts import AppArchetype,ConOpsDocument,IntakeSubmission,IntentModel
 from vmodel_contracts.facets import COVERAGE_SCHEMA
 from vmodel_contracts.interactive import InputKind,InputOption,InputRequest,InputResponse,NextStep,ProcessStatus
@@ -44,6 +43,7 @@ def _graph_tenant_claims(pg_store,pg_claim):
 class InterviewApplication:
     """Stateful graph driver. HTTP supplies typed responses; graph owns domain state."""
     def __init__(self,session_id:str,task_id:str,idea:str,*,artifact_root:str|None=None,model_route:str|None=None,pinned_models:dict|None=None,initial_model:str|None=None,pg_store=None,pg_claim=None,progress_mode:str="buffered"):
+        if pg_store is None or pg_claim is None:raise ValueError('authenticated PG store and lease claim required')
         self.produced_checkpoint_id=None
         self.session_id,self.task_id=session_id,task_id
         from .session_runtime import SessionRuntime
@@ -53,57 +53,31 @@ class InterviewApplication:
         if self.model_map is not None:session_models.validate(self.model_map,model_route,preflight=pinned_models is None)
         self.outdir=artifacts_root(artifact_root)/session_id/'interview'
         self.documents=None
-        if pg_store is not None:
-            from .pg_documents import InterviewDocuments
-            from .evidence import DatabaseEvidenceLake
-            self.documents=InterviewDocuments(pg_store,pg_claim,task_id)
-            self.evidence=DatabaseEvidenceLake(self.documents,task_id)
-        else:
-            self.outdir.mkdir(parents=True,exist_ok=True)
-            from .evidence import EvidenceLake
-            self.evidence=EvidenceLake(artifacts_root(artifact_root)/'evidence-lake',task_id)
+        from .pg_documents import InterviewDocuments
+        from .evidence import DatabaseEvidenceLake
+        self.documents=InterviewDocuments(pg_store,pg_claim,task_id)
+        self.evidence=DatabaseEvidenceLake(self.documents,task_id)
         self.schema_binding=self.evidence.bind_session(session_id)
-        if pg_store is not None:
-            # Database mode: the graph checkpoints into Postgres through the
-            # fenced saver; every mutation carries the session's lease fence.
-            # Tenant claims ride each transaction (pg_claims): poolers drop
-            # startup-option GUCs, so the conninfo never carries them.
-            # No per-session connection: the saver and staging borrow claimed
-            # connections per operation from the process pool (pg_pool). The
-            # fence identity (generation, epoch) is data, not a socket.
-            from .pg_checkpoint import FencedPostgresSaver, LeaseFence
-            tenant_claims=_graph_tenant_claims(pg_store,pg_claim)
-            from . import model_config as _mc
-            self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
-            _log.info("staging.ready session=%s",session_id)
-            saver=FencedPostgresSaver(pg_store.pool,
-                lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
-                serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
-                claims=tenant_claims)
-            t_setup=time.monotonic();_log.info("saver.setup.begin session=%s",session_id)
-            saver.setup()
-            _log.info("saver.setup.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_setup)*1000))
-        else:
-            db=self.outdir/'checkpoints.sqlite';conn=sqlite3.connect(str(db),check_same_thread=False)
-            from .stop_fence import check_execution,guarded_publish
-            class FencedSqliteSaver(SqliteSaver):
-                def put(self,*args,**kwargs):
-                    return guarded_publish(lambda:super(FencedSqliteSaver,self).put(*args,**kwargs))
-                def put_writes(self,*args,**kwargs):
-                    return guarded_publish(lambda:super(FencedSqliteSaver,self).put_writes(*args,**kwargs))
-            saver=FencedSqliteSaver(conn,serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]))
+        from .pg_checkpoint import FencedPostgresSaver, LeaseFence
+        tenant_claims=_graph_tenant_claims(pg_store,pg_claim)
+        from . import model_config as _mc
+        self._staging=_mc.StagingContext(session_id,pg_store,pg_claim)
+        _log.info("staging.ready session=%s",session_id)
+        saver=FencedPostgresSaver(pg_store.pool,
+            lease=LeaseFence(session_id,pg_claim.generation,pg_claim.epoch),
+            serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
+            claims=tenant_claims)
+        t_setup=time.monotonic();_log.info("saver.setup.begin session=%s",session_id)
+        saver.setup()
+        _log.info("saver.setup.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_setup)*1000))
         log=UsageLog(session_id,sink=(lambda usage:self.documents.append('interview/usage.jsonl',(usage.model_dump_json()+'\n').encode())) if self.documents is not None else jsonl_sink(self.outdir/'usage.jsonl'))
         self.usage_log=log
         progress=ProgressBus();progress.subscribe(stderr_printer())
-        if pg_store is not None:
-            from .pg_journal import BufferedJournal, ObservationalJournal
-            if progress_mode not in ('buffered','observational'):
-                raise ValueError('unknown progress mode')
-            journal_class=ObservationalJournal if progress_mode == 'observational' else BufferedJournal
-            self.progress_journal=journal_class(pg_store,pg_claim,session_id,task_id)
-        else:
-            from .progress_journal import ProgressJournal
-            self.progress_journal=ProgressJournal(artifacts_root(artifact_root),session_id,task_id)
+        from .pg_journal import BufferedJournal, ObservationalJournal
+        if progress_mode not in ('buffered','observational'):
+            raise ValueError('unknown progress mode')
+        journal_class=ObservationalJournal if progress_mode == 'observational' else BufferedJournal
+        self.progress_journal=journal_class(pg_store,pg_claim,session_id,task_id)
         self._pg_store=pg_store;self._pg_claim=pg_claim
         if not hasattr(self,'_staging'):self._staging=None
         def journal_signal(ev):

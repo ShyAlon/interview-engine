@@ -2,6 +2,8 @@
 type, how long, what it produced - the live answer to 'what is it doing'."""
 import interview_engine.model_config as mc
 from interview_engine.application import InterviewApplication
+from test_pg_application_wiring import make_conn,PgSessionStore,OWNER
+from conftest import managed_pool
 
 
 class _StubJournal:
@@ -13,7 +15,10 @@ class _StubJournal:
 
 
 def _app(tmp_path):
-    app = InterviewApplication('s-call-end', 'task-1', 'idea', artifact_root=str(tmp_path))
+    store=PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn))
+    store.create('s-call-end','task-1',OWNER)
+    claim=store.claim('s-call-end',OWNER,'progress-worker',ttl=60)
+    app = InterviewApplication('s-call-end', 'task-1', 'idea', artifact_root=str(tmp_path),pg_store=store,pg_claim=claim)
     app.progress_journal = _StubJournal()
     return app
 

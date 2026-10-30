@@ -54,3 +54,26 @@ def _cleanup_pg_servers():
             server.cleanup()
         except Exception:
             pass
+
+
+@pytest.fixture
+def pg_registry(tmp_path):
+    """Real disposable PG registry port with explicit owner and lifecycle."""
+    import psycopg,psycopg.rows
+    from test_pg_session_store import MIRRORED_REGISTRY_DDL,MIRRORED_JOURNAL_DDL
+    from interview_engine.pg_session_store import PgSessionStore
+    from interview_engine.http_service import SessionRegistry
+    server=managed_pg_server(tmp_path/'registry-pg')
+    conn=psycopg.connect(server.get_uri(),row_factory=psycopg.rows.dict_row)
+    conn.execute(MIRRORED_REGISTRY_DDL);conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
+    pool=managed_pool(conn.info.dsn);regs=[]
+    owner='00000000-0000-0000-0000-000000000001'
+    store=PgSessionStore(pool)
+    def make(*args,**kwargs):
+        kwargs.setdefault('session_store',store);kwargs.setdefault('owner_id',owner)
+        kwargs.setdefault('instance_id','fixture#'+str(len(regs)))
+        registry=SessionRegistry(*args,**kwargs);regs.append(registry);return registry
+    make.store=store;make.owner=owner;make.conn=conn
+    yield make
+    for registry in regs:registry.close()
+    conn.close()

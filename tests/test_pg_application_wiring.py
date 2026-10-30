@@ -594,7 +594,8 @@ def test_db_mode_custom_factory_cannot_bypass_provider_guard(tmp_path, monkeypat
     def real_factory(session_id, request):
         return InterviewApplication(session_id, request.task_id, request.idea,
                                     artifact_root=str(tmp_path / 'artifacts'),
-                                    model_route='ollama', initial_model='phi4')
+                                    model_route='ollama', initial_model='phi4',
+                                    pg_store=registry._store,pg_claim=registry._sessions[session_id].pg_claim)
     registry = SessionRegistry(real_factory, session_store=PgSessionStore(managed_pool(make_conn(tmp_path).info.dsn)),
                                owner_id=OWNER, instance_id='g#2')
     _OPEN['registries'].append(registry)

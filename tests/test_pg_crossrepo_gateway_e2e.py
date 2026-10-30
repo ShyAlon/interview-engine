@@ -55,8 +55,8 @@ A_ID = '00000000-0000-0000-0000-000000000001'
 def crossrepo(tmp_path, fake_ollama, fake_models, monkeypatch):
     """Real migration chain (DA pg_harness) + real DA store + engine store over
     the SAME database; a fresh session id per test (the harness DB persists)."""
-    sys.path.insert(0, str(Path(DELIVERY) / 'tests'))
-    sys.path.insert(0, str(Path(DELIVERY) / 'src'))
+    monkeypatch.syspath_prepend(str(Path(DELIVERY) / 'tests'))
+    monkeypatch.syspath_prepend(str(Path(DELIVERY) / 'src'))
     import pg_harness
     pg_harness.start()
     dsn = pg_harness.STATE.get('dsn')

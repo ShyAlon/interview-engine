@@ -84,25 +84,29 @@ def test_local_accepted_response_usage_recorded_before_stop_discards_result(tmp_
     assert f.state=='STOPPED'
 
 
-def test_stopped_result_sinks_do_not_publish_but_existing_evidence_remains(tmp_path):
+def test_stopped_result_sinks_do_not_publish_but_existing_evidence_remains(tmp_path,pg_registry):
     from interview_engine.raw_output import RawOutputLog
     from interview_engine.verification import VerificationLog
     from interview_engine.evidence import EvidenceLake
-    from interview_engine.progress_journal import ProgressJournal
+    from interview_engine.pg_journal import ObservationalJournal
     from uuid import uuid4
     sid=str(uuid4());f=StopFence(tmp_path/'stop.json')
     raw=RawOutputLog(tmp_path/'raw');verification=VerificationLog(tmp_path/'verification.jsonl')
-    lake=EvidenceLake(tmp_path/'lake','fake');journal=ProgressJournal(tmp_path,sid,'fake')
+    lake=EvidenceLake(tmp_path/'lake','fake')
+    pg_registry.store.create(sid,'fake',pg_registry.owner)
+    claim=pg_registry.store.claim(sid,pg_registry.owner,'writer',60)
+    journal=ObservationalJournal(pg_registry.store,claim,sid,'fake')
     baseline=raw.write('fake','fake','saved');before=baseline.read_bytes()
     with f.running():
         f.request_stop()
+        pg_registry.store.stop(sid,pg_registry.owner)
         for publish in [lambda:raw.write('fake','fake','late'),lambda:verification.write({'fake':'late'}),
                         lambda:lake._append('evidence',{'fake':'late'}),lambda:journal.append(phase_key='intent',stage='fake',label='fake',status='completed')]:
             with pytest.raises(StopRequested):publish()
     assert baseline.read_bytes()==before and len(list((tmp_path/'raw').glob('*')))==1
     assert not (tmp_path/'verification.jsonl').exists()
     assert not (lake.paths.run/'evidence').exists()
-    assert not journal.read().events
+    assert pg_registry.store.read_journal(sid,pg_registry.owner,0,100)==[]
 
 
 def test_preexisting_fence_observes_external_marker_and_never_claims_quiescence(tmp_path):

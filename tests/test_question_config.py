@@ -48,8 +48,8 @@ def test_file_store_is_read_per_call_and_survives_corruption(tmp_path):
     assert st.get() == qc.defaults()
 
 
-def test_http_get_put_roundtrip_and_422(tmp_path):
-    client = TestClient(create_app(SessionRegistry(state_dir=tmp_path), service_token=TOKEN),
+def test_http_get_put_roundtrip_and_422(tmp_path,pg_registry):
+    client = TestClient(create_app(pg_registry(), service_token=TOKEN,quality_store=qc.ConfigStore(tmp_path/"question_quality.json")),
                         headers={"X-Interview-Engine-Token": TOKEN})
     got = client.get("/v1/question-quality-config").json()
     assert got["config"] == got["defaults"] == qc.defaults()
@@ -61,8 +61,8 @@ def test_http_get_put_roundtrip_and_422(tmp_path):
     assert bad.status_code == 422 and "retrieval.max_words" in bad.json()["detail"]
 
 
-def test_http_requires_token():
-    client = TestClient(create_app(service_token=TOKEN))
+def test_http_requires_token(pg_registry):
+    client = TestClient(create_app(pg_registry(),service_token=TOKEN))
     assert client.get("/v1/question-quality-config").status_code == 401
     assert client.put("/v1/question-quality-config", json={}).status_code == 401
 
