@@ -56,7 +56,8 @@ def execute_operation(operation,*,trusted_binding,store,load_request,load_answer
                 from vmodel_contracts.interactive import ModelRouteSwitchRequest
                 request=load_request(body.request_ref)
                 if (not isinstance(request,ModelRouteSwitchRequest) or request.expected_sequence!=body.expected_sequence
-                    or str(request.expected_input_id)!=body.wait_id or request.model_route!=b.provider):
+                    or str(request.expected_input_id)!=body.wait_id
+                    or {tuple(pair) for pair in step.session.program.model_map.values()}!={(b.provider,b.model)}):
                     raise PermissionError('durable route request binding differs')
                 _,snapshot=step.registry.switch_route(b.session_id,request)
                 return snapshot

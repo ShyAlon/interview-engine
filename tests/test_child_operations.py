@@ -50,3 +50,28 @@ def test_start_rejects_changed_preclaim_epoch_before_graph(tmp_path):
         load_request=lambda ref:StartSessionRequest(session_id=sid,task_id='fake',idea='fake',model_route='local'),
         load_answer=lambda ref:None,program_factory=lambda *a:calls.append(1))
     assert calls==[]
+
+
+@pytest.mark.parametrize('source,allowed', [('ollama',True),('deepseek',False)])
+def test_route_destination_is_not_source_but_restored_source_must_match(monkeypatch,source,allowed):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from vmodel_contracts.interactive import ModelRouteSwitchRequest
+    from interview_engine import child_step
+    sid=str(uuid4());wait=str(uuid4());calls=[]
+    request=ModelRouteSwitchRequest(model_route='deepseek',model='deepseek-flash',actor_id='fake',
+        expected_sequence=2,expected_input_id=wait,idempotency_key=uuid4())
+    operation=op(sid,{'kind':'interview.route','checkpoint_sha256':'a'*64,
+        'expected_sequence':2,'wait_id':wait,'request_ref':'route-1'})
+    @contextmanager
+    def restored(*args,**kwargs):
+        yield SimpleNamespace(session=SimpleNamespace(program=SimpleNamespace(model_map={'probing':(source,'fake')})),
+            registry=SimpleNamespace(switch_route=lambda *args:(calls.append(args),'snapshot')))
+    monkeypatch.setattr(child_step,'restored_child_step',restored)
+    store=SimpleNamespace(claims=(OWNER,'00000000-0000-0000-0000-000000000002'))
+    def run():return execute_operation(operation,trusted_binding=operation.binding,store=store,
+        load_request=lambda ref:request,load_answer=lambda ref:None,program_factory=lambda:None)
+    if allowed:assert run()=='snapshot' and len(calls)==1
+    else:
+        with pytest.raises(PermissionError,match='binding differs'):run()
+        assert calls==[]
