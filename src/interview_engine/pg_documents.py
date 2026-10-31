@@ -32,11 +32,19 @@ class InterviewDocuments:
             yield conn
 
     def _read(self,conn,key):
-        row=conn.execute('SELECT payload,sha256 FROM generator_documents WHERE execution_session_id=%s AND generation=%s AND document_key=%s',(self.claim.session_id,self.claim.generation,key)).fetchone()
-        if row is None or row['payload'] is None:return None
-        raw=bytes(row['payload'])
-        if hashlib.sha256(raw).hexdigest()!=row['sha256']:raise ValueError('interview document hash differs')
-        return raw
+        rows=conn.execute('SELECT * FROM public.requi_document_parts(%s,%s,%s)',(self.claim.session_id,self.claim.generation,key)).fetchall()
+        if not rows:return None
+        if len(rows)!=rows[0]['total']+1 or any(r['ordinal']!=i for i,r in enumerate(rows)):raise ValueError('interview chunk sequence differs')
+        parts=[]
+        for row in rows:
+            if row['payload'] is None:
+                if row['ordinal']==0 and row['total']==0:return None
+                if row['ordinal']==0:continue
+                raise ValueError('interview chunk payload missing')
+            raw=bytes(row['payload'])
+            if hashlib.sha256(raw).hexdigest()!=row['sha256']:raise ValueError('interview document hash differs')
+            parts.append(raw)
+        return b''.join(parts)
 
     def read(self,key):
         key=self.key(key)
@@ -61,7 +69,8 @@ class InterviewDocuments:
     def append(self,key,raw):
         key=self.key(key)
         if type(raw) is not bytes:raise ValueError('interview append bytes required')
-        with self.transaction() as conn:self._put(conn,key,(self._read(conn,key) or b'')+raw)
+        c=self.claim
+        with self.transaction() as conn:conn.execute('SELECT public.requi_document_append(%s,%s,%s,%s,%s,%s,%s)',(c.session_id,c.generation,key,raw,c.owner_id,self.store.claims[1],time.time()))
 
     def bind(self,key,raw):
         key=self.key(key)
