@@ -161,7 +161,7 @@ class InterviewApplication:
                 reviewed=SemanticReview.model_validate({**original.model_dump(),'decisions':payload.get('decisions',[])})
                 if any(d.actor!=response.actor_id for d in reviewed.decisions):raise ValueError('semantic decision actor mismatch')
                 resolved=reviewed.resolved_candidate(IntentModel.model_validate)
-                self.graph.update_state(self.cfg,{'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True})
+                self._update_checkpoint({'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True})
                 self._publish_document(lambda:self._write_document('semantic-review.json',reviewed.model_dump_json(indent=2)))
                 self.result={**self.result,'intent_model':resolved,'semantic_review':reviewed.model_dump(mode='json'),'semantic_review_resolved':True}
                 self.open_input=None;self.state={}
@@ -172,7 +172,7 @@ class InterviewApplication:
                     register=FounderRegister.model_validate(self.result['intent_model']['founder_register'])
                     updated=apply_resolutions(register,response.founder_inputs,response.actor_id)
                     self.result['intent_model']={**self.result['intent_model'],'founder_register':updated.model_dump(mode='json')}
-                    self.graph.update_state(self.cfg,{'intent_model':self.result['intent_model']})
+                    self._update_checkpoint({'intent_model':self.result['intent_model']})
                 if value == 1:
                     self._finish();return None
                 if value == 0:
@@ -185,7 +185,7 @@ class InterviewApplication:
                         {'intent_model':self.result['intent_model'],'conops':self.result['conops'],
                          'guidance':response.rationale or ''},ensure_ascii=False,indent=2)))
                     rework_backup=dict(self.result);rework_input=self.open_input
-                    self.graph.update_state(self.cfg,{'conops':None,'conops_draft':None,'conops_decision_attempts':0})
+                    self._update_checkpoint({'conops':None,'conops_draft':None,'conops_decision_attempts':0})
                     self.state={'messages':[HumanMessage(content=response.rationale or 'Regenerate the ConOps concepts for review.')]}
                     self.open_input=None
                 elif value != 1:raise ValueError('approval response must use a declared option value')
@@ -256,7 +256,7 @@ class InterviewApplication:
                         old_ids={m.id for m in rework_backup.get('messages',[]) if getattr(m,'id',None)}
                         remove=[RemoveMessage(id=m.id) for m in current.get('messages',[])
                                 if getattr(m,'id',None) and m.id not in old_ids]
-                        restored_cfg=self.graph.update_state(self.cfg,{'conops':rework_backup.get('conops'),
+                        restored_cfg=self._update_checkpoint({'conops':rework_backup.get('conops'),
                             'conops_draft':rework_backup.get('conops_draft'),
                             'conops_decision_attempts':rework_backup.get('conops_decision_attempts',0),
                             'messages':remove+rework_backup.get('messages',[])})
@@ -286,7 +286,7 @@ class InterviewApplication:
                     from .completeness import inventory
                     register=inventory(self.session_id,self.result['intent_model'],self.result.get('messages',[]),self.result['conops'])
                     self.result['intent_model']={**self.result['intent_model'],'founder_register':register}
-                    self.graph.update_state(self.cfg,{'intent_model':self.result['intent_model']})
+                    self._update_checkpoint({'intent_model':self.result['intent_model']})
                 self.open_input=InputRequest(input_id=uuid4(),kind=InputKind.APPROVAL,prompt='Approve this intent model?',
                     options=[InputOption(value=1,label='Proceed'),InputOption(value=0,label='Edit')],
                     context=self._decision_context('interview_approval'))
@@ -304,6 +304,15 @@ class InterviewApplication:
             return self.open_input
         _log.info("advance.return session=%s kind=none finished=%s result_keys=%s",self.session_id,self.finished,sorted(self.result.keys()) if isinstance(self.result,dict) else type(self.result).__name__)
         return None
+
+    def _update_checkpoint(self,values):
+        """A direct state write is produced work, not an unpublished saver-latest."""
+        updated=self.graph.update_state(self.cfg,values)
+        checkpoint=(updated.get('configurable') or {}).get('checkpoint_id') if isinstance(updated,dict) else None
+        if checkpoint:
+            self.produced_checkpoint_id=checkpoint
+            self.cfg.setdefault('configurable',{})['checkpoint_id']=checkpoint
+        return updated
 
     def _decision_context(self,purpose:str)->dict:
         """Code-owned, bounded review evidence. Never infer purpose from prompts."""
