@@ -27,7 +27,7 @@ def execute_operation(operation,*,trusted_binding,store,load_request,load_answer
             if (not isinstance(request,StartSessionRequest) or str(request.session_id)!=b.session_id
                 or request.task_id!=b.task_id):raise PermissionError('durable start reference binding differs')
             registry=SessionRegistry(factory,session_store=store,owner_id=str(b.owner_id),
-                instance_id='child#'+str(uuid4()),allow_db_provider_dispatch=production)
+                instance_id='child#'+str(uuid4()),allow_db_provider_dispatch=production,progress_mode="observational")
             claim=None;owner=_owner.set(str(b.owner_id));auth=_session.set(str(b.auth_session_id))
             try:
                 claim=store.claim_start_expected(b,registry._instance,registry._lease_ttl)

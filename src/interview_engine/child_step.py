@@ -30,7 +30,7 @@ def restored_child_step(operation,*,trusted_binding,store,program_factory,broker
     if not isinstance(operation.operation,(InterviewAdvance,InterviewAnswer,InterviewRoute)):
         raise ValueError('only published interview restore is implemented in phase 2')
     registry=SessionRegistry(program_factory,session_store=store,owner_id=str(binding.owner_id),
-        instance_id='child#'+str(uuid4()),allow_db_provider_dispatch=broker is not None)
+        instance_id='child#'+str(uuid4()),allow_db_provider_dispatch=broker is not None,progress_mode="observational")
     claim=None;owner_token=_owner.set(str(binding.owner_id));session_token=_session.set(str(binding.auth_session_id))
     try:
         claim,row=store.claim_published_expected(binding,operation.operation,registry._instance,registry._lease_ttl)
