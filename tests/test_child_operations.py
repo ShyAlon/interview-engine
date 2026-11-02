@@ -86,10 +86,12 @@ def test_child_start_publishes_live_signal_before_advance_returns(tmp_path,monke
     conn=make_conn(tmp_path);store=PgSessionStore(make_pool(conn._pg_server),claims=None);sid=str(uuid4())
     store.create(sid,'fake',OWNER);claim=store.claim(sid,OWNER,'bootstrap',60);store.release(claim)
     store.claims=(OWNER,'00000000-0000-0000-0000-000000000002')
+    from test_pg_session_store import MIRRORED_JOURNAL_DDL
+    conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
     entered=threading.Event();release=threading.Event()
     original=SessionRegistry._prepare_program
     def prepare(registry,session,build):
-        program=original(registry,session,build)
+        program=original(session,build)
         assert registry._progress_mode=='observational'
         program.progress_journal=ObservationalJournal(store,session.pg_claim,sid,'fake')
         return program
