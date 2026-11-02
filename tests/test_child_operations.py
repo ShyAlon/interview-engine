@@ -75,3 +75,41 @@ def test_route_destination_is_not_source_but_restored_source_must_match(monkeypa
     else:
         with pytest.raises(PermissionError,match='binding differs'):run()
         assert calls==[]
+
+
+def test_child_start_publishes_live_signal_before_advance_returns(tmp_path,monkeypatch):
+    """Typed real Start entry point, blocked fixture program and independent PG read."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from interview_engine.http_service import SessionRegistry
+    from interview_engine.pg_journal import ObservationalJournal
+    conn=make_conn(tmp_path);store=PgSessionStore(make_pool(conn._pg_server),claims=None);sid=str(uuid4())
+    store.create(sid,'fake',OWNER);claim=store.claim(sid,OWNER,'bootstrap',60);store.release(claim)
+    store.claims=(OWNER,'00000000-0000-0000-0000-000000000002')
+    from test_pg_session_store import MIRRORED_JOURNAL_DDL
+    conn.execute(MIRRORED_JOURNAL_DDL);conn.commit()
+    entered=threading.Event();release=threading.Event()
+    original=SessionRegistry._prepare_program
+    def prepare(registry,session,build):
+        program=original(session,build)
+        assert registry._progress_mode=='observational'
+        program.progress_journal=ObservationalJournal(store,session.pg_claim,sid,'fake')
+        return program
+    monkeypatch.setattr(SessionRegistry,'_prepare_program',prepare)
+    class Blocked(Program):
+        def advance(self,response=None):
+            self.progress_journal.append(phase_key='intent',stage='scope',label='Classifying scope',status='started')
+            entered.set();assert release.wait(10)
+            return super().advance(response)
+    operation=op(sid,{'kind':'interview.start','request_ref':'request-1'})
+    request=StartSessionRequest(session_id=sid,task_id='fake',idea='fake',model_route='local')
+    with ThreadPoolExecutor(1) as workers:
+        pending=workers.submit(execute_operation,operation,trusted_binding=operation.binding,store=store,
+            load_request=lambda ref:request,load_answer=lambda ref:None,program_factory=lambda *a:Blocked())
+        try:
+            assert entered.wait(5)
+            rows=store.read_journal(sid,OWNER,0,100)
+            assert len(rows)==1 and rows[0]['page']['label']=='Classifying scope'
+            assert not pending.done()
+        finally:release.set()
+        assert pending.result(timeout=10).open_input
