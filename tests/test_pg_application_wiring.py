@@ -69,6 +69,8 @@ def make_conn(tmp_path, name='pgdata', init=True):
         conn.execute(MIRRORED_REGISTRY_DDL)
         conn.execute("CREATE TABLE tasks(task_id TEXT PRIMARY KEY,engine_session_id TEXT,generation INTEGER NOT NULL,stop_requested_at DOUBLE PRECISION)")
         conn.execute("CREATE TABLE generator_documents(execution_session_id TEXT NOT NULL REFERENCES engine_sessions(session_id),owner_id UUID NOT NULL,auth_session_id UUID NOT NULL,generation INTEGER NOT NULL,document_key TEXT NOT NULL,payload BYTEA,sha256 TEXT,updated_at DOUBLE PRECISION NOT NULL,PRIMARY KEY(execution_session_id,document_key),CHECK((payload IS NULL)=(sha256 IS NULL)))")
+        from pathlib import Path
+        conn.execute(Path(__file__).with_name('mirrored_document_chunks.sql').read_text())
         conn.execute(MIRRORED_JOURNAL_DDL)
         conn.execute(MIRRORED_STAGING_DDL)
         conn.commit()
