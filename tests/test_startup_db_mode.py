@@ -108,6 +108,8 @@ def test_database_mode_single_tenant_requires_session_scope():
 
 def test_database_mode_fails_clear_without_placement_migration(tmp_path):
     server = managed_pg_server(str(tmp_path / 'pgdata'))
+    with psycopg.connect(server.get_uri(),autocommit=True) as conn:
+        conn.execute('CREATE ROLE requi_backend NOLOGIN')
     result = run_startup({'INTERVIEW_ENGINE_SESSIONS_DSN': server.get_uri(), 'INTERVIEW_ENGINE_OWNER_ID': OWNER, 'INTERVIEW_ENGINE_SESSION_ID': SESSION})
     assert result.returncode != 0
     assert '20261022090000_session_placement_leases.sql has not run' in result.stderr

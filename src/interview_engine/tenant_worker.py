@@ -56,6 +56,8 @@ def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False):
         if isinstance(exc, psycopg.errors.UndefinedTable):
             err=RuntimeError('database session persistence configured but the delivery-api placement migration '
                              '20261022090000_session_placement_leases.sql has not run: engine_sessions is missing')
+        elif isinstance(exc, psycopg.errors.UndefinedObject):
+            err=RuntimeError('database session persistence configured but the runtime role is missing; run the delivery-api migration/readiness review')
         else:
             err=RuntimeError('database session persistence configured but the database is unreachable: '+type(exc).__name__)
         raise tag_stage(err,'startup connect',None) from exc
