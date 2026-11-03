@@ -128,13 +128,13 @@ class FencedPostgresSaver(PostgresSaver):
     def _guarded_conn(self):
         # One claimed transaction for a guarded write batch: claims ride the
         # transaction stream; the connection returns to the pool at the end.
-        from .pg_claims import CLAIM_SQL
+        from .pg_claims import apply_claims
         from langgraph.checkpoint.postgres import _internal
         with _internal.get_connection(self.conn) as conn:
             try:
                 with conn.transaction():
                     if self._claims is not None:
-                        conn.execute(CLAIM_SQL, self._claims)
+                        apply_claims(conn, self._claims)
                     yield conn
             finally:
                 from psycopg.pq import TransactionStatus
@@ -153,11 +153,11 @@ class FencedPostgresSaver(PostgresSaver):
             with super()._cursor(pipeline=pipeline) as cur:
                 yield cur
             return
-        from .pg_claims import CLAIM_SQL
+        from .pg_claims import apply_claims
         from langgraph.checkpoint.postgres import _internal
         with self.lock, _internal.get_connection(self.conn) as conn:
             with conn.transaction():
-                conn.execute(CLAIM_SQL, self._claims)
+                apply_claims(conn, self._claims)
                 # No pipeline on a pooled connection (langgraph forbids it);
                 # the read paths here are single round trips anyway.
                 with conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:

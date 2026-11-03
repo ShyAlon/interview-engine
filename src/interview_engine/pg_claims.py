@@ -24,6 +24,12 @@ CLAIM_SQL = ("SELECT set_config('request.jwt.claim.sub',%s,true),"
              " set_config('request.jwt.claim.session_id',%s,true)")
 
 
+def apply_claims(conn, claims):
+    """Enter the restricted runtime role and tenant in the same transaction."""
+    conn.execute('SET LOCAL ROLE requi_backend')
+    conn.execute(CLAIM_SQL, claims)
+
+
 class ClaimedConnection:
     """A psycopg connection that applies its tenant claims per transaction.
 
@@ -41,7 +47,7 @@ class ClaimedConnection:
 
     def _apply_if_idle(self) -> None:
         if not self._conn.autocommit and self._conn.info.transaction_status == TransactionStatus.IDLE:
-            self._conn.execute(CLAIM_SQL, self.claims)
+            apply_claims(self._conn, self.claims)
 
     def execute(self, *args, **kwargs):
         self._apply_if_idle()
@@ -54,7 +60,7 @@ class ClaimedConnection:
     @contextmanager
     def transaction(self, *args, **kwargs):
         with self._conn.transaction(*args, **kwargs):
-            self._conn.execute(CLAIM_SQL, self.claims)
+            apply_claims(self._conn, self.claims)
             yield self
 
     def __getattr__(self, name):
