@@ -36,6 +36,15 @@ def managed_pg_server(path):
     import pgserver
     server = pgserver.get_server(str(path))
     _PG_SERVERS.append(server)
+    # Mirrored-schema unit fixtures still model the runtime SET role. Real
+    # delivery schema tests use delivery's separate migration-owned harness.
+    import psycopg
+    with psycopg.connect(server.get_uri(),autocommit=True) as conn:
+        if not conn.execute("SELECT 1 FROM pg_roles WHERE rolname='requi_backend'").fetchone():
+            conn.execute('CREATE ROLE requi_backend NOLOGIN NOSUPERUSER NOBYPASSRLS')
+        conn.execute('GRANT USAGE ON SCHEMA public TO requi_backend')
+        conn.execute('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO requi_backend')
+        conn.execute('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO requi_backend')
     return server
 
 
