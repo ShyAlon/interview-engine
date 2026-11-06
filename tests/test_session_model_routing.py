@@ -102,8 +102,9 @@ def test_ollama_preflight_inaccessible(monkeypatch):
     import httpx
     def fail(*args,**kwargs):raise httpx.ConnectError('connection refused')
     monkeypatch.setattr(httpx,'get',fail)
-    with pytest.raises(Exception,match='could not list models'):
+    with pytest.raises(Exception,match='could not list models') as caught:
         session_models.validate(session_models.resolve('ollama'))
+    assert 'container itself' in caught.value.render() and 'host.docker.internal' in caught.value.render()
 
 def test_worker_thread_inherits_pinned_route(monkeypatch):
     monkeypatch.setattr(model_config,'_env',lambda key:'deepseek:deepseek-flash' if key.startswith('INTERVIEW_ENGINE_MODEL_') else None)

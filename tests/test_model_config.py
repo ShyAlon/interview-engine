@@ -74,6 +74,18 @@ def test_ollama_connection_refused_is_friendly():
     e = translate_llm_error(httpx.ConnectError("connection refused"), "probing", "ollama",
                             "qwen2.5-coder:7b", "http://localhost:11434/v1")
     assert e is not None and "ollama serve" in e.render()
+    assert "container itself" in e.render() and "host.docker.internal" in e.render()
+
+
+def test_ollama_connection_refused_remote_host_has_no_container_hint():
+    import httpx
+
+    from interview_engine.errors import translate_llm_error
+
+    e = translate_llm_error(httpx.ConnectError("connection refused"), "probing", "ollama",
+                            "qwen2.5-coder:7b", "http://192.0.2.10:11434/v1")
+    assert e is not None and "ollama serve" in e.render()
+    assert "container itself" not in e.render()
 
 
 def test_ollama_model_not_pulled_is_friendly():
