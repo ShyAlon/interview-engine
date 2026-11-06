@@ -364,6 +364,18 @@ class SessionRegistry:
                 self._publish(session)
                 return self._event(session,event_type,input_request=input_request)
 
+    def _recovery_publication(self,session):
+        """A failed reconciliation read proves nothing about commit outcome.
+        Evict the half-mutated object so the next request reloads durable truth;
+        never replay a provider call automatically across an ambiguous commit.
+        """
+        try:return self._store.load_published(session.session_id,session.pg_claim.owner_id)
+        except Exception:
+            with self._lock:
+                if self._sessions.get(session.session_id) is session:
+                    self._sessions.pop(session.session_id,None)
+            raise
+
     def respond(self, session_id: str, response: InputResponse) -> tuple[InteractiveEvent,EngineSnapshot]:
         session=self.get(session_id)
         if (session.stop_fence is not None and session.stop_fence.requested) or session.pg_stopped:
@@ -406,7 +418,7 @@ class SessionRegistry:
                 # durable state agrees, reconcile from it if the store says the
                 # step somehow landed, and let the ORIGINAL error propagate.
                 if self._store is not None and session.pg_claim is not None:
-                    durable=self._store.load_published(session.session_id,session.pg_claim.owner_id)
+                    durable=self._recovery_publication(session)
                     if durable is not None and durable['control'].get('sequence',prior[0])!=prior[0]:
                         with self._lock:self._sessions.pop(session.session_id,None)
                         self.get(session.session_id)
@@ -444,7 +456,7 @@ class SessionRegistry:
                         # committed outcome - never reset to prior memory, never
                         # let a retry double-advance.
                         if self._store is not None and session.pg_claim is not None:
-                            durable=self._store.load_published(session.session_id,session.pg_claim.owner_id)
+                            durable=self._recovery_publication(session)
                             if durable is not None and durable['control'].get('sequence',0)>=session.sequence:
                                 with self._lock:self._sessions.pop(session.session_id,None)
                                 reconciled=self.get(session.session_id)

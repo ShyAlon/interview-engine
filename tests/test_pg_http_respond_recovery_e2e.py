@@ -98,3 +98,49 @@ def test_http_respond_crash_retry_restart_and_idempotent_replay(tmp_path, fake_o
     advanced = _respond(client2, current_input['input_id'], value='they pick a time slot')
     assert advanced.status_code == 200, advanced.text
     assert store.load_published(SID, OWNER)['control']['sequence'] > after
+
+
+@pytest.mark.parametrize('fault',['advance','before-commit','after-commit'])
+def test_http_answer_retry_after_recovery_read_also_loses_database(tmp_path, fake_ollama, fake_models, monkeypatch,fault):
+    """The provider/DB fault and its cleanup read can fail together. The next
+    HTTP retry must reload durable control, never the half-mutated cached step."""
+    import psycopg
+    conn=make_conn(tmp_path)
+    store=PgSessionStore(managed_pool(conn.info.dsn))
+    registry=SessionRegistry(default_program_factory,allow_db_provider_dispatch=True,
+        session_store=store,owner_id=OWNER,instance_id='recovery#1',lease_ttl=60.0)
+    client=_make(registry)
+    snapshot=_start(client);pending=snapshot['open_input'];prior=snapshot['sequence']
+    original=fake_models['probing'].invoke
+    load=store.load_published
+    lost={'armed':False,'reads':0}
+    def unavailable_once(*args,**kwargs):
+        if lost['armed']:
+            lost['armed']=False;lost['reads']+=1
+            raise psycopg.OperationalError('database remains unavailable during recovery read')
+        return load(*args,**kwargs)
+    def drop(messages):
+        lost['armed']=True
+        raise psycopg.OperationalError('connection lost during answer')
+    monkeypatch.setattr(store,'load_published',unavailable_once)
+    publish=store.publish_step
+    def commit_fault(*args,**kwargs):
+        if fault=='after-commit':publish(*args,**kwargs)
+        lost['armed']=True
+        raise psycopg.OperationalError('connection lost around publication')
+    if fault=='advance':fake_models['probing'].invoke=drop
+    else:monkeypatch.setattr(store,'publish_step',commit_fault)
+    failed=_respond(client,pending['input_id'])
+    assert failed.status_code==503,failed.text
+    assert lost['reads']==1,'must exercise failure during recovery itself'
+    durable_sequence=load(SID,OWNER)['control']['sequence']
+    assert (durable_sequence>prior) if fault=='after-commit' else (durable_sequence==prior)
+    fake_models['probing'].invoke=original
+    monkeypatch.setattr(store,'publish_step',publish)
+    retried=_respond(client,pending['input_id'])
+    assert retried.status_code==200,retried.text
+    after=load(SID,OWNER)['control']['sequence'];assert after>prior
+    if fault=='after-commit':assert after==durable_sequence,'lost acknowledgement must not replay the committed graph'
+    replay=_respond(client,pending['input_id'])
+    assert replay.status_code==200,replay.text
+    assert load(SID,OWNER)['control']['sequence']==after
