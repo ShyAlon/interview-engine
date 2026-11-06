@@ -47,10 +47,18 @@ def translate_llm_error(exc: Exception, stage: str, provider: str, model: str, b
 
     if name in ("APIConnectionError", "ConnectError", "ConnectTimeout") or "connection" in text:
         if _is_ollama_ctx(ctx):
+            fix="run `ollama serve` (or start the Ollama app) and retry."
+            try:
+                from urllib.parse import urlsplit
+                host=urlsplit(base_url or '').hostname
+            except ValueError:host=None
+            if host in ("localhost","127.0.0.1","::1"):
+                fix=("run `ollama serve` (or start the Ollama app) and retry. If this engine runs inside a container, "
+                     "localhost is the container itself, not the host: set OLLAMA_BASE_URL=http://host.docker.internal:11434/v1 for native Mac Ollama.")
             return UserFacingError(
                 f"stage '{stage}' could not reach the local Ollama server at {base_url}.",
                 "Ollama is not running (or OLLAMA_BASE_URL points elsewhere).",
-                "run `ollama serve` (or start the Ollama app) and retry.",
+                fix,
             )
         return UserFacingError(
             f"stage '{stage}' could not reach provider '{provider}'.",

@@ -73,7 +73,15 @@ def validate(models:Mapping[str,tuple[str,str]], selected_route:str|None=None, *
                 response.raise_for_status()
                 found={entry.get("id") for entry in response.json().get("data",[]) if isinstance(entry,dict)}
             except (httpx.HTTPError,ValueError,KeyError) as exc:
-                raise UserFacingError(f"Ollama preflight could not list models at {endpoint}: {exc}","The selected local route cannot be verified.","Start Ollama and retry.") from exc
+                fix="Start Ollama and retry."
+                try:
+                    from urllib.parse import urlsplit
+                    host=urlsplit(endpoint).hostname
+                except ValueError:host=None
+                if host in ("localhost","127.0.0.1","::1"):
+                    fix=("Start Ollama and retry. If this engine runs inside a container, localhost is the container itself, "
+                         "not the host: set OLLAMA_BASE_URL=http://host.docker.internal:11434/v1 for native Mac Ollama.")
+                raise UserFacingError(f"Ollama preflight could not list models at {endpoint}: {exc}","The selected local route cannot be verified.",fix) from exc
             # Ollama resolves an untagged name to :latest. Its models endpoint
             # may still list only the canonical tagged ID.
             available_id=model if ":" in model else f"{model}:latest"
