@@ -15,3 +15,7 @@ run.log
 .DS_Store
 decisions.jsonl
 /runs
+# Ad-hoc local diagnostics from the owner machine
+/bench*.csv
+/categorization-shadow.*
+/inspect-interview-recovery.py
