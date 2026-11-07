@@ -6,12 +6,21 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
+  workflow_dispatch:
+  # Full suite against main once a week (Sunday 02:53 UTC, low traffic,
+  # staggered after delivery-api's 02:41 run); the every-PR gate stays fast.
+  schedule:
+    - cron: '53 2 * * 0'
 
 concurrency:
-  group: test-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: test-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  pytest:
+  # Every-PR gate: deterministic non-Postgres fast core (classify_tests.py).
+  # The full suite below runs on workflow_dispatch, weekly, and when a PR is
+  # marked ready_for_review.
+  gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,4 +41,28 @@ jobs:
           ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
           git config --global url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/ShyAlon/vmodel-contracts"
           git config --global --add url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/shyalon/vmodel-contracts"
-      - run: ./scripts/test-local.sh  # uses python -m pytest from the repo root
+      - run: ENGINE_TEST_SCOPE=gate ./scripts/test-local.sh
+
+  full:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.action == 'ready_for_review'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+      # vmodel-contracts is private: clone it over SSH with a read-only deploy key
+      # (secret VMODEL_CONTRACTS_DEPLOY_KEY; public half on vmodel-contracts, 2026-09-24).
+      - name: deploy key for vmodel-contracts
+        env: { DEPLOY_KEY: "${{ secrets.VMODEL_CONTRACTS_DEPLOY_KEY }}" }
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/ShyAlon/vmodel-contracts"
+          git config --global --add url."git@github.com:ShyAlon/vmodel-contracts".insteadOf "https://github.com/shyalon/vmodel-contracts"
+      - run: ./scripts/test-local.sh  # full suite, python -m pytest from the repo root

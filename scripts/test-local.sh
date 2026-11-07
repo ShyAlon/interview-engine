@@ -46,4 +46,12 @@ PYTHON=.venv/bin/python
 # Install the checked-in exact private contract wheel before resolving extras.
 "$PYTHON" -m pip install vendor/vmodel_contracts-0.28.0-py3-none-any.whl vendor/requi_child_contract-0.3.0-py3-none-any.whl
 "$PYTHON" -m pip install -e '.[dev]'
-"$PYTHON" -m pytest -q
+# ENGINE_TEST_SCOPE=gate runs only the deterministic non-Postgres fast core
+# (classify_tests.py); anything else runs the whole suite.
+case "${ENGINE_TEST_SCOPE:-full}" in
+  gate)
+    mapfile -t FAST_FILES < <("$PYTHON" scripts/ci/classify_tests.py fast)
+    exec "$PYTHON" -m pytest -q "${FAST_FILES[@]}" --maxfail=3 ;;
+  full) exec "$PYTHON" -m pytest -q ;;
+  *) echo "Error: unknown ENGINE_TEST_SCOPE; expected gate or full." >&2; exit 1 ;;
+esac
