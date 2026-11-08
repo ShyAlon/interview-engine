@@ -132,10 +132,12 @@ class FencedPostgresSaver(PostgresSaver):
         from langgraph.checkpoint.postgres import _internal
         with _internal.get_connection(self.conn) as conn:
             try:
+                from .query_count import CountingConnection
+                counted=CountingConnection(conn)
                 with conn.transaction():
                     if self._claims is not None:
-                        apply_claims(conn, self._claims)
-                    yield conn
+                        apply_claims(counted, self._claims)
+                    yield counted
             finally:
                 from psycopg.pq import TransactionStatus
                 if conn.info.transaction_status != TransactionStatus.IDLE:
@@ -156,11 +158,13 @@ class FencedPostgresSaver(PostgresSaver):
         from .pg_claims import apply_claims
         from langgraph.checkpoint.postgres import _internal
         with self.lock, _internal.get_connection(self.conn) as conn:
+            from .query_count import CountingConnection
+            counted=CountingConnection(conn)
             with conn.transaction():
-                apply_claims(conn, self._claims)
+                apply_claims(counted, self._claims)
                 # No pipeline on a pooled connection (langgraph forbids it);
                 # the read paths here are single round trips anyway.
-                with conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
+                with counted.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
                     yield cur
 
     def setup(self) -> None:

@@ -215,8 +215,10 @@ class InterviewApplication:
                     # turn's final checkpoint landed - observed 2026-10-23 as
                     # the published pointer predating the turn's state).
                     t_invoke=time.monotonic();_log.info("advance.turn.begin session=%s",self.session_id)
-                    self.result=self.graph.invoke(self.state,self.cfg,durability='exit')
-                    _log.info("advance.turn.end session=%s dur_ms=%d",self.session_id,int((time.monotonic()-t_invoke)*1000))
+                    from .query_count import measure as _measure_queries
+                    with _measure_queries() as _turn_queries:
+                        self.result=self.graph.invoke(self.state,self.cfg,durability='exit')
+                    _log.info("advance.turn.end session=%s dur_ms=%d queries=%d",self.session_id,int((time.monotonic()-t_invoke)*1000),_turn_queries.count)
                     # Publish provenance: record the checkpoint this advance
                     # produced (its writes are durable at 'exit'). The step
                     # publish references exactly this checkpoint - a
