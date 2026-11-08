@@ -19,6 +19,7 @@ the real provider before showing founders.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re as _re
 import sys
@@ -630,6 +631,22 @@ def _staging_request_sha(cfg, messages, stage: str, item, params: dict | None = 
     return hashlib.sha256(body.encode()).hexdigest()
 
 
+
+_timing_log=logging.getLogger(__name__)
+
+def _llm_turn_line(event,session_id,*,stage,attempt,item,provider,model,dur_ms=None,outcome=None):
+    """One structured timing line per provider call boundary. Same non-sensitive
+    fields the llm-calls audit keeps (stage/provider/model/duration) - never
+    message content. Observability never breaks a run."""
+    try:
+        parts=[event,f"session={session_id}",f"stage={stage}",f"provider={provider}",f"model={model}",f"attempt={attempt}"]
+        if item is not None:parts.append("item="+__import__('re').sub(r"\s+","_",str(item)))
+        if dur_ms is not None:parts.append(f"dur_ms={dur_ms}")
+        if outcome is not None:parts.append(f"outcome={outcome}")
+        _timing_log.info(" ".join(parts))
+    except Exception:
+        pass
+
 def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
     """Invoke under guardrails, retrying one provider-empty completion.
 
@@ -650,11 +667,20 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
                 "attempt": attempt, **({"item": item} if item else {}),
                 **({"retry_reason": "empty_response"} if attempt == 2 else {})}
         _log_llm({"event": "llm_call_start", **base})
+        from .session_runtime import current as _current_runtime
+        _runtime=_current_runtime()
+        _turn_session=getattr(_runtime,"session_id","") or None
+        if _turn_session:_llm_turn_line("llm.turn.begin",_turn_session,stage=stage,attempt=attempt,item=item,provider=cfg.provider,model=cfg.model)
         stop_heartbeat = _start_heartbeat(f"stage '{stage}'" + (f" [{item}]" if item else "") + " call")
         t0 = time.monotonic()
         try:
             _set_model_timeout(chat_model, effective_timeout)
-            resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,item=item,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
+            _turn_ok=False
+            try:
+                resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,item=item,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
+                _turn_ok=True
+            finally:
+                if _turn_session:_llm_turn_line("llm.turn.end",_turn_session,stage=stage,attempt=attempt,item=item,provider=cfg.provider,model=cfg.model,dur_ms=int((time.monotonic()-t0)*1000),outcome="ok" if _turn_ok else "error")
             elapsed = time.monotonic() - t0
             _watchdog().complete(stage, elapsed)
             _check_truncated(resp, stage, cfg)

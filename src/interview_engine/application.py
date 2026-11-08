@@ -52,7 +52,7 @@ class InterviewApplication:
         self.produced_checkpoint_id=None
         self.session_id,self.task_id=session_id,task_id
         from .session_runtime import SessionRuntime
-        self.runtime=SessionRuntime()
+        self.runtime=SessionRuntime(session_id=session_id)
         self.model_route=model_route
         self.model_map=pinned_models if pinned_models is not None else session_models.resolve(model_route,initial_model) if model_route else None
         if self.model_map is not None:session_models.validate(self.model_map,model_route,preflight=pinned_models is None)

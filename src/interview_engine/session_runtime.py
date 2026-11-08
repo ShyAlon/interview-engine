@@ -9,6 +9,7 @@ _current=ContextVar('interview_session_runtime',default=None)
 
 @dataclass
 class SessionRuntime:
+    session_id:str=''
     calls:int=0
     lock:object=field(default_factory=RLock)
     watchdog:object=field(default_factory=lambda:AdaptiveCallWatchdog(multiplier=8.0,floor_s=240.0))

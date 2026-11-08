@@ -427,3 +427,48 @@ def test_call_end_progress_sink_fires_with_call_summary():
 def test_call_end_progress_sink_absent_is_free():
     assert mc._progress_call_end.get() is None
     assert mc.invoke_checked(FakeModel("done"), [], "probing") == "done"
+
+
+def _collected_timing_lines():
+    import logging
+    records=[]
+    class H(logging.Handler):
+        def emit(self,r): records.append(r.getMessage())
+    h=H();lg=logging.getLogger('interview_engine.model_config');lg.addHandler(h);lg.setLevel(logging.INFO)
+    return records,h,lg
+
+
+def test_llm_turn_timing_lines_carry_session_stage_duration_and_outcome():
+    import logging
+    from interview_engine.session_runtime import SessionRuntime, use
+    records,h,lg=_collected_timing_lines()
+    sid='f01b0cd8-e1d9-4509-bbef-7485c4c8e8f4'
+    try:
+        with use(SessionRuntime(session_id=sid)):
+            mc.invoke_checked(FakeModel("done"), [], "probing")
+        lines=[m for m in records if m.startswith('llm.turn.')]
+        assert lines[0].startswith(f'llm.turn.begin session={sid} stage=probing provider=')
+        assert f' attempt=1' in lines[0]
+        assert lines[-1].startswith(f'llm.turn.end session={sid} stage=probing ')
+        assert ' dur_ms=' in lines[-1] and lines[-1].endswith('outcome=ok')
+        records.clear()
+        class Boom:
+            def invoke(self, m): raise RuntimeError('provider down')
+        with pytest.raises(Exception):
+            with use(SessionRuntime(session_id=sid)):
+                mc.invoke_checked(Boom(), [], "probing")
+        ends=[m for m in records if m.startswith('llm.turn.end')]
+        assert ends and all(e.endswith('outcome=error') for e in ends)
+        begins=[m for m in records if m.startswith('llm.turn.begin')]
+        assert len(begins)==len(ends) and len(begins)>=1
+    finally:
+        lg.removeHandler(h)
+
+
+def test_llm_turn_lines_require_an_attributable_session():
+    records,h,lg=_collected_timing_lines()
+    try:
+        mc.invoke_checked(FakeModel("done"), [], "probing")
+        assert [m for m in records if m.startswith('llm.turn.')]==[], 'no session, no line: an unattributable timing line is noise the retention path must drop anyway'
+    finally:
+        lg.removeHandler(h)
