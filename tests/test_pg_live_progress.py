@@ -170,3 +170,33 @@ def test_actual_application_observational_mode_is_explicit(tmp_path,monkeypatch)
         assert len(store.read_journal('live',OWNER,0,100))==1
     finally:
         if hasattr(app,'close'):app.close()
+
+
+def test_progress_page_reads_publication_and_journal_in_one_checkout(tmp_path):
+    """The woken progress drain is the per-turn hot read.
+
+    2026-11-09 production evidence: every fetch cost ~2.8s at remote-pooler
+    latency - TWO borrows (load_published + read_journal), each paying claims
+    setup and a round trip, on every poll and every wake of every answer. One
+    checkout halves the fixed cost of the read that runs dozens of times per turn."""
+    from contextlib import contextmanager
+    store,claim=setup(tmp_path)
+    j=journal(store,claim)
+    append(j);append(j)
+    original=store._borrow
+    checkouts=0
+    @contextmanager
+    def counted():
+        nonlocal checkouts;checkouts+=1
+        with original() as conn:yield conn
+    store._borrow=counted
+    published,rows=store.progress_page('live',OWNER_A,0,100)
+    assert checkouts==1,checkouts
+    assert published is not None and published['control'] is None
+    assert [r['cursor'] for r in rows]==[1,2]
+    checkouts=0
+    published,rows=store.progress_page('live',OWNER_B,0,100)
+    assert checkouts==1 and published is None and rows==[]
+    # Paging args pass through unchanged.
+    published,rows=store.progress_page('live',OWNER_A,1,1)
+    assert [r['cursor'] for r in rows]==[2]

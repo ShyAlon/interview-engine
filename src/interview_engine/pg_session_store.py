@@ -545,6 +545,29 @@ class PgSessionStore:
                 conn.rollback()
                 raise
 
+    def progress_page(self, session_id: str, owner_id: str, after: int, limit: int):
+        """Publication row + committed journal pages in ONE borrow.
+
+        The woken progress drain is the per-turn hot read: separate
+        load_published + read_journal each paid claims setup and a round trip
+        (2026-11-09 turn evidence: ~2.8s per fetch at remote-pooler latency).
+        Same rows and owner scoping, half the fixed cost.
+        """
+        with self._borrow() as conn:
+            published = conn.execute(
+                "SELECT task_id, generation, control, published_thread_id,"
+                "       published_checkpoint_ns, published_checkpoint_id"
+                " FROM engine_sessions WHERE session_id = %(sid)s AND owner_id = %(owner)s::uuid",
+                {"sid": session_id, "owner": owner_id}).fetchone()
+            rows = conn.execute(
+                "SELECT j.cursor, j.page FROM engine_session_journal j"
+                " JOIN engine_sessions s ON s.session_id = j.session_id"
+                " WHERE j.session_id = %(sid)s AND s.owner_id = %(owner)s::uuid AND j.cursor > %(after)s"
+                " ORDER BY j.cursor LIMIT %(limit)s",
+                {"sid": session_id, "owner": owner_id, "after": after, "limit": limit}).fetchall()
+            return (dict(published) if published is not None else None,
+                    [{"cursor": r["cursor"], "page": r["page"]} for r in rows])
+
     def read_journal(self, session_id: str, owner_id: str, after: int, limit: int) -> list[dict]:
         with self._borrow() as conn:
             """Committed journal pages for progress reads; cross-owner reads see nothing."""

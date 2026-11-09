@@ -545,12 +545,13 @@ class SessionRegistry:
         # Never acquire the registry's long-lived graph/control lock here.
         if self._store is not None:
             from vmodel_contracts.progress_signal import ProgressPage, ProgressSignal
-            published=self._store.load_published(session_id,self._pg_owner())
+            # One borrow for the pair: this read runs on every progress poll
+            # and wake, and each borrow pays claims setup + a round trip.
+            published,rows=self._store.progress_page(session_id,self._pg_owner(),after,limit)
             if published is None or published['control'] is None:
                 # Unpublished and foreign rows are indistinguishable: no
                 # existence oracle through the progress API.
                 raise KeyError(session_id)
-            rows=self._store.read_journal(session_id,self._pg_owner(),after,limit)
             events=[ProgressSignal.model_validate({k:v for k,v in r['page'].items() if k != 'journal_mode'}) for r in rows]
             return ProgressPage(events=events, next_cursor=events[-1].cursor if events else after)
     @staticmethod
