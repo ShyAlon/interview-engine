@@ -30,6 +30,10 @@ def worker_root(default:Path)->Path:
     return _root.get() or default
 
 
+import weakref
+_probed_pools=weakref.WeakKeyDictionary()   # pool -> True after one successful placement probe
+
+
 def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False):
     """A database-backed session store over the process connection pool.
 
@@ -47,9 +51,13 @@ def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False):
     from .pg_session_store import PgSessionStore
     from .pg_pool import borrow_claimed
     try:
-        with borrow_claimed(pool,(owner,session_id)) as conn:
-            conn.execute("SELECT 1 FROM engine_sessions LIMIT 1")
-            conn.commit()
+        # The probe answers a pool-wide question (table exists, role may read it), so one success per pool is enough:
+        # delivery-api builds a store per answer step (12 per warm answer), each probe ~5 round trips. Failure is never remembered.
+        if _probed_pools.get(pool) is None:
+            with borrow_claimed(pool,(owner,session_id)) as conn:
+                conn.execute("SELECT 1 FROM engine_sessions LIMIT 1")
+                conn.commit()
+            _probed_pools[pool]=True
     except Exception as exc:
         from .pg_diagnostics import tag_stage
         import psycopg.errors
