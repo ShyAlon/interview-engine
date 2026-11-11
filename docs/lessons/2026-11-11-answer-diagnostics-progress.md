@@ -60,3 +60,11 @@ keys; pre-existing pending writes load their real indices once. New checkpoints
 remain query-free here. A fresh staged publication replay is rejected and rolls
 back its proposed checkpoints, rather than retaining a pointer but leaving new
 orphan rows. Already-committed same-context publication replay remains a no-op.
+
+Stop quiescence now uses its existing conditional UPDATE as the proof, without
+loading the same stopped control first. The UPDATE still checks stopped=true,
+owner, exact generation+1, original lease epoch and instance. Only a winning
+update records in-memory proof; already-proven quiescence is not repeated.
+The no-preread test failed first, then the full registry/warm group passed30.
+Latest whole Stop count41 (parent29+child12), still above30. Other outcomes are
+unchanged. Final engine candidate group:106 passed,4 skipped.

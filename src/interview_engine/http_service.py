@@ -142,15 +142,17 @@ class SessionRegistry:
 
     def _acknowledge_quiescence_checked(self,session):
         # Caller owns the registry lock; no new writer can enter the gap.
-        if (not session.pg_stopped or session.pg_claim is None
+        if (not session.pg_stopped or session.pg_claim is None or session.pg_quiescent
                 or self._writers.get(session.session_id,0)>0):return
-        if session.pg_stop_generation is None:
-            row=self._store.load_published(session.session_id,session.pg_claim.owner_id)
-            if not row or not (row['control'] or {}).get('stopped'):return
-            session.pg_stop_generation=row['generation']
-        if self._store.acknowledge_stop_quiescent(session.pg_claim,session.pg_stop_generation):
+        # The conditional UPDATE itself proves stopped=true, the sole valid
+        # generation transition, owner, epoch and instance. A preread adds no
+        # authority and can race. Do not remember proof until the UPDATE wins.
+        generation=session.pg_stop_generation
+        if generation is None:generation=session.pg_claim.generation+1
+        if self._store.acknowledge_stop_quiescent(session.pg_claim,generation):
+            session.pg_stop_generation=generation
             session.pg_quiescent=True
-            log.info('session.stop.quiescent session=%s generation=%s',session.session_id,session.pg_stop_generation)
+            log.info('session.stop.quiescent session=%s generation=%s',session.session_id,generation)
 
     def _ensure_heartbeat_loop(self) -> None:
         # ONE heartbeat loop per registry for every held lease: a lease beat is
