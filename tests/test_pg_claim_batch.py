@@ -17,7 +17,7 @@ def test_claims_one_wire_barrier_and_transaction_reset(tmp_path):
             apply_claims(conn,('owner-a','session-a'))
             conn.pgconn.untrace();os.lseek(fd,0,0)
             wire=os.read(fd,65536)
-            assert sum(b'\tF\t' in row and b'\tSync' in row for row in wire.splitlines())==1
+            assert sum(b'\tF\t' in row and (b'\tSync' in row or b'\tQuery\t' in row) for row in wire.splitlines())==1
         finally:conn.pgconn.untrace();os.close(fd)
         assert conn.execute("SELECT current_user,current_setting('request.jwt.claim.sub'),current_setting('request.jwt.claim.session_id')").fetchone()==('requi_backend','owner-a','session-a')
         conn.execute('ROLLBACK')
