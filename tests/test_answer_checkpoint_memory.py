@@ -93,3 +93,20 @@ def test_immutable_blob_collision_cannot_poison_answer_memory(tmp_path):
         assert saver.get_tuple(second)==PostgresSaver.get_tuple(saver,second)
         assert saver.get_tuple(second).checkpoint['channel_values']['messages']==['m1']
     finally:ctx.__exit__(None,None,None)
+
+
+def test_answer_local_latest_uses_published_anchor_not_unpublished_orphan(tmp_path):
+    from test_pg_checkpoint import make_saver,server,cfg,cp,META
+    from interview_engine.pg_checkpoint import FencedPostgresSaver,LeaseFence,answer_checkpoint_memory
+    from langgraph.checkpoint.postgres import PostgresSaver
+    ctx,writer,admin=make_saver(server(tmp_path).get_uri())
+    try:
+        published=writer.put(cfg('t'),cp(1),META,{'messages':'1'})
+        writer.put(published,cp(2),META,{'messages':'2'}) # An unpublished crash orphan.
+        with answer_checkpoint_memory():
+            reader=FencedPostgresSaver(writer.conn,lease=LeaseFence('s1',1,1),serde=writer.serde)
+        reader.use_published_answer_checkpoint(published)
+        assert reader.get_tuple(published).checkpoint['id']==cp(1)['id']
+        assert reader.get_tuple(cfg('t')).checkpoint['id']==cp(1)['id']
+        assert PostgresSaver.get_tuple(reader,cfg('t')).checkpoint['id']==cp(2)['id']
+    finally:ctx.__exit__(None,None,None)

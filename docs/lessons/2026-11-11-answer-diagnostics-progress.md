@@ -30,3 +30,19 @@ Immutable checkpoint blob versions can collide with proposed bytes. Populate
 memory from already known canonical versions; when a version is not known,
 fall back to durable reconstruction. A real collision test checks first-writer
 bytes cannot be replaced in memory.
+
+Answer checkpoints now stage in memory and flush inside the one final
+control/pointer transaction. A wrong input, Stop, takeover or blob collision
+rolls back both checkpoint and pointer. Failed publication discards staged
+memory. One operation cannot stage another checkpoint after it has committed.
+Pending writes preserve indexed regular writes and reserved-channel upserts.
+
+The cold conditional claim also returns the exact published checkpoint and
+schema readiness. The graph's answer-local latest begins at that published
+anchor, not an unpublished saver-latest orphan. The same claim carries the
+schema-binding document parts; reuse still checks owner/auth/generation/epoch/
+instance, chunk order and hashes, and exact binding bytes. No RLS rule changed.
+
+Real graph, fake provider and disposable PG: cold success 29 total barriers,
+17 parent + 12 child; warm success 26, 17 parent + 9 child. Failure paths remain
+higher and must be reported separately, not hidden behind the success result.

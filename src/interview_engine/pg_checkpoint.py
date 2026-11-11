@@ -64,6 +64,43 @@ def answer_checkpoint_memory():
     try:yield
     finally:_answer_checkpoint_memory.reset(token)
 
+_answer_checkpoint_publication=ContextVar('answer_checkpoint_publication',default=None)
+
+class _AnswerCheckpointPublication:
+    def __init__(self):self.operations=[];self.savers=[];self.flushing=False;self.original={};self.committed=False
+    def attach(self,saver):
+        saver._answer_publication_batch=self
+        if saver not in self.savers:
+            self.savers.append(saver)
+            self.original[saver]=(deepcopy(getattr(saver,'_answer_memory',{})),deepcopy(getattr(saver,'_answer_latest',{})))
+    def before_staging(self,saver):
+        if not any(item[0] is saver for item in self.operations):
+            self.original[saver]=(deepcopy(getattr(saver,'_answer_memory',{})),deepcopy(getattr(saver,'_answer_latest',{})))
+    def flush(self,conn):
+        self.flushing=True
+        try:
+            for saver,(memory,latest) in self.original.items():
+                saver._answer_memory=deepcopy(memory);saver._answer_latest=deepcopy(latest)
+            for saver,kind,args in self.operations:
+                saver._answer_publication_connection=conn
+                try:getattr(saver,kind)(*args)
+                finally:saver._answer_publication_connection=None
+        finally:self.flushing=False
+
+@contextmanager
+def answer_checkpoint_publication(saver=None):
+    batch=_AnswerCheckpointPublication()
+    if saver is not None:batch.attach(saver)
+    token=_answer_checkpoint_publication.set(batch)
+    try:yield batch
+    finally:
+        _answer_checkpoint_publication.reset(token)
+        for attached in batch.savers:
+            attached._answer_publication_batch=None
+            if not batch.committed:
+                memory,latest=batch.original[attached]
+                attached._answer_memory=deepcopy(memory);attached._answer_latest=deepcopy(latest)
+
 LEASE_TABLE = 'engine_sessions'
 
 # One statement: lock the lease row, verify the claimed fence, insert only
@@ -144,6 +181,21 @@ class FencedPostgresSaver(PostgresSaver):
         # trips per checkpoint commit and changes no semantics.
         self._write_lock = threading.RLock()
         self._answer_enabled=_answer_checkpoint_memory.get()
+        batch=_answer_checkpoint_publication.get()
+        if batch is not None:batch.attach(self)
+
+    @_answer_cache_locked
+    def use_published_answer_checkpoint(self,config):
+        """Answer-local latest starts at the explicit published restore anchor.
+
+        A raw saver-latest row may be an unpublished crash orphan. It is not
+        newer answer authority and must not supersede the published pointer.
+        """
+        if not self._answer_enabled:return
+        cfg=config['configurable'];checkpoint=cfg.get('checkpoint_id')
+        if not checkpoint:return
+        if not hasattr(self,'_answer_memory'):self._answer_memory={};self._answer_latest={}
+        self._answer_latest[(cfg['thread_id'],cfg.get('checkpoint_ns',''))]=checkpoint
 
     @_answer_cache_locked
     def get_tuple(self,config):
@@ -180,6 +232,10 @@ class FencedPostgresSaver(PostgresSaver):
     def _guarded_conn(self):
         # One claimed transaction for a guarded write batch: claims ride the
         # transaction stream; the connection returns to the pool at the end.
+        shared=getattr(self,'_answer_publication_connection',None)
+        if shared is not None:
+            yield shared
+            return
         from .pg_claims import claimed_transaction
         from langgraph.checkpoint.postgres import _internal
         with _internal.get_connection(self.conn) as conn:
@@ -286,7 +342,16 @@ class FencedPostgresSaver(PostgresSaver):
             self._fence_diagnose(conn, 'checkpoint guard lock')
             raise StopRequested('session lease lost (stop or takeover)')
 
+    @_answer_cache_locked
     def put(self, config, checkpoint, metadata, new_versions):
+        batch=getattr(self,'_answer_publication_batch',None)
+        if batch is not None and not batch.flushing:
+            if batch.committed:raise RuntimeError('answer checkpoint publication already committed')
+            batch.before_staging(self)
+            batch.operations.append((self,'put',deepcopy((config,checkpoint,metadata,new_versions))))
+            self.remember_answer_checkpoint(config,checkpoint,metadata)
+            return {'configurable':{'thread_id':config['configurable']['thread_id'],
+                'checkpoint_ns':config['configurable'].get('checkpoint_ns',''),'checkpoint_id':checkpoint['id']}}
         # Fenced put, mirroring the base saver byte-for-byte: primitive channel
         # values inline in the checkpoints row, everything else in
         # checkpoint_blobs (DO NOTHING - immutable), checkpoints upsert (DO
@@ -323,7 +388,9 @@ class FencedPostgresSaver(PostgresSaver):
         cache_safe=all(known_blob(k) for k in blob_values if k not in blob_versions)
         with self._write_lock, self._guarded_conn() as conn:
             try:
-                self._guard_lock(conn)
+                # In the shared final transaction, the conditional pointer
+                # write is the fence. If rejected, every staged row rolls back.
+                if getattr(self,'_answer_publication_connection',None) is None:self._guard_lock(conn)
                 with conn.cursor() as cur:
                     if blob_versions:
                         cur.executemany(
@@ -333,6 +400,15 @@ class FencedPostgresSaver(PostgresSaver):
                             [(thread_id, checkpoint_ns, k, str(blob_versions[k]),
                               *self.serde.dumps_typed(blob_values[k])) for k in blob_versions])
                         if cur.rowcount!=len(blob_versions):
+                            if getattr(self,'_answer_publication_connection',None) is not None:
+                                for key in blob_versions:
+                                    if known_blob(key):
+                                        if cached_checkpoint['channel_values'][key]!=blob_values[key]:raise ValueError('staged answer immutable blob collision')
+                                        continue
+                                    actual=cur.execute("SELECT type,blob FROM checkpoint_blobs WHERE thread_id=%s AND checkpoint_ns=%s AND channel=%s AND version=%s",
+                                        (thread_id,checkpoint_ns,key,str(blob_versions[key]))).fetchone()
+                                    canonical=self.serde.loads_typed((actual['type'],bytes(actual['blob'])))
+                                    if canonical!=blob_values[key]:raise ValueError('staged answer immutable blob collision')
                             cache_safe=cache_safe and all(known_blob(k) for k in blob_versions)
                     cur.execute(
                         "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id,"
@@ -355,6 +431,28 @@ class FencedPostgresSaver(PostgresSaver):
 
     @_answer_cache_locked
     def put_writes(self, config, writes, task_id, task_path=''):
+        batch=getattr(self,'_answer_publication_batch',None)
+        if batch is not None and not batch.flushing:
+            if batch.committed:raise RuntimeError('answer checkpoint publication already committed')
+            batch.before_staging(self)
+            batch.operations.append((self,'put_writes',deepcopy((config,writes,task_id,task_path))))
+            # Pending writes are local during this turn, then persisted under
+            # the final publication transaction. Preserve reserved upserts and
+            # regular first-writer ordering in the local view.
+            value=self.get_tuple(config)
+            if value is not None:
+                pending={};counts={}
+                for task,channel,raw in value.pending_writes or []:
+                    idx=WRITES_IDX_MAP.get(channel,counts.get(task,0))
+                    pending[(task,idx)]=(task,channel,raw)
+                    if channel not in WRITES_IDX_MAP:counts[task]=counts.get(task,0)+1
+                reserved=all(channel in WRITES_IDX_MAP for channel,_ in writes)
+                for idx,(channel,raw) in enumerate(writes):
+                    key=(task_id,WRITES_IDX_MAP.get(channel,idx))
+                    if reserved or key not in pending:pending[key]=(task_id,channel,deepcopy(raw))
+                value=value._replace(pending_writes=[pending[key] for key in sorted(pending)])
+                cfg=config['configurable'];self._answer_memory[(cfg['thread_id'],cfg.get('checkpoint_ns',''),cfg['checkpoint_id'])]=value
+            return
         # Same contract as the base saver, each write its own guarded insert so
         # a fence loss mid-batch raises before any later write lands.
         # Reserved channels overwrite (library retry semantics); regular task

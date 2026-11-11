@@ -36,6 +36,10 @@ class InterviewDocuments:
 
     def _read(self,conn,key):
         rows=conn.execute('SELECT * FROM public.requi_document_parts(%s,%s,%s)',(self.claim.session_id,self.claim.generation,key)).fetchall()
+        return self._decode_parts(rows)
+
+    @staticmethod
+    def _decode_parts(rows):
         if not rows:return None
         if len(rows)!=rows[0]['total']+1 or any(r['ordinal']!=i for i,r in enumerate(rows)):raise ValueError('interview chunk sequence differs')
         parts=[]
@@ -79,6 +83,13 @@ class InterviewDocuments:
 
     def bind(self,key,raw):
         key=self.key(key)
+        cached=getattr(self.store,'_answer_schema_binding',None);c=self.claim
+        if key=='evidence/schema-binding.json' and cached is not None and cached[:6]==(c.session_id,c.owner_id,self.store.claims,c.generation,c.epoch,c.instance):
+            rows=[{**r,'payload':bytes.fromhex(r['payload']) if r['payload'] is not None else None} for r in cached[6] or []]
+            prior=self._decode_parts(rows)
+            if prior is not None:
+                if prior!=raw:raise ValueError('interview schema binding changed')
+                return
         with self.transaction() as conn:
             prior=self._read(conn,key)
             if prior is not None and prior!=raw:raise ValueError('interview schema binding changed')

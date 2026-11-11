@@ -823,6 +823,8 @@ class SessionRegistry:
                 # Resume from the published pointer, never saver-latest.
                 if published_checkpoint_id is not None:
                     session.program.cfg={'configurable':{'thread_id':session.session_id,'checkpoint_ns':'','checkpoint_id':published_checkpoint_id}}
+                    saver=getattr(session.program,'saver',None)
+                    if hasattr(saver,'use_published_answer_checkpoint'):saver.use_published_answer_checkpoint(session.program.cfg)
             else:
                 session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
             session.program.open_input=session.open_input
