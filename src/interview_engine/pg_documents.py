@@ -69,6 +69,8 @@ class InterviewDocuments:
     def append(self,key,raw):
         key=self.key(key)
         if type(raw) is not bytes:raise ValueError('interview append bytes required')
+        from .document_diagnostics import queue
+        if key.startswith('interview/') and queue(self,'append',key,raw):return
         c=self.claim
         with self.transaction() as conn:conn.execute('SELECT public.requi_document_append(%s,%s,%s,%s,%s,%s,%s)',(c.session_id,c.generation,key,raw,c.owner_id,self.store.claims[1],time.time()))
 
@@ -78,3 +80,18 @@ class InterviewDocuments:
             prior=self._read(conn,key)
             if prior is not None and prior!=raw:raise ValueError('interview schema binding changed')
             if prior is None:self._put(conn,key,raw)
+
+    def diagnostic_many(self,operations):
+        """One final fenced transaction for best-effort answer diagnostics."""
+        operations=[(kind,self.key(key),raw) for kind,key,raw in operations]
+        if any(kind not in ('append','write') or not key.startswith('interview/') or type(raw) is not bytes for kind,key,raw in operations):
+            raise ValueError('interview diagnostic operations required')
+        c=self.claim
+        with self.transaction() as conn:
+            # One pipeline for the payload writes. The single transaction guard
+            # remains the same owner/task/Stop/lease check as normal documents.
+            with conn.pipeline():
+                for kind,key,raw in operations:
+                    if kind=='append':conn.execute('SELECT public.requi_document_append(%s,%s,%s,%s,%s,%s,%s)',
+                        (c.session_id,c.generation,key,raw,c.owner_id,self.store.claims[1],time.time()))
+                    else:self._put(conn,key,raw)

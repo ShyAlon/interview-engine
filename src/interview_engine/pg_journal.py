@@ -63,5 +63,24 @@ class ObservationalJournal:
             timestamp=datetime.now(timezone.utc))
         page=signal.model_dump(mode='json')
         page['journal_mode']='observational'
+        sink=_transient.get()
+        if sink is not None:
+            try:sink(page)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning('progress.transient_lost')
+            return signal
         cursor=self._store.append_observational_progress(self._claim,page)
         return signal.model_copy(update={'cursor':cursor})
+
+
+# Answer-only best-effort channel. Normal durable observational mode is unchanged.
+from contextvars import ContextVar
+from contextlib import contextmanager
+_transient=ContextVar('answer_transient_progress',default=None)
+
+@contextmanager
+def transient_progress(sink):
+    token=_transient.set(sink)
+    try:yield
+    finally:_transient.reset(token)

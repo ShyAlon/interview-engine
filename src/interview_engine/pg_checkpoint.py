@@ -32,6 +32,16 @@ of rerunning it.
 from __future__ import annotations
 
 import threading
+from functools import wraps
+
+def _answer_cache_locked(method):
+    @wraps(method)
+    def locked(self,*args,**kwargs):
+        lock=getattr(self,'_write_lock',None)
+        if lock is None:return method(self,*args,**kwargs)
+        with lock:return method(self,*args,**kwargs)
+    return locked
+
 
 from contextlib import contextmanager
 
@@ -43,6 +53,16 @@ import logging
 log = logging.getLogger("interview_engine.pg_checkpoint")
 
 from .stop_fence import StopRequested
+
+from contextvars import ContextVar
+from copy import deepcopy
+_answer_checkpoint_memory=ContextVar('answer_checkpoint_memory',default=False)
+
+@contextmanager
+def answer_checkpoint_memory():
+    token=_answer_checkpoint_memory.set(True)
+    try:yield
+    finally:_answer_checkpoint_memory.reset(token)
 
 LEASE_TABLE = 'engine_sessions'
 
@@ -122,19 +142,54 @@ class FencedPostgresSaver(PostgresSaver):
         # checks out per operation (ConnectionPool is supported natively);
         # pipeline mode is unavailable on a pool, which costs a few round
         # trips per checkpoint commit and changes no semantics.
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
+        self._answer_enabled=_answer_checkpoint_memory.get()
+
+    @_answer_cache_locked
+    def get_tuple(self,config):
+        if not (_answer_checkpoint_memory.get() or getattr(self,'_answer_enabled',False)):return super().get_tuple(config)
+        if not hasattr(self,'_answer_memory'):self._answer_memory={};self._answer_latest={}
+        cfg=config.get('configurable',{})
+        from langgraph.checkpoint.base import get_checkpoint_id
+        key=(cfg.get('thread_id'),cfg.get('checkpoint_ns',''),get_checkpoint_id(config) or None)
+        if key[2] is None and key[:2] in self._answer_latest:key=(*key[:2],self._answer_latest[key[:2]])
+        if key not in self._answer_memory:
+            value=super().get_tuple(config)
+            # Cache only a real checkpoint, not a claim that no checkpoint can
+            # ever appear. Explicit pinned reads remain pinned.
+            if value is not None:
+                actual=(*key[:2],value.checkpoint['id'])
+                self._answer_memory[actual]=deepcopy(value)
+                if key[2] is None:self._answer_latest[key[:2]]=actual[2]
+            return value
+        return deepcopy(self._answer_memory[key])
+
+    @_answer_cache_locked
+    def remember_answer_checkpoint(self,config,checkpoint,metadata):
+        if not (_answer_checkpoint_memory.get() or getattr(self,'_answer_enabled',False)):return
+        from langgraph.checkpoint.base import CheckpointTuple,get_serializable_checkpoint_metadata
+        if not hasattr(self,'_answer_memory'):self._answer_memory={};self._answer_latest={}
+        cfg=config['configurable'];identity=(cfg['thread_id'],cfg.get('checkpoint_ns',''))
+        from langgraph.checkpoint.serde.types import _DeltaSnapshot
+        if any(isinstance(v,_DeltaSnapshot) for v in checkpoint.get('channel_values',{}).values()):
+            # Delta checkpoints require reconstruction by the installed saver.
+            self._answer_latest.pop(identity,None)
+            return
+        produced={'configurable':{**cfg,'checkpoint_id':checkpoint['id']}}
+        parent=deepcopy(config) if cfg.get('checkpoint_id') else None
+        self._answer_memory[(*identity,checkpoint['id'])]=CheckpointTuple(produced,deepcopy(checkpoint),
+            get_serializable_checkpoint_metadata(config,metadata),parent,[])
+        self._answer_latest[identity]=checkpoint['id']
 
     @contextmanager
     def _guarded_conn(self):
         # One claimed transaction for a guarded write batch: claims ride the
         # transaction stream; the connection returns to the pool at the end.
-        from .pg_claims import apply_claims
+        from .pg_claims import claimed_transaction
         from langgraph.checkpoint.postgres import _internal
         with _internal.get_connection(self.conn) as conn:
             try:
-                with conn.transaction():
-                    if self._claims is not None:
-                        apply_claims(conn, self._claims)
+                with claimed_transaction(conn,self._claims):
                     yield conn
             finally:
                 from psycopg.pq import TransactionStatus
@@ -153,11 +208,10 @@ class FencedPostgresSaver(PostgresSaver):
             with super()._cursor(pipeline=pipeline) as cur:
                 yield cur
             return
-        from .pg_claims import apply_claims
+        from .pg_claims import claimed_transaction
         from langgraph.checkpoint.postgres import _internal
         with self.lock, _internal.get_connection(self.conn) as conn:
-            with conn.transaction():
-                apply_claims(conn, self._claims)
+            with claimed_transaction(conn,self._claims):
                 # No pipeline on a pooled connection (langgraph forbids it);
                 # the read paths here are single round trips anyway.
                 with conn.cursor(binary=True, row_factory=psycopg.rows.dict_row) as cur:
@@ -282,9 +336,11 @@ class FencedPostgresSaver(PostgresSaver):
                          Jsonb(copy), Jsonb(get_serializable_checkpoint_metadata(config, metadata))))
             except BaseException:
                 raise
+        self.remember_answer_checkpoint(config,checkpoint,metadata)
         return {'configurable': {'thread_id': thread_id, 'checkpoint_ns': checkpoint_ns,
                                  'checkpoint_id': checkpoint['id']}}
 
+    @_answer_cache_locked
     def put_writes(self, config, writes, task_id, task_path=''):
         # Same contract as the base saver, each write its own guarded insert so
         # a fence loss mid-batch raises before any later write lands.
@@ -292,6 +348,9 @@ class FencedPostgresSaver(PostgresSaver):
         # writes are first-writer-wins so a stale batch never replaces a
         # legitimate recorded write. Per-row guarded inserts: correctness over
         # batching at interview-session throughput.
+        if hasattr(self,'_answer_memory'):
+            cfg=config['configurable']
+            self._answer_memory.pop((cfg['thread_id'],cfg.get('checkpoint_ns',''),cfg.get('checkpoint_id')),None)
         reserved = all(channel in WRITES_IDX_MAP for channel, _ in writes)
         sql = (_UPSERT_WRITES if reserved else _INSERT_WRITES).format(lease_table=self._lease_table)
         with self._write_lock, self._guarded_conn() as conn:
