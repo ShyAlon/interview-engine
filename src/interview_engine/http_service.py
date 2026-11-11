@@ -191,7 +191,7 @@ class SessionRegistry:
                             session.pg_stopped=True
                             self._acknowledge_quiescence(session)
 
-    def close(self)->None:
+    def close(self)->dict[str,bool]:
         # Stop serving: halt the shared heartbeat loop, join it with a bounded
         # wait, and leave no connection checked out. Leases expire on their
         # own; a live session can then be claimed by another instance. Fences
@@ -201,6 +201,7 @@ class SessionRegistry:
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=5.0)
             if self._hb_thread.is_alive():log.warning('lease heartbeat loop did not join instance=%s',self._instance)
+        released={}
         for session in sessions:
             # Voluntary lease release at a committed boundary: the write lock
             # waits out any in-flight turn, so another host can claim
@@ -210,8 +211,9 @@ class SessionRegistry:
             if claim is not None and self._store is not None:
                 try:
                     with self._writer(session):
-                        self._store.release(claim)
+                        released[session.session_id]=self._store.release(claim)
                 except Exception:
+                    released[session.session_id]=False
                     log.warning('lease.release.failed session=%s',session.session_id,exc_info=True)
         # Programs hold no connections of their own: the saver borrows from
         # the process pool per operation. The store closes the pool only when
@@ -220,6 +222,7 @@ class SessionRegistry:
         if self._store is not None:
             try:self._store.close()
             except Exception:log.warning('session store close failed',exc_info=True)
+        return released
 
     def _pg_owner(self)->str:
         # Owner identity comes from the authenticated tenant context (or the

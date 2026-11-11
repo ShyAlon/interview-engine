@@ -46,3 +46,17 @@ instance, chunk order and hashes, and exact binding bytes. No RLS rule changed.
 Real graph, fake provider and disposable PG: cold success 29 total barriers,
 17 parent + 12 child; warm success 26, 17 parent + 9 child. Failure paths remain
 higher and must be reported separately, not hidden behind the success result.
+
+Failure-path review: WarmChildStep and SessionRegistry both released the same
+lease. Registry close now returns checked release results; the warm wrapper
+releases directly only for an evicted/unregistered session. It does not retry a
+failed release. Failed setup also resets its identity tokens. Normal/failed/
+evicted/lost-release tests pin exactly-once behavior. Refusal is now 29 whole
+barriers; Stop remains 47. Do not describe this as a universal sub-30 pass.
+
+Pending CheckpointTuple values omit DB indices. Counting regular channels loses
+gaps from mixed reserved/regular writes. Staged writes now retain actual slot
+keys; pre-existing pending writes load their real indices once. New checkpoints
+remain query-free here. A fresh staged publication replay is rejected and rolls
+back its proposed checkpoints, rather than retaining a pointer but leaving new
+orphan rows. Already-committed same-context publication replay remains a no-op.

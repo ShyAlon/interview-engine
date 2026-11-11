@@ -773,6 +773,7 @@ class PgSessionStore:
                 lease=saver._lease
                 if (lease.session_id,lease.generation,lease.epoch)!=(claim.session_id,claim.generation,claim.epoch):
                     raise StopRequested('staged checkpoint lease differs from final publication')
+        params['allow_replay']=batch is None or batch.committed or not batch.operations
         with self._borrow() as conn:
             with conn.transaction():
                 if batch is not None and not batch.committed:batch.flush(conn)
@@ -786,7 +787,7 @@ class PgSessionStore:
                       AND generation=%(gen)s AND lease_epoch=%(epoch)s AND lease_expires_at>%(now)s
                       AND NOT coalesce((control->>'stopped')::boolean,false)
                       AND (((control->>'sequence')::bigint=%(expected)s AND control->'open_input'->>'input_id'=%(wait)s)
-                        OR (control->>'_answer_operation_id'=%(operation)s AND (control->>'sequence')::bigint=%(sequence)s))
+                        OR (%(allow_replay)s AND control->>'_answer_operation_id'=%(operation)s AND (control->>'sequence')::bigint=%(sequence)s))
                     RETURNING 1""",params).fetchone()
                 if row is None:raise StopRequested('answer publication identity/lease fence rejected')
             if batch is not None:batch.committed=True

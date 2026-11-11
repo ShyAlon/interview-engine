@@ -67,7 +67,7 @@ def answer_checkpoint_memory():
 _answer_checkpoint_publication=ContextVar('answer_checkpoint_publication',default=None)
 
 class _AnswerCheckpointPublication:
-    def __init__(self):self.operations=[];self.savers=[];self.flushing=False;self.original={};self.committed=False
+    def __init__(self):self.operations=[];self.savers=[];self.flushing=False;self.original={};self.committed=False;self.pending={}
     def attach(self,saver):
         saver._answer_publication_batch=self
         if saver not in self.savers:
@@ -441,11 +441,22 @@ class FencedPostgresSaver(PostgresSaver):
             # regular first-writer ordering in the local view.
             value=self.get_tuple(config)
             if value is not None:
-                pending={};counts={}
-                for task,channel,raw in value.pending_writes or []:
-                    idx=WRITES_IDX_MAP.get(channel,counts.get(task,0))
-                    pending[(task,idx)]=(task,channel,raw)
-                    if channel not in WRITES_IDX_MAP:counts[task]=counts.get(task,0)+1
+                cfg=config['configurable']
+                identity=(self,cfg['thread_id'],cfg.get('checkpoint_ns',''),cfg['checkpoint_id'])
+                if identity not in batch.pending:
+                    pending={}
+                    if value.pending_writes:
+                        # CheckpointTuple omits the DB idx. Counting channels
+                        # cannot reconstruct gaps left by mixed reserved writes.
+                        # This edge restore read is needed only for pre-existing
+                        # pending writes; new answer checkpoints start empty.
+                        with self._cursor() as cur:
+                            rows=cur.execute("SELECT task_id,idx,channel,type,blob FROM checkpoint_writes WHERE thread_id=%s AND checkpoint_ns=%s AND checkpoint_id=%s ORDER BY task_id,idx",
+                                identity[1:]).fetchall()
+                        for row in rows:
+                            pending[(row['task_id'],row['idx'])]=(row['task_id'],row['channel'],self.serde.loads_typed((row['type'],bytes(row['blob']))))
+                    batch.pending[identity]=pending
+                pending=batch.pending[identity]
                 reserved=all(channel in WRITES_IDX_MAP for channel,_ in writes)
                 for idx,(channel,raw) in enumerate(writes):
                     key=(task_id,WRITES_IDX_MAP.get(channel,idx))
