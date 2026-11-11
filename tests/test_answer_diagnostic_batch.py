@@ -45,3 +45,67 @@ def test_exception_flushes_best_effort_and_keeps_original_error(tmp_path):
             with bind(Docs(),tmp_path/'session'):
                 append(tmp_path/'session/interview/log.jsonl','a\n')
                 raise ValueError('original')
+
+
+def test_recovery_ceiling_never_deletes_evidence_or_fails_answer(tmp_path,monkeypatch):
+    from interview_engine import document_diagnostics as module
+    root=tmp_path/'tenants/owner/sessions/.diagnostic-recovery'
+    class Docs:
+        def diagnostic_many(self,ops):raise RuntimeError('test unavailable')
+    def append(operation,text):
+        with module.answer_batch(root/('a'*64),{'operation_id':operation}):
+            with module.bind(Docs(),tmp_path/'session'):
+                module.append(tmp_path/'session/interview/run.log',text)
+    monkeypatch.setattr(module,'SPOOL_TOTAL_FILES',1)
+    append('old','old evidence')
+    old=next(root.glob('*/*.json'));before=old.read_bytes()
+    append('new','new evidence cannot evict old')
+    assert list(root.glob('*/*.json'))==[old]
+    assert old.read_bytes()==before
+    assert old.stat().st_mode&0o777==0o600
+    monkeypatch.setattr(module,'SPOOL_TOTAL_FILES',128)
+    monkeypatch.setattr(module,'SPOOL_TOTAL_BYTES',len(before))
+    append('third','owner byte ceiling')
+    assert list(root.glob('*/*.json'))==[old]
+    monkeypatch.setattr(module,'SPOOL_TOTAL_BYTES',32000000)
+    monkeypatch.setattr(module,'SPOOL_FILE_BYTES',20)
+    append('fourth','per-file ceiling')
+    assert list(root.glob('*/*.json'))==[old]
+
+
+def test_diagnostic_recovery_export_is_bounded_decoded_and_read_only(tmp_path):
+    from interview_engine import document_diagnostics as module
+    root=tmp_path/'tenants/owner/sessions/.diagnostic-recovery'/('a'*64)
+    class Docs:
+        def diagnostic_many(self,ops):raise RuntimeError('test unavailable')
+    with module.answer_batch(root,{'owner_id':'owner','operation_id':'failed-diagnostic'}):
+        with module.bind(Docs(),tmp_path/'session'):
+            module.append(tmp_path/'session/interview/run.log','API_KEY=must-be-redacted-by-debug\nproject evidence\n')
+    path=next(root.glob('*.json'));before=path.read_bytes()
+    result=module.recovery_export(tmp_path)
+    assert result['kind']=='diagnostic-only-not-execution-replay'
+    assert result['records'][0]['diagnostic_operations'][0]['text'].endswith('project evidence\n')
+    assert not result['omissions']
+    assert module.recovery_export(tmp_path,max_bytes=1)['omissions']==['diagnostic export size limit']
+    assert path.read_bytes()==before
+    outside=tmp_path/'outside';outside.write_text('private outside source')
+    (root/('b'*64+'.json')).symlink_to(outside)
+    assert len(module.recovery_export(tmp_path)['records'])==1
+
+
+def test_concurrent_spool_capacity_counts_crash_temporaries(tmp_path,monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from interview_engine import document_diagnostics as module
+    root=tmp_path/'.diagnostic-recovery'/('a'*64)
+    root.mkdir(parents=True)
+    (root/'.diagnostic-crash').write_bytes(b'left by interrupted atomic write')
+    class Docs:
+        def diagnostic_many(self,ops):raise RuntimeError('test unavailable')
+    monkeypatch.setattr(module,'SPOOL_TOTAL_FILES',2)
+    def write(index):
+        with module.answer_batch(root,{'operation_id':str(index)}):
+            with module.bind(Docs(),tmp_path/'session'):
+                module.append(tmp_path/'session/interview/run.log','evidence')
+    with ThreadPoolExecutor(6) as pool:list(pool.map(write,range(6)))
+    assert len(list(root.glob('*.json')))==1
+    assert (root/'.diagnostic-crash').read_bytes()==b'left by interrupted atomic write'

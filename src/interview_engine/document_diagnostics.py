@@ -50,6 +50,61 @@ def read(path):
 # Explicit answer-only seam. Outside it, existing document semantics stay unchanged.
 _answer=ContextVar('answer_diagnostic_batch',default=None)
 
+# Private best-effort copies only. Never evict prior crash evidence to make room.
+SPOOL_FILE_BYTES=4*1024*1024
+SPOOL_TOTAL_BYTES=32*1024*1024
+SPOOL_TOTAL_FILES=128
+
+
+def _recovery_files(base,*,include_temporary=False):
+    import stat
+    for folder in base.iterdir():
+        if not re.fullmatch('[0-9a-f]{64}',folder.name) or folder.is_symlink() or not folder.is_dir():continue
+        for path in folder.iterdir():
+            if not (re.fullmatch(r'[0-9a-f]{64}\.json',path.name) or (include_temporary and path.name.startswith('.diagnostic-'))):continue
+            info=path.lstat()
+            if stat.S_ISREG(info.st_mode):yield path,info.st_size
+
+
+def recovery_export(artifacts,*,max_bytes=120000):
+    """Read-only diagnostic export, never replay or re-import authority.
+
+    Returns decoded text so the owner's debug collector can redact credentials.
+    File names and roots are fixed by the application, not external input.
+    """
+    import base64,json,os,stat
+    root=Path(artifacts).resolve();records=[];omissions=[];used=0
+    for base in root.glob('tenants/*/sessions/.diagnostic-recovery'):
+        if base.resolve()!=base or not base.is_dir():continue
+        for path,size in _recovery_files(base):
+            if size>SPOOL_FILE_BYTES:
+                omissions.append('oversize diagnostic spool');continue
+            fd=None
+            try:
+                fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):raise ValueError('nonregular spool')
+                with os.fdopen(fd,'rb') as stream:
+                    fd=None;raw=stream.read(SPOOL_FILE_BYTES+1)
+                if len(raw)>SPOOL_FILE_BYTES:raise ValueError('oversize spool')
+                value=json.loads(raw)
+                if value.get('version')!=1 or value.get('kind')!='diagnostic-only-not-execution-replay':raise ValueError('unknown spool format')
+                operations=[]
+                for kind,key,encoded in value['operations']:
+                    if kind not in ('write','append') or not isinstance(key,str):raise ValueError('invalid diagnostic operation')
+                    operations.append({'kind':kind,'key':key,'text':base64.b64decode(encoded,validate=True).decode('utf-8',errors='replace')})
+                record={'identity':value['identity'],'diagnostic_operations':operations}
+                amount=len(json.dumps(record).encode())
+                if used+amount>max_bytes:
+                    omissions.append('diagnostic export size limit');continue
+                used+=amount;records.append(record)
+            except (OSError,ValueError,KeyError,TypeError):omissions.append('unreadable or malformed diagnostic spool')
+            finally:
+                if fd is not None:os.close(fd)
+    return {'version':1,'kind':'diagnostic-only-not-execution-replay','records':records,
+        'omissions':omissions[:32],'omission_count':len(omissions),'retention':'no automatic expiry or eviction; capacity exhaustion stops new recovery copies',
+        'fidelity':'last successfully spooled snapshot; may be incomplete after a failed or full write'}
+
+
 class _AnswerBatch:
     def __init__(self,recovery_root,identity):
         import hashlib,json
@@ -68,18 +123,27 @@ class _AnswerBatch:
         self.spool()
 
     def spool(self):
-        import base64,json,os,tempfile,logging
+        import base64,json,os,tempfile,logging,fcntl
         temporary=None
         try:
             self.root.mkdir(mode=0o700,parents=True,exist_ok=True)
             if self.root.resolve()!=self.root:raise ValueError('recovery root changed')
-            fd,temporary=tempfile.mkstemp(prefix='.diagnostic-',dir=self.root)
-            with os.fdopen(fd,'w') as stream:
-                json.dump({'version':1,'identity':self.identity,'kind':'diagnostic-only-not-execution-replay',
-                    'operations':[[kind,key,base64.b64encode(raw).decode('ascii')] for kind,key,raw in self.operations]},stream)
-            os.replace(temporary,self.path)
+            raw=json.dumps({'version':1,'identity':self.identity,'kind':'diagnostic-only-not-execution-replay',
+                'operations':[[kind,key,base64.b64encode(data).decode('ascii')] for kind,key,data in self.operations]}).encode()
+            if len(raw)>SPOOL_FILE_BYTES:raise ValueError('diagnostic spool file ceiling')
+            # Same-owner children share the ceiling. The lock spans capacity
+            # accounting and replacement, never any database/provider work.
+            fd=os.open(self.root.parent/'.capacity.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'a') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX)
+                sizes=[size for path,size in _recovery_files(self.root.parent,include_temporary=True)]
+                if len(sizes)>=SPOOL_TOTAL_FILES or sum(sizes)+len(raw)>SPOOL_TOTAL_BYTES:
+                    raise ValueError('diagnostic spool owner ceiling')
+                fd,temporary=tempfile.mkstemp(prefix='.diagnostic-',dir=self.root)
+                with os.fdopen(fd,'wb') as stream:stream.write(raw)
+                os.replace(temporary,self.path)
         except Exception:
-            logging.getLogger(__name__).warning('diagnostic.spool_failed',exc_info=False)
+            logging.getLogger(__name__).warning('diagnostic.spool_failed_or_full recovery_copy=not_updated',exc_info=False)
         finally:
             if temporary is not None:
                 try:os.unlink(temporary)

@@ -100,6 +100,19 @@ def answer_checkpoint_publication(saver=None):
             if not batch.committed:
                 memory,latest=batch.original[attached]
                 attached._answer_memory=deepcopy(memory);attached._answer_latest=deepcopy(latest)
+            else:
+                # A parked child may serve many answers. Keep only each
+                # namespace's current anchor and immediate parent. Historical
+                # explicit reads remain supported through the durable saver.
+                with attached._write_lock:
+                    keep={(*identity,checkpoint) for identity,checkpoint in getattr(attached,'_answer_latest',{}).items()}
+                    for key in list(keep):
+                        value=attached._answer_memory.get(key)
+                        parent=value.parent_config if value is not None else None
+                        if parent:
+                            cfg=parent['configurable']
+                            if cfg.get('checkpoint_id'):keep.add((cfg['thread_id'],cfg.get('checkpoint_ns',''),cfg['checkpoint_id']))
+                    attached._answer_memory={key:value for key,value in getattr(attached,'_answer_memory',{}).items() if key in keep}
 
 LEASE_TABLE = 'engine_sessions'
 

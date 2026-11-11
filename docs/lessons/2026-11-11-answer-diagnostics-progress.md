@@ -68,3 +68,16 @@ update records in-memory proof; already-proven quiescence is not repeated.
 The no-preread test failed first, then the full registry/warm group passed30.
 Latest whole Stop count41 (parent29+child12), still above30. Other outcomes are
 unchanged. Final engine candidate group:106 passed,4 skipped.
+
+A parked answer saver retains only each namespace's latest checkpoint and its
+immediate parent after commit; old pinned reads still use durable PG. Six-turn
+coverage failed before this fix and checks that history does not grow in memory.
+
+The diagnostic-only local spool is capped at4 MiB per snapshot and32 MiB /
+128 files per owner, including abandoned atomic-write temporaries. A same-owner
+filesystem lock covers capacity accounting and replacement. Full/failed writes
+are nonfatal and never evict earlier evidence. No automatic expiry was added.
+Read-only export decodes diagnostic text for the owner's debug redactor, bounds
+output and skips symlinks/malformed files. It never imports into PG or replays
+execution. Copies can be partial snapshots after a failed/full write; retention
+and explicit cleanup policy remain debt.

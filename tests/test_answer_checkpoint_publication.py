@@ -111,3 +111,25 @@ def test_staged_restore_pending_indices_and_replay_do_not_create_orphans(tmp_pat
         assert PostgresSaver.get_tuple(saver,third) is None,'fresh replay may not leave unpublished staged checkpoints'
         assert store.load_published('s1',claim.owner_id)['published_checkpoint_id']==cp(2)['id']
     finally:ctx.__exit__(None,None,None)
+
+
+def test_committed_warm_turns_keep_only_latest_and_parent_in_memory(tmp_path):
+    from interview_engine.pg_checkpoint import answer_checkpoint_publication
+    with answer_checkpoint_memory():ctx,saver,admin=make_saver(server(tmp_path).get_uri())
+    store=PgSessionStore(saver.conn)
+    try:
+        admin.execute("UPDATE engine_sessions SET control='{}'::jsonb,lease_expires_at=0 WHERE session_id='s1'")
+        claim=store.claim('s1','00000000-0000-0000-0000-000000000001','child',60)
+        saver._lease.epoch=claim.epoch
+        store.publish_step(claim,{'sequence':1,'open_input':{'input_id':'wait1'}})
+        previous=cfg('t');configs=[]
+        for turn in range(1,7):
+            op=SimpleNamespace(operation_id='a'+str(turn),binding=SimpleNamespace(session_id='s1',task_id='task1',owner_id=claim.owner_id,generation=1),operation=SimpleNamespace(kind='interview.answer',expected_sequence=turn,wait_id='wait'+str(turn)))
+            with answer_checkpoint_publication(saver),answer_publication(op):
+                previous=saver.put(previous,cp(turn),META,{'messages':str(turn)})
+                configs.append(previous)
+                store.publish_step(claim,{'sequence':turn+1,'open_input':{'input_id':'wait'+str(turn+1)}},published_checkpoint_id=cp(turn)['id'])
+            assert len(saver._answer_memory)<=2,'warm child must not retain the full checkpoint history'
+            assert saver.get_tuple(cfg('t')).checkpoint['id']==cp(turn)['id']
+        assert saver.get_tuple(configs[0])==PostgresSaver.get_tuple(saver,configs[0]),'evicted history still resolves durably'
+    finally:ctx.__exit__(None,None,None)
