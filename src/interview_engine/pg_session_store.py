@@ -40,6 +40,17 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from contextvars import ContextVar
+from contextlib import contextmanager
+
+_answer_publication=ContextVar('answer_publication',default=None)
+
+@contextmanager
+def answer_publication(operation):
+    token=_answer_publication.set(operation)
+    try:yield
+    finally:_answer_publication.reset(token)
+
 
 import psycopg
 
@@ -587,6 +598,9 @@ class PgSessionStore:
                      published_checkpoint_ns: str = "",
                      published_checkpoint_id: str | None = None,
                      fault_hook=None) -> None:
+        operation=_answer_publication.get()
+        if operation is not None and operation.operation.kind=='interview.answer' and not journal_pages and journal_page is None and fault_hook is None:
+            return self._publish_answer(claim,operation,control,published_thread_id,published_checkpoint_ns,published_checkpoint_id)
         with self._borrow() as conn:
             """One transaction per published step: journal page, control state and
             the checkpoint pointer commit together under the lease fence.
@@ -694,6 +708,37 @@ class PgSessionStore:
                 tag_stage(exc, "step publication", conn)
                 raise
             conn.commit()
+
+    def _publish_answer(self,claim,operation,control,thread,namespace,checkpoint):
+        """One conditional answer publication; no intermediate exact-byte replay."""
+        body=operation.operation;binding=operation.binding
+        if (claim.session_id!=binding.session_id or claim.owner_id!=str(binding.owner_id)
+            or claim.generation!=binding.generation or type(control.get('sequence')) is not int
+            or control['sequence']<=body.expected_sequence):
+            raise PublicationConflict('answer publication identity or sequence changed')
+        payload={**control,'_answer_operation_id':operation.operation_id}
+        params={'sid':claim.session_id,'owner':claim.owner_id,'task':binding.task_id,
+            'gen':claim.generation,'epoch':claim.epoch,'now':time.time(),'operation':operation.operation_id,
+            'expected':body.expected_sequence,'sequence':control['sequence'],'wait':body.wait_id,
+            'control':json.dumps(payload),'thread':thread,'ns':namespace,'checkpoint':checkpoint}
+        with self._borrow() as conn:
+            try:
+                row=conn.execute("""UPDATE engine_sessions SET
+                    control=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN control ELSE %(control)s::jsonb END,
+                    published_thread_id=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN published_thread_id ELSE %(thread)s END,
+                    published_checkpoint_ns=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN published_checkpoint_ns ELSE %(ns)s END,
+                    published_checkpoint_id=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN published_checkpoint_id ELSE %(checkpoint)s END,
+                    updated_at=%(now)s
+                    WHERE session_id=%(sid)s AND owner_id=%(owner)s::uuid AND task_id=%(task)s
+                      AND generation=%(gen)s AND lease_epoch=%(epoch)s AND lease_expires_at>%(now)s
+                      AND NOT coalesce((control->>'stopped')::boolean,false)
+                      AND (((control->>'sequence')::bigint=%(expected)s AND control->'open_input'->>'input_id'=%(wait)s)
+                        OR (control->>'_answer_operation_id'=%(operation)s AND (control->>'sequence')::bigint=%(sequence)s))
+                    RETURNING 1""",params).fetchone()
+                if row is None:raise StopRequested('answer publication identity/lease fence rejected')
+                conn.commit()
+            except BaseException:
+                conn.rollback();raise
 
     def journal_head(self, session_id: str, owner_id: str) -> int:
         with self._borrow() as conn:

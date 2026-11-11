@@ -21,10 +21,13 @@ class InterviewDocuments:
         from .stop_fence import StopRequested
         c=self.claim
         with self.store._borrow() as conn,conn.transaction():
-            task=conn.execute('SELECT engine_session_id,generation,stop_requested_at FROM tasks WHERE task_id=%s FOR UPDATE',(self.task_id,)).fetchone()
-            lease=conn.execute('SELECT task_id,generation,lease_epoch,lease_expires_at,placement_instance,control FROM engine_sessions WHERE session_id=%s AND owner_id=%s::uuid FOR UPDATE',(c.session_id,c.owner_id)).fetchone()
-            if (not task or task['engine_session_id']!=c.session_id or task['generation']!=c.generation or task['stop_requested_at'] is not None
-                or not lease or lease['task_id']!=self.task_id or lease['generation']!=c.generation or lease['lease_epoch']!=c.epoch
+            lease=conn.execute("""SELECT t.generation AS task_generation,t.stop_requested_at,
+                e.generation,e.lease_epoch,e.lease_expires_at,e.placement_instance,e.control
+                FROM tasks t JOIN engine_sessions e ON e.session_id=t.engine_session_id AND e.task_id=t.task_id
+                WHERE t.task_id=%s AND e.session_id=%s AND e.owner_id=%s::uuid FOR UPDATE OF t,e""",
+                (self.task_id,c.session_id,c.owner_id)).fetchone()
+            if (not lease or lease['task_generation']!=c.generation or lease['stop_requested_at'] is not None
+                or lease['generation']!=c.generation or lease['lease_epoch']!=c.epoch
                 or lease['lease_expires_at']<=time.time() or lease['placement_instance']!=c.instance or (lease['control'] or {}).get('stopped')):
                 raise StopRequested('interview document authority lost')
             # Installed executions preserve approved source and never construct a new interview.

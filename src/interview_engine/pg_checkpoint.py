@@ -170,11 +170,6 @@ class FencedPostgresSaver(PostgresSaver):
         from langgraph.checkpoint.base import CheckpointTuple,get_serializable_checkpoint_metadata
         if not hasattr(self,'_answer_memory'):self._answer_memory={};self._answer_latest={}
         cfg=config['configurable'];identity=(cfg['thread_id'],cfg.get('checkpoint_ns',''))
-        from langgraph.checkpoint.serde.types import _DeltaSnapshot
-        if any(isinstance(v,_DeltaSnapshot) for v in checkpoint.get('channel_values',{}).values()):
-            # Delta checkpoints require reconstruction by the installed saver.
-            self._answer_latest.pop(identity,None)
-            return
         produced={'configurable':{**cfg,'checkpoint_id':checkpoint['id']}}
         parent=deepcopy(config) if cfg.get('checkpoint_id') else None
         self._answer_memory[(*identity,checkpoint['id'])]=CheckpointTuple(produced,deepcopy(checkpoint),
@@ -316,6 +311,16 @@ class FencedPostgresSaver(PostgresSaver):
             else:
                 blob_values[k] = copy['channel_values'].pop(k)
         blob_versions = {k: v for k, v in new_versions.items() if k in blob_values}
+        cached_checkpoint=deepcopy(checkpoint)
+        def known_blob(key):
+            version=checkpoint.get('channel_versions',{}).get(key)
+            for identity,entry in getattr(self,'_answer_memory',{}).items():
+                prior=entry.checkpoint
+                if (identity[:2]==(thread_id,checkpoint_ns) and str(prior.get('channel_versions',{}).get(key))==str(version)
+                    and key in prior.get('channel_values',{})):
+                    cached_checkpoint['channel_values'][key]=deepcopy(prior['channel_values'][key]);return True
+            return False
+        cache_safe=all(known_blob(k) for k in blob_values if k not in blob_versions)
         with self._write_lock, self._guarded_conn() as conn:
             try:
                 self._guard_lock(conn)
@@ -327,6 +332,8 @@ class FencedPostgresSaver(PostgresSaver):
                             " ON CONFLICT (thread_id, checkpoint_ns, channel, version) DO NOTHING",
                             [(thread_id, checkpoint_ns, k, str(blob_versions[k]),
                               *self.serde.dumps_typed(blob_values[k])) for k in blob_versions])
+                        if cur.rowcount!=len(blob_versions):
+                            cache_safe=cache_safe and all(known_blob(k) for k in blob_versions)
                     cur.execute(
                         "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id,"
                         " parent_checkpoint_id, checkpoint, metadata) VALUES (%s,%s,%s,%s,%s,%s)"
@@ -336,7 +343,13 @@ class FencedPostgresSaver(PostgresSaver):
                          Jsonb(copy), Jsonb(get_serializable_checkpoint_metadata(config, metadata))))
             except BaseException:
                 raise
-        self.remember_answer_checkpoint(config,checkpoint,metadata)
+        if cache_safe:self.remember_answer_checkpoint(config,cached_checkpoint,metadata)
+        elif hasattr(self,'_answer_memory'):
+            # Immutable blob collisions or omitted old blob versions must be
+            # reconstructed from durable storage, never from proposed bytes.
+            identity=(thread_id,checkpoint_ns)
+            self._answer_memory.pop((*identity,checkpoint['id']),None)
+            self._answer_latest.pop(identity,None)
         return {'configurable': {'thread_id': thread_id, 'checkpoint_ns': checkpoint_ns,
                                  'checkpoint_id': checkpoint['id']}}
 

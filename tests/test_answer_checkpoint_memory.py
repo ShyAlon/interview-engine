@@ -65,3 +65,31 @@ def test_cold_latest_pending_writes_failure_and_new_saver(tmp_path):
         assert fresh.get_tuple(cfg('t'))==PostgresSaver.get_tuple(fresh,cfg('t'))
         assert not hasattr(fresh,'_answer_memory')
     finally:ctx.__exit__(None,None,None)
+
+
+def test_delta_snapshot_memory_matches_installed_saver(tmp_path):
+    from test_pg_checkpoint import make_saver,server,cfg,cp,META
+    from interview_engine.pg_checkpoint import answer_checkpoint_memory
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from langgraph.checkpoint.serde.types import _DeltaSnapshot
+    with answer_checkpoint_memory():ctx,saver,admin=make_saver(server(tmp_path).get_uri())
+    try:
+        checkpoint=cp(1);checkpoint['channel_values']['messages']=_DeltaSnapshot(['m1'])
+        written=saver.put(cfg('t'),checkpoint,META,{'messages':'1'})
+        assert saver.get_tuple(written)==PostgresSaver.get_tuple(saver,written)
+    finally:ctx.__exit__(None,None,None)
+
+
+def test_immutable_blob_collision_cannot_poison_answer_memory(tmp_path):
+    from test_pg_checkpoint import make_saver,server,cfg,cp,META
+    from interview_engine.pg_checkpoint import answer_checkpoint_memory
+    from langgraph.checkpoint.postgres import PostgresSaver
+    with answer_checkpoint_memory():ctx,saver,admin=make_saver(server(tmp_path).get_uri())
+    try:
+        first=saver.put(cfg('t'),cp(1),META,{'messages':'1'})
+        conflict=cp(2);conflict['channel_versions']['messages']='1'
+        conflict['channel_values']['messages']=['not the stored version']
+        second=saver.put(first,conflict,META,{'messages':'1'})
+        assert saver.get_tuple(second)==PostgresSaver.get_tuple(saver,second)
+        assert saver.get_tuple(second).checkpoint['channel_values']['messages']==['m1']
+    finally:ctx.__exit__(None,None,None)

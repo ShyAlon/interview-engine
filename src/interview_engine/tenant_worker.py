@@ -34,7 +34,7 @@ import weakref
 _probed_pools=weakref.WeakKeyDictionary()   # pool -> True after one successful placement probe
 
 
-def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False):
+def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False,entry_verified:bool=False):
     """A database-backed session store over the process connection pool.
 
     Fails clear at startup when the database is unreachable or the delivery-api
@@ -53,7 +53,7 @@ def pg_session_store(pool,owner:str,session_id:str,*,close_pool:bool=False):
     try:
         # The probe answers a pool-wide question (table exists, role may read it), so one success per pool is enough:
         # delivery-api builds a store per answer step (12 per warm answer), each probe ~5 round trips. Failure is never remembered.
-        if _probed_pools.get(pool) is None:
+        if not entry_verified and _probed_pools.get(pool) is None:
             with borrow_claimed(pool,(owner,session_id)) as conn:
                 conn.execute("SELECT 1 FROM engine_sessions LIMIT 1")
                 conn.commit()
