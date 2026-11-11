@@ -402,3 +402,19 @@ def test_timed_out_provider_thread_keeps_stop_requested_until_actual_exit(tmp_pa
     end=time.monotonic()+2
     while registry.snapshot(session.session_id).process_status!=ProcessStatus.STOPPED and time.monotonic()<end:time.sleep(.01)
     assert registry.snapshot(session.session_id).process_status==ProcessStatus.STOPPED
+
+
+def test_quiescence_conditional_update_is_the_stop_proof_without_preread(tmp_path,monkeypatch):
+    conn=make_conn(tmp_path);registry=make_registry(conn)
+    session,_=start(registry);store=registry._store
+    generation=store.stop(session.session_id,OWNER)
+    session.pg_stopped=True;session.pg_stop_generation=None
+    def no_read(*a):pytest.fail('conditional stopped-generation update is already the proof')
+    monkeypatch.setattr(store,'load_published',no_read)
+    calls=[];ack=store.acknowledge_stop_quiescent
+    def counted(*a):calls.append(a);return ack(*a)
+    monkeypatch.setattr(store,'acknowledge_stop_quiescent',counted)
+    registry._acknowledge_quiescence_checked(session)
+    registry._acknowledge_quiescence_checked(session)
+    assert session.pg_quiescent and session.pg_stop_generation==generation
+    assert len(calls)==1

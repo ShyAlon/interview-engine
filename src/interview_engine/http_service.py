@@ -142,15 +142,17 @@ class SessionRegistry:
 
     def _acknowledge_quiescence_checked(self,session):
         # Caller owns the registry lock; no new writer can enter the gap.
-        if (not session.pg_stopped or session.pg_claim is None
+        if (not session.pg_stopped or session.pg_claim is None or session.pg_quiescent
                 or self._writers.get(session.session_id,0)>0):return
-        if session.pg_stop_generation is None:
-            row=self._store.load_published(session.session_id,session.pg_claim.owner_id)
-            if not row or not (row['control'] or {}).get('stopped'):return
-            session.pg_stop_generation=row['generation']
-        if self._store.acknowledge_stop_quiescent(session.pg_claim,session.pg_stop_generation):
+        # The conditional UPDATE itself proves stopped=true, the sole valid
+        # generation transition, owner, epoch and instance. A preread adds no
+        # authority and can race. Do not remember proof until the UPDATE wins.
+        generation=session.pg_stop_generation
+        if generation is None:generation=session.pg_claim.generation+1
+        if self._store.acknowledge_stop_quiescent(session.pg_claim,generation):
+            session.pg_stop_generation=generation
             session.pg_quiescent=True
-            log.info('session.stop.quiescent session=%s generation=%s',session.session_id,session.pg_stop_generation)
+            log.info('session.stop.quiescent session=%s generation=%s',session.session_id,generation)
 
     def _ensure_heartbeat_loop(self) -> None:
         # ONE heartbeat loop per registry for every held lease: a lease beat is
@@ -191,7 +193,7 @@ class SessionRegistry:
                             session.pg_stopped=True
                             self._acknowledge_quiescence(session)
 
-    def close(self)->None:
+    def close(self)->dict[str,bool]:
         # Stop serving: halt the shared heartbeat loop, join it with a bounded
         # wait, and leave no connection checked out. Leases expire on their
         # own; a live session can then be claimed by another instance. Fences
@@ -201,6 +203,7 @@ class SessionRegistry:
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=5.0)
             if self._hb_thread.is_alive():log.warning('lease heartbeat loop did not join instance=%s',self._instance)
+        released={}
         for session in sessions:
             # Voluntary lease release at a committed boundary: the write lock
             # waits out any in-flight turn, so another host can claim
@@ -210,8 +213,9 @@ class SessionRegistry:
             if claim is not None and self._store is not None:
                 try:
                     with self._writer(session):
-                        self._store.release(claim)
+                        released[session.session_id]=self._store.release(claim)
                 except Exception:
+                    released[session.session_id]=False
                     log.warning('lease.release.failed session=%s',session.session_id,exc_info=True)
         # Programs hold no connections of their own: the saver borrows from
         # the process pool per operation. The store closes the pool only when
@@ -220,6 +224,7 @@ class SessionRegistry:
         if self._store is not None:
             try:self._store.close()
             except Exception:log.warning('session store close failed',exc_info=True)
+        return released
 
     def _pg_owner(self)->str:
         # Owner identity comes from the authenticated tenant context (or the
@@ -823,6 +828,8 @@ class SessionRegistry:
                 # Resume from the published pointer, never saver-latest.
                 if published_checkpoint_id is not None:
                     session.program.cfg={'configurable':{'thread_id':session.session_id,'checkpoint_ns':'','checkpoint_id':published_checkpoint_id}}
+                    saver=getattr(session.program,'saver',None)
+                    if hasattr(saver,'use_published_answer_checkpoint'):saver.use_published_answer_checkpoint(session.program.cfg)
             else:
                 session.program=self._program_factory(session.session_id,request.model_copy(update={"model_route":current_route}))
             session.program.open_input=session.open_input

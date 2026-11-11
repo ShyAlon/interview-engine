@@ -40,6 +40,17 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from contextvars import ContextVar
+from contextlib import contextmanager
+
+_answer_publication=ContextVar('answer_publication',default=None)
+
+@contextmanager
+def answer_publication(operation):
+    token=_answer_publication.set(operation)
+    try:yield
+    finally:_answer_publication.reset(token)
+
 
 import psycopg
 
@@ -205,6 +216,8 @@ class PgSessionStore:
         """
         from .child_step import published_digest
         from requi_child_contract import InterviewAnswer,InterviewRoute
+        if _answer_publication.get() is not None and isinstance(operation,InterviewAnswer):
+            return self._claim_answer_expected(binding,operation,instance,ttl)
         with self._borrow() as conn, conn.transaction():
             row=conn.execute(
                 "SELECT task_id,generation,lease_epoch,lease_expires_at,control,"
@@ -234,6 +247,49 @@ class PgSessionStore:
                 "WHERE session_id=%s AND owner_id=%s::uuid",
                 (epoch,instance,now+ttl,now,binding.session_id,str(binding.owner_id)))
             claim=SessionClaim(binding.session_id,str(binding.owner_id),binding.generation,epoch,instance)
+            return claim,dict(row)
+
+    def _claim_answer_expected(self,binding,operation,instance,ttl):
+        """Cold answer claim and restore row in one conditional statement.
+
+        Input/sequence and generation/epoch replace repeated exact-byte digest
+        checks. Schema readiness rides this startup read, not another trip.
+        """
+        from .pg_checkpoint import FencedPostgresSaver
+        now=time.time()
+        binding_projection=""
+        if self.claims is not None:
+            binding_projection=", (SELECT jsonb_agg(jsonb_build_object('payload',encode(payload,'hex'),'sha256',sha256,'ordinal',ordinal,'total',total) ORDER BY ordinal) FROM public.requi_document_parts(%(sid)s,%(gen)s,'evidence/schema-binding.json')) AS schema_binding_parts"
+        with self._borrow() as conn,conn.transaction():
+            row=conn.execute("""WITH won AS (UPDATE engine_sessions SET lease_epoch=lease_epoch+1,
+                placement_instance=%(instance)s,lease_expires_at=%(expiry)s,updated_at=%(now)s
+                WHERE session_id=%(sid)s AND owner_id=%(owner)s::uuid AND task_id=%(task)s
+                  AND generation=%(gen)s AND lease_epoch=%(epoch)s AND lease_expires_at<=%(now)s
+                  AND NOT coalesce((control->>'stopped')::boolean,false)
+                  AND (control->>'sequence')::bigint=%(sequence)s
+                  AND control->'open_input'->>'input_id'=%(wait)s
+                  AND coalesce(nullif(control->'open_input'->'context'->>'evidence_revision',''),
+                    'engine:'||session_id||':'||(control->>'sequence'))=%(revision)s
+                RETURNING task_id,generation,lease_epoch,lease_expires_at,control,
+                    published_thread_id,published_checkpoint_ns,published_checkpoint_id,
+                    (SELECT max(v) FROM checkpoint_migrations) AS checkpoint_schema_version)
+                SELECT won.*,cp.*"""+binding_projection+""" FROM won LEFT JOIN LATERAL ("""+FencedPostgresSaver.SELECT_SQL+"""
+                    WHERE thread_id=won.published_thread_id AND checkpoint_ns=won.published_checkpoint_ns
+                      AND checkpoint_id=won.published_checkpoint_id) cp ON true""",
+                {'sid':binding.session_id,'owner':str(binding.owner_id),'task':binding.task_id,
+                 'gen':binding.generation,'epoch':binding.lease_epoch,'now':now,'expiry':now+ttl,
+                 'instance':instance,'sequence':operation.expected_sequence,'wait':operation.wait_id,
+                 'revision':operation.review_revision}).fetchone()
+            if row is None:raise PermissionError('answer claim input/generation/lease changed or still held')
+            version=row['checkpoint_schema_version']
+            if version is None or version<len(FencedPostgresSaver.MIGRATIONS)-1:
+                raise RuntimeError('checkpoint schema is not prepared: apply the delivery-api checkpoint migration')
+            self._checkpoint_schema_version=version
+            self._answer_schema_binding=(binding.session_id,str(binding.owner_id),self.claims,binding.generation,row['lease_epoch'],instance,row.get('schema_binding_parts'))
+            # Keep only the exact published pointer returned by the same atomic
+            # claim. A v3 legacy pending-send migration still uses the saver path.
+            self._answer_checkpoint_row=dict(row) if row.get('checkpoint') and row['checkpoint'].get('v',0)>=4 else None
+            claim=SessionClaim(binding.session_id,str(binding.owner_id),binding.generation,row['lease_epoch'],instance)
             return claim,dict(row)
 
     def release(self, claim: SessionClaim) -> bool:
@@ -587,6 +643,9 @@ class PgSessionStore:
                      published_checkpoint_ns: str = "",
                      published_checkpoint_id: str | None = None,
                      fault_hook=None) -> None:
+        operation=_answer_publication.get()
+        if operation is not None and operation.operation.kind=='interview.answer' and not journal_pages and journal_page is None and fault_hook is None:
+            return self._publish_answer(claim,operation,control,published_thread_id,published_checkpoint_ns,published_checkpoint_id)
         with self._borrow() as conn:
             """One transaction per published step: journal page, control state and
             the checkpoint pointer commit together under the lease fence.
@@ -694,6 +753,44 @@ class PgSessionStore:
                 tag_stage(exc, "step publication", conn)
                 raise
             conn.commit()
+
+    def _publish_answer(self,claim,operation,control,thread,namespace,checkpoint):
+        """One conditional answer publication; no intermediate exact-byte replay."""
+        body=operation.operation;binding=operation.binding
+        if (claim.session_id!=binding.session_id or claim.owner_id!=str(binding.owner_id)
+            or claim.generation!=binding.generation or type(control.get('sequence')) is not int
+            or control['sequence']<=body.expected_sequence):
+            raise PublicationConflict('answer publication identity or sequence changed')
+        payload={**control,'_answer_operation_id':operation.operation_id}
+        params={'sid':claim.session_id,'owner':claim.owner_id,'task':binding.task_id,
+            'gen':claim.generation,'epoch':claim.epoch,'now':time.time(),'operation':operation.operation_id,
+            'expected':body.expected_sequence,'sequence':control['sequence'],'wait':body.wait_id,
+            'control':json.dumps(payload),'thread':thread,'ns':namespace,'checkpoint':checkpoint}
+        from .pg_checkpoint import _answer_checkpoint_publication
+        batch=_answer_checkpoint_publication.get()
+        if batch is not None:
+            for saver in batch.savers:
+                lease=saver._lease
+                if (lease.session_id,lease.generation,lease.epoch)!=(claim.session_id,claim.generation,claim.epoch):
+                    raise StopRequested('staged checkpoint lease differs from final publication')
+        params['allow_replay']=batch is None or batch.committed or not batch.operations
+        with self._borrow() as conn:
+            with conn.transaction():
+                if batch is not None and not batch.committed:batch.flush(conn)
+                row=conn.execute("""UPDATE engine_sessions SET
+                    control=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN control ELSE %(control)s::jsonb END,
+                    published_thread_id=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN published_thread_id ELSE %(thread)s END,
+                    published_checkpoint_ns=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN published_checkpoint_ns ELSE %(ns)s END,
+                    published_checkpoint_id=CASE WHEN control->>'_answer_operation_id'=%(operation)s THEN published_checkpoint_id ELSE %(checkpoint)s END,
+                    updated_at=%(now)s
+                    WHERE session_id=%(sid)s AND owner_id=%(owner)s::uuid AND task_id=%(task)s
+                      AND generation=%(gen)s AND lease_epoch=%(epoch)s AND lease_expires_at>%(now)s
+                      AND NOT coalesce((control->>'stopped')::boolean,false)
+                      AND (((control->>'sequence')::bigint=%(expected)s AND control->'open_input'->>'input_id'=%(wait)s)
+                        OR (%(allow_replay)s AND control->>'_answer_operation_id'=%(operation)s AND (control->>'sequence')::bigint=%(sequence)s))
+                    RETURNING 1""",params).fetchone()
+                if row is None:raise StopRequested('answer publication identity/lease fence rejected')
+            if batch is not None:batch.committed=True
 
     def journal_head(self, session_id: str, owner_id: str) -> int:
         with self._borrow() as conn:

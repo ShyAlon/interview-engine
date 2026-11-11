@@ -75,3 +75,44 @@ def test_warm_production_factory_refused_before_database_or_program(tmp_path):
     op=operation(sid,row,kind='interview.answer')
     with pytest.raises(PermissionError,match='money boundary'):
         WarmChildStep(op,trusted_binding=op.binding,store=store,program_factory=default_program_factory)
+
+
+def test_warm_close_releases_exactly_once(tmp_path,monkeypatch):
+    conn,store,sid,row,op,step=warm(tmp_path)
+    calls=[];release=store.release
+    def counted(claim):calls.append(claim);return release(claim)
+    monkeypatch.setattr(store,'release',counted)
+    step.close();step.close()
+    assert len(calls)==1
+
+
+def test_warm_setup_failure_releases_exactly_once(tmp_path,monkeypatch):
+    conn,store,sid,row=setup(tmp_path);op=operation(sid,row,kind='interview.answer')
+    calls=[];release=store.release
+    def counted(claim):calls.append(claim);return release(claim)
+    monkeypatch.setattr(store,'release',counted)
+    def fail(*a):raise RuntimeError('fake warm restore failed')
+    with pytest.raises(RuntimeError,match='fake warm restore failed'):
+        WarmChildStep(op,trusted_binding=op.binding,store=store,program_factory=fail)
+    assert len(calls)==1
+
+
+def test_warm_close_releases_evicted_session_once(tmp_path,monkeypatch):
+    conn,store,sid,row,op,step=warm(tmp_path)
+    step.registry._sessions.pop(sid)
+    calls=[];release=store.release
+    def counted(claim):calls.append(claim);return release(claim)
+    monkeypatch.setattr(store,'release',counted)
+    step.close()
+    assert len(calls)==1
+    assert store.claim(sid,OWNER,'after-eviction',60) is not None
+
+
+def test_warm_close_does_not_retry_a_failed_release(tmp_path,monkeypatch):
+    conn,store,sid,row,op,step=warm(tmp_path)
+    calls=[]
+    def lost(claim):calls.append(claim);return False
+    monkeypatch.setattr(store,'release',lost)
+    with pytest.raises(PermissionError,match='no longer held'):step.close()
+    step.close()
+    assert len(calls)==1

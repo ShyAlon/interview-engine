@@ -73,7 +73,15 @@ class InterviewApplication:
             serde=JsonPlusSerializer(allowed_msgpack_modules=[AppArchetype]),
             claims=tenant_claims)
         t_setup=time.monotonic();_log.info("saver.setup.begin session=%s",session_id)
-        saver.setup()
+        restore_row=getattr(pg_store,'_answer_checkpoint_row',None)
+        if restore_row is not None and restore_row.get('thread_id')==session_id and getattr(saver,'_answer_enabled',False):
+            restored=saver._load_checkpoint_tuple(restore_row)
+            identity=(session_id,restore_row['checkpoint_ns'])
+            saver._answer_memory={(*identity,restore_row['checkpoint_id']):restored}
+            saver._answer_latest={identity:restore_row['checkpoint_id']}
+            pg_store._answer_checkpoint_row=None
+        prepared=getattr(pg_store,'_checkpoint_schema_version',None)
+        if prepared is None or prepared<len(saver.MIGRATIONS)-1:saver.setup()
         _log.info("saver.setup.end session=%s dur_ms=%d",session_id,int((time.monotonic()-t_setup)*1000))
         log=UsageLog(session_id,sink=(lambda usage:self.documents.append('interview/usage.jsonl',(usage.model_dump_json()+'\n').encode())) if self.documents is not None else jsonl_sink(self.outdir/'usage.jsonl'))
         self.usage_log=log

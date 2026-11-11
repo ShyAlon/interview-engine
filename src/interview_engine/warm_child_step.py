@@ -35,7 +35,7 @@ class WarmChildStep:
             raise ValueError('only published interview restore is warm-servable')
         self._stack=ExitStack()
         self._store=store
-        registry=None;claim=None
+        registry=None;claim=None;tokens_set=False
         try:
             self._stack.enter_context(broker_clients(broker) if broker is not None else nullcontext())
             registry=SessionRegistry(program_factory,session_store=store,owner_id=str(binding.owner_id),
@@ -43,6 +43,7 @@ class WarmChildStep:
                 progress_mode="observational")
             self._owner_token=_owner.set(str(binding.owner_id))
             self._session_token=_session.set(str(binding.auth_session_id))
+            tokens_set=True
             claim,row=store.claim_published_expected(binding,operation.operation,registry._instance,registry._lease_ttl)
             session=registry._restore_payload(dict(row['control']),binding.session_id)
             session.pg_claim=claim
@@ -54,13 +55,19 @@ class WarmChildStep:
             self.registry=registry;self.session=session;self._claim=claim
             self._binding=trusted_binding
         except BaseException:
-            if registry is not None:
-                try:registry.close()
-                except Exception:pass
-            if claim is not None and not store.release(claim):
+            try:
+                released=registry.close() if registry is not None else {}
+                if claim is not None:
+                    # Registered sessions are released by registry.close(). Only
+                    # a failure before registration needs a direct release.
+                    ok=(released.get(claim.session_id) if claim.session_id in registry._sessions
+                        else store.release(claim))
+                    if not ok:
+                        raise PermissionError('warm child lease release lost at setup') from None
+            finally:
+                if tokens_set:
+                    _session.reset(self._session_token);_owner.reset(self._owner_token)
                 self._stack.close()
-                raise PermissionError('warm child lease release lost at setup') from None
-            self._stack.close()
             raise
 
     def check(self,operation,*,trusted_binding):
@@ -100,14 +107,12 @@ class WarmChildStep:
         claim=self._claim
         if claim is None:return
         try:
-            try:
-                self.registry.close()
-            finally:
-                from .tenant_worker import _owner,_session
-                _session.reset(self._session_token);_owner.reset(self._owner_token)
+            released=self.registry.close()
+            ok=released[claim.session_id] if claim.session_id in released else self._store.release(claim)
+            if not ok:
+                raise PermissionError('warm child lease no longer held at release; reconcile before success')
         finally:
             self._claim=None
-        if not self._store.release(claim):
+            from .tenant_worker import _owner,_session
+            _session.reset(self._session_token);_owner.reset(self._owner_token)
             self._stack.close()
-            raise PermissionError('warm child lease no longer held at release; reconcile before success')
-        self._stack.close()
