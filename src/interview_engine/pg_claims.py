@@ -26,8 +26,10 @@ CLAIM_SQL = ("SELECT set_config('request.jwt.claim.sub',%s,true),"
 
 def apply_claims(conn, claims):
     """Enter the restricted runtime role and tenant in the same transaction."""
-    conn.execute('SET LOCAL ROLE requi_backend')
-    conn.execute(CLAIM_SQL, claims)
+    # Both identity statements leave in one batch. SET LOCAL remains transactional.
+    with conn.pipeline():
+        conn.execute('SET LOCAL ROLE requi_backend')
+        conn.execute(CLAIM_SQL, claims)
 
 
 class ClaimedConnection:
