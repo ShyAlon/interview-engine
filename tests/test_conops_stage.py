@@ -52,10 +52,7 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
                         json.dumps({"trigger":"habit completed"}),
                         json.dumps({"operational_flow":["open product","record points"]}),
                         json.dumps({"exceptions":["offline"]}),
-                        json.dumps({"name":d["concept_options"][0]["name"],"summary":d["concept_options"][0]["summary"]}),
-                        json.dumps({"name":d["concept_options"][1]["name"],"summary":d["concept_options"][1]["summary"]}),
-                        json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["store release"]}),
-                        json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["platform limits"]})])
+                        json.dumps(d["concept_options"][0]),json.dumps(d["concept_options"][1])])
     models = {"probing": FakeModel(["[INTERVIEW COMPLETE]"]),
               "distillation": FakeModel([json.dumps(NEEDS), json.dumps(SCOPE), "[]"]),
               "conops": conops,
@@ -70,7 +67,7 @@ def test_conops_graph_is_resumable_and_model_runs_once(monkeypatch):
     assert "Concept Decision" in r["messages"][-1].content
     r = g.invoke({"messages": [HumanMessage(content="1 - reliable native APIs")]}, cfg)
     assert r["conops"]["decision"]["selected_concept"] == "Native app"
-    assert conops.calls == 10
+    assert conops.calls == 6
 
 
 def test_preseed_uses_validated_intent_identity_and_provenance():
@@ -109,10 +106,8 @@ def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholde
       "source_turns":{"operational_concepts":[0],"core_value_proposition":[0]}}
     conops=FakeModel([json.dumps({"trigger":"habit completed"}),
                       json.dumps({"operational_flow":["open product","record points"]}),json.dumps({"exceptions":["offline"]}),
-                      json.dumps({"name":"Native app","summary":"installed"}),
-                      json.dumps({"name":"PWA","summary":"web"}),
-                      json.dumps({"advantages":["native APIs"]}),json.dumps({"disadvantages":["release"]}),
-                      json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
+                      json.dumps({"name":"Native app","summary":"installed","advantages":["native APIs"],"disadvantages":["release"]}),
+                    json.dumps({"name":"PWA","summary":"web","advantages":["one deployment"],"disadvantages":["limits"]})])
     models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
     monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
     g=build_graph(UsageLog("derived"),conops_enabled=True);cfg={"configurable":{"thread_id":"derived"}}
@@ -120,7 +115,7 @@ def test_all_null_multi_field_patch_is_not_needed_when_intent_derives_stakeholde
                 "verdict":{"accepted":True},"intent_model":intent},cfg)
     ctx=r["conops_draft"]["stakeholder_context"][0]
     assert ctx["goals"]==["runner needs quick capture"] and ctx["operating_environment"].startswith("phone, often offline")
-    assert conops.calls==9  # no stakeholder call; trigger + flow + exceptions + 2 identity micro-calls + 4 option fields
+    assert conops.calls==5  # no stakeholder call; 3 scenario fields + 2 complete options
 
 
 def test_per_field_null_is_a_named_failure_with_raw_path(monkeypatch,tmp_path):
@@ -168,10 +163,8 @@ def test_conops_weak_model_container_echo_retries_one_option_then_assembles(monk
     conops=Capture([json.dumps({"trigger":"habit completed"}),
                     json.dumps({"operational_flow":["open product","record points"]}),json.dumps({"exceptions":["offline"]}),
                     json.dumps({"stakeholder_context": []}),
-                    json.dumps({"name":"Native","summary":"installed"}),
-                    json.dumps({"name":"PWA","summary":"web"}),
-                    json.dumps({"advantages":["native"]}),json.dumps({"disadvantages":["release"]}),
-                    json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
+                    json.dumps({"name":"Native","summary":"installed","advantages":["native"],"disadvantages":["release"]}),
+                    json.dumps({"name":"PWA","summary":"web","advantages":["one deployment"],"disadvantages":["limits"]})])
     models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
     monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
     graph=build_graph(UsageLog("repair"),conops_enabled=True)
@@ -378,9 +371,8 @@ def _depth_run(monkeypatch, scenario_replies, tid):
         def __init__(self, outputs): super().__init__(outputs); self.messages=[]
         def invoke(self, messages): self.messages.append(messages); return super().invoke(messages)
     conops=Capture([json.dumps(x) for x in scenario_replies]+[
-        json.dumps({"name":"Native","summary":"installed"}),json.dumps({"name":"PWA","summary":"web"}),
-        json.dumps({"advantages":["native"]}),json.dumps({"disadvantages":["release"]}),
-        json.dumps({"advantages":["one deployment"]}),json.dumps({"disadvantages":["limits"]})])
+        json.dumps({"name":"Native","summary":"installed","advantages":["native"],"disadvantages":["release"]}),
+                    json.dumps({"name":"PWA","summary":"web","advantages":["one deployment"],"disadvantages":["limits"]})])
     models={"probing":FakeModel([]),"distillation":FakeModel([]),"conops":conops,"scope_tiebreak":FakeModel([])}
     monkeypatch.setattr(model_config,"build_chat_model",lambda stage,**kw:models[stage])
     g=build_graph(UsageLog(tid),conops_enabled=True)

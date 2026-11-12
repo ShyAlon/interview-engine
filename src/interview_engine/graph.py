@@ -1230,13 +1230,15 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
 
             # Weak local models often echo a nearby top-level CONOPS container when
             # asked for a list. Bound the task instead: two independently validated
-            # option identities, assembled into the comparison by code.
+            # options, assembled into the comparison by code.
             identities=[]
+            options=[]
+            from pydantic import TypeAdapter
             from vmodel_contracts import canonical_concept_id
             for option_index in (1, 2):
                 prior=[x["name"] for x in identities]
                 def option_identity_contract(value):
-                    if not isinstance(value, dict) or not str(value.get("name", "")).strip() or not str(value.get("summary", "")).strip():
+                    if not isinstance(value, dict) or not isinstance(value.get("name"),str) or not value["name"].strip() or not isinstance(value.get("summary"),str) or not value["summary"].strip():
                         raise ValueError(f"option identity needs non-empty name and summary; received {str(value)[:300]}")
                     if str(value["name"]).strip().casefold() in {x.casefold() for x in prior}:
                         raise ValueError(f"option name duplicates a prior option: {value['name']!r}")
@@ -1244,15 +1246,25 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     "VALIDATED INTENT: " + _json.dumps(intent)
                     + f"\nPropose product-level operating concept {option_index} of 2. "
                     + (f"It must be genuinely distinct from prior concepts: {_json.dumps(prior)}. " if prior else "")
-                    + "Return one JSON object with name and summary only. Do not include architecture components or any CONOPS container.",
+                    + "Return one JSON object with name, summary, advantages and disadvantages. Advantages and disadvantages must each be a non-empty list of concise strings grounded in the intended operation. Do not include architecture components or any CONOPS container.",
                     f"Planning CONOPS concept option {option_index}/2",
-                    f"one option identity; prior option names: {prior}", option_identity_contract)
-                name=str(raw["name"]).strip()
-                identities.append({"concept_id":canonical_concept_id(name),"name":name,
-                                   "summary":str(raw["summary"]).strip()})
-            options=[generate_item("concept option", ident, ConceptOption,
-                "Fill concise advantages and disadvantages grounded in the intended operation.",
-                i,len(identities)) for i,ident in enumerate(identities,1)]
+                    f"one complete option; prior option names: {prior}", option_identity_contract)
+                name=raw["name"].strip()
+                identity={"concept_id":canonical_concept_id(name),"name":name,"summary":raw["summary"].strip()}
+                # Only the two requested list fields can supplement code-owned
+                # identity. Preserve valid peers; repair only absent/invalid fields
+                # with the existing bounded field path and final model validation.
+                for field_name in ("advantages","disadvantages"):
+                    try:
+                        normalized=normalize_model_item({field_name:raw.get(field_name)},ConceptOption)
+                        value=TypeAdapter(ConceptOption.model_fields[field_name].rebuild_annotation()).validate_python(normalized.get(field_name))
+                        if value:identity[field_name]=value
+                    except (ValueError,TypeError):
+                        pass
+                option=generate_item("concept option",identity,ConceptOption,
+                    "Fill concise advantages and disadvantages grounded in the intended operation.",option_index,2)
+                identities.append(option)
+                options.append(option)
             draft=validate_draft({"stakeholder_context":contexts,"operational_scenarios":scenarios,
                                   "concept_options":options},founder_turns)
         return {"conops_draft": draft,
