@@ -42,7 +42,14 @@ def _graph_tenant_claims(pg_store,pg_claim):
 
 def durable_progress_signal(event):
     """Persist meaningful boundaries, not elapsed-time/model-call duplicates."""
-    return event.status == "failed" or (event.status != "heartbeat" and not event.stage.startswith("llm_call:"))
+    if event.status=="failed":return True
+    if event.stage=="conops":
+        # Console/raw-call signals still receive every field/repair event. The
+        # durable journal needs one validated item update, not two transactions
+        # per subfield. Keep phase and founder-decision boundaries too.
+        return event.status=="item_completed" or (event.status in ("started","completed") and
+            event.label in ("Building Concept of Operations","Concept of Operations decision"))
+    return event.status != "heartbeat" and not event.stage.startswith("llm_call:")
 
 
 class InterviewApplication:

@@ -1176,8 +1176,36 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         f"stage 'conops': {kind} item {index}/{total} field '{field_name}' was not provided.",
                         str(field_error), "inspect the raw response at "+(path or "the configured debug output")
                         +", then rerun with the same --session id.") from field_error
+            filled_fields=set()
+            if kind == "scenario" and missing:
+                # One scoped scenario object instead of repeating the full intent
+                # and transcript for trigger/flow/exceptions. Never accept model
+                # rewrites of code-derived identity or provenance. A malformed
+                # object uses the existing bounded JSON repair; absent/invalid
+                # fields alone use the same targeted field repair below.
+                from pydantic import TypeAdapter
+                def scenario_contract(value):
+                    if not isinstance(value,dict):raise ValueError("expected one scenario field object")
+                raw=call_json(CONOPS_SYSTEM,
+                    f"Fill these missing fields for ONE operational scenario: {_json.dumps(missing)}. "
+                    "Return one JSON object containing those fields only. Do not rewrite identity, actors, outcome or provenance.\n"
+                    f"CODE-DERIVED FIELDS (do not rewrite): {_json.dumps(candidate)}\n"
+                    f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n{prompt}",
+                    f"Building CONOPS scenario {index}/{total}",f"scenario {index} of {total}",
+                    scenario_contract,item_completed=index-1,item_total=total)
+                for field_name in missing:
+                    if field_name not in raw:continue
+                    try:
+                        normalized=normalize_model_item({field_name:raw[field_name]},model_cls)
+                        value=TypeAdapter(model_cls.model_fields[field_name].rebuild_annotation()).validate_python(normalized.get(field_name))
+                        if value in (None,"",[]) and field_name!="exceptions":continue
+                        candidate[field_name]=value
+                        filled_fields.add(field_name)
+                    except (ValueError,TypeError):
+                        pass  # Preserve valid peers; repair only this missing field.
             for field_name in missing:
-                fill(field_name)
+                if field_name not in filled_fields:
+                    fill(field_name)
             if kind == "scenario":
                 # Deterministic depth check; one retry with the exact failure, then it becomes a register finding.
                 for field_name, why in scenario_depth_problems(candidate).items():
