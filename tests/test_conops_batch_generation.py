@@ -18,8 +18,8 @@ def run_case(monkeypatch,scenario_replies,tid='batch-benchmark',count=1):
   'constraints':['phone, often offline'],'assumptions':[],'assumption_items':[],'scope_exclusions':[],
   'done_criteria':[],'tech_preferences':[],'glossary':{},'operational_concepts':['Log habit '+str(i) for i in range(count)],
   'open_questions':[],'source_turns':{'operational_concepts':[0],'core_value_proposition':[0]}}
- options=[{'name':'Native','summary':'installed'},{'name':'PWA','summary':'web'},
-  {'advantages':['native']},{'disadvantages':['release']},{'advantages':['one deployment']},{'disadvantages':['limits']}]
+ options=[{'name':'Native','summary':'installed','advantages':['native'],'disadvantages':['release']},
+ {'name':'PWA','summary':'web','advantages':['one deployment'],'disadvantages':['limits']}]
  model=Capture([json.dumps(x) for x in scenario_replies+options]);models={x:FakeModel([]) for x in ('probing','distillation','scope_tiebreak')};models['conops']=model
  monkeypatch.setattr(model_config,'build_chat_model',lambda stage,**kw:models[stage])
  progress=ProgressBus();events=[];progress.subscribe(events.append)
@@ -35,7 +35,7 @@ GOOD={'trigger':'habit done','operational_flow':['open app','tap habit'],'except
 
 def test_nine_scenarios_take_nine_calls_not_twenty_seven(monkeypatch):
  result,model,events=run_case(monkeypatch,[GOOD]*9,count=9)
- assert model.calls==15  # 9 scenarios + unchanged 6 option calls. No paid call.
+ assert model.calls==11  # 9 scenarios + combined 2 option calls. No paid call.
  scenarios=result['conops_draft']['operational_scenarios'];assert len(scenarios)==9
  for i,row in enumerate(scenarios):
   assert row['trigger']==GOOD['trigger'] and row['operational_flow']==GOOD['operational_flow'] and row['exceptions']==GOOD['exceptions']
@@ -49,7 +49,7 @@ def test_nine_scenarios_take_nine_calls_not_twenty_seven(monkeypatch):
 
 def test_partial_batch_repairs_only_missing_field(monkeypatch):
  result,model,events=run_case(monkeypatch,[{k:v for k,v in GOOD.items() if k!='exceptions'},{'exceptions':['offline']}])
- assert model.calls==8
+ assert model.calls==4
  assert result['conops_draft']['operational_scenarios'][0]['operational_flow']==GOOD['operational_flow']
  assert 'Fill ONLY the `exceptions`' in model.messages[1][1].content
 
@@ -59,25 +59,25 @@ def test_batch_never_rewrites_derived_identity_or_source_turns(monkeypatch):
  result,model,_=run_case(monkeypatch,[hostile])
  row=result['conops_draft']['operational_scenarios'][0]
  assert row['name']=='Log habit 0' and row['actors']==['runner'] and row['source_turns']==[0]
- assert row['success_outcome']=='points sync' and model.calls==7
+ assert row['success_outcome']=='points sync' and model.calls==3
 
 
 def test_invalid_peer_gets_targeted_repair_without_regenerating_good_fields(monkeypatch):
  result,model,_=run_case(monkeypatch,[{**GOOD,'trigger':None},{'trigger':'habit done'}])
  row=result['conops_draft']['operational_scenarios'][0]
  assert row['trigger']=='habit done' and row['operational_flow']==GOOD['operational_flow']
- assert model.calls==8 and 'Fill ONLY the `trigger`' in model.messages[1][1].content
+ assert model.calls==4 and 'Fill ONLY the `trigger`' in model.messages[1][1].content
 
 
 def test_batch_depth_retry_remains_targeted(monkeypatch):
  result,model,_=run_case(monkeypatch,[{**GOOD,'operational_flow':['Log habit 0']},{'operational_flow':['open app','tap habit']}])
- assert model.calls==8 and result['conops_draft']['operational_scenarios'][0]['operational_flow']==GOOD['operational_flow']
+ assert model.calls==4 and result['conops_draft']['operational_scenarios'][0]['operational_flow']==GOOD['operational_flow']
  assert 'TOO SHALLOW' in model.messages[1][1].content and 'Fill ONLY the `operational_flow`' in model.messages[1][1].content
 
 
 def test_malformed_batch_has_existing_bounded_contract_repair(monkeypatch):
  result,model,_=run_case(monkeypatch,[[],GOOD])
- assert model.calls==8 and result['conops_draft']['operational_scenarios'][0]['trigger']==GOOD['trigger']
+ assert model.calls==4 and result['conops_draft']['operational_scenarios'][0]['trigger']==GOOD['trigger']
  assert any('previous response failed' in message.content.lower() for message in model.messages[1])
 
 
