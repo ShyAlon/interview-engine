@@ -109,3 +109,85 @@ def test_concurrent_spool_capacity_counts_crash_temporaries(tmp_path,monkeypatch
     with ThreadPoolExecutor(6) as pool:list(pool.map(write,range(6)))
     assert len(list(root.glob('*.json')))==1
     assert (root/'.diagnostic-crash').read_bytes()==b'left by interrupted atomic write'
+
+
+def test_delayed_confirmed_flush_does_not_delete_a_newer_copy(tmp_path):
+    from interview_engine import document_diagnostics as module
+    root=tmp_path/'recovery'
+    identity={'operation_id':'same-answer'}
+    newer=module._AnswerBatch(root,identity)
+    class PendingDocs:
+        def diagnostic_many(self,ops):raise RuntimeError('not saved yet')
+    class CommittedDocs:
+        def diagnostic_many(self,ops):
+            assert ops==[('append','interview/run.log',b'older saved notes')]
+            newer.queue(PendingDocs(),'append','interview/run.log',b'newer unsaved notes')
+    with module.answer_batch(root,identity):
+        with module.bind(CommittedDocs(),tmp_path/'session'):
+            module.append(tmp_path/'session/interview/run.log','older saved notes')
+    assert newer.path.is_file(), 'a delayed confirmed flush cannot delete a replaced copy'
+    assert b'newer unsaved notes' in __import__('base64').b64decode(json.loads(newer.path.read_text())['operations'][0][2])
+
+
+def test_successful_save_with_cleanup_failure_keeps_copy_and_names_cleanup(tmp_path,monkeypatch,caplog):
+    from interview_engine import document_diagnostics as module
+    class Docs:
+        def diagnostic_many(self,ops):pass
+    batch=module._AnswerBatch(tmp_path/'recovery',{'operation_id':'saved'})
+    batch.queue(Docs(),'append','interview/run.log',b'saved')
+    original=module.Path.unlink
+    def fail(path,*args,**kwargs):
+        if path==batch.path:raise PermissionError('test unlink denied')
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(module.Path,'unlink',fail)
+    batch.flush()
+    assert batch.path.is_file()
+    assert 'diagnostic.cleanup_deferred' in caplog.text
+    assert 'diagnostic.flush_failed' not in caplog.text
+
+
+@pytest.mark.parametrize('change',['malformed','symlink','oversize'])
+def test_confirmed_cleanup_preserves_uncertain_or_unsafe_replacements(tmp_path,change):
+    from interview_engine import document_diagnostics as module
+    target=tmp_path/'outside';target.write_bytes(b'outside must stay')
+    class Docs:
+        def diagnostic_many(self,ops):
+            path=batch.path
+            if change=='symlink':
+                path.unlink();path.symlink_to(target)
+            elif change=='oversize':path.write_bytes(b'x'*(module.SPOOL_FILE_BYTES+1))
+            else:path.write_bytes(b'malformed new evidence')
+    batch=module._AnswerBatch(tmp_path/'recovery',{'operation_id':'saved'})
+    batch.queue(Docs(),'append','interview/run.log',b'saved')
+    batch.flush()
+    assert batch.path.exists() and target.read_bytes()==b'outside must stay'
+
+
+def test_stop_error_and_its_unconfirmed_copy_survive_cleanup(tmp_path):
+    from interview_engine import document_diagnostics as module
+    from interview_engine.stop_fence import StopRequested
+    class Docs:
+        def diagnostic_many(self,ops):raise StopRequested('lost lease')
+    with pytest.raises(StopRequested,match='original stop'):
+        with module.answer_batch(tmp_path/'recovery',{'operation_id':'stopped'}):
+            with module.bind(Docs(),tmp_path/'session'):
+                module.append(tmp_path/'session/interview/run.log','unsaved stop evidence')
+                raise StopRequested('original stop')
+    assert len(list((tmp_path/'recovery').glob('*.json')))==1
+
+
+def test_cleanup_does_not_evict_other_old_or_temporary_copies(tmp_path):
+    import os
+    from interview_engine import document_diagnostics as module
+    root=tmp_path/'recovery';root.mkdir()
+    old=root/('0'*64+'.json');old.write_bytes(b'old unconfirmed')
+    temporary=root/'.diagnostic-crash';temporary.write_bytes(b'crash temporary')
+    os.utime(old,(1,1));os.utime(temporary,(1,1))
+    class Docs:
+        def diagnostic_many(self,ops):pass
+    with module.answer_batch(root,{'operation_id':'current'}):
+        with module.bind(Docs(),tmp_path/'session'):
+            module.append(tmp_path/'session/interview/run.log','confirmed current')
+    assert old.read_bytes()==b'old unconfirmed'
+    assert temporary.read_bytes()==b'crash temporary'
+    assert list(root.glob('*.json'))==[old]
