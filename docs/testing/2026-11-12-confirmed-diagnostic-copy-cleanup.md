@@ -29,5 +29,15 @@ Verification so far: the replaced-copy and cleanup-warning assertions failed
 before the fix. Sixteen focused diagnostic tests and a 34-test answer/transaction
 boundary group pass. Engine fast gate: 780 passed, three optional skips. Its
 stale runtime-role double now models the existing pipeline boundary and retains
-the exact role-before-claims assertion. Further actual migrated-PG and installed
-runtime checks follow before opening a PR. No paid execution or live DB used.
+the exact role-before-claims assertion. Actual migrated-PG proof: four integration cases pass, including a new test
+that reads committed bytes from a separate connection before cleanup and proves
+Stop keeps unsaved evidence without changing saved bytes. Delivery installed
+child/diagnostic export/Stop/durable-HTTP group: ten passed.
+
+All 24 engine heavy-classified files were exercised in bounded groups: 59
+passed with one cross-repo test-module-name collision in the first group, 53
+passed in the second, 103 in the third. The affected wiring module passes all
+15 cases in its own process. The collision comes from a delivery migration
+fixture adding its tests directory to the module path; no product code changed
+to hide it. This is not a claim of one uninterrupted full-suite pass. Hosted
+CI is not claimed green. No paid execution or live DB used.
