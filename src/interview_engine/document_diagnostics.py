@@ -122,20 +122,48 @@ class _AnswerBatch:
         else:self.operations.append((kind,key,raw))
         self.spool()
 
+    def snapshot(self,operations):
+        import base64,json
+        return json.dumps({'version':1,'identity':self.identity,'kind':'diagnostic-only-not-execution-replay',
+            'operations':[[kind,key,base64.b64encode(data).decode('ascii')] for kind,key,data in operations]}).encode()
+
+    @contextmanager
+    def capacity_lock(self):
+        import os,fcntl
+        if self.root.resolve()!=self.root:raise ValueError('recovery root changed')
+        fd=os.open(self.root.parent/'.capacity.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            yield
+
+    def cleanup_confirmed(self,expected):
+        """Only this exact committed snapshot, never an aged or replaced copy."""
+        import os,stat
+        with self.capacity_lock():
+            try:fd=os.open(self.path,os.O_RDONLY|os.O_NOFOLLOW)
+            except FileNotFoundError:return
+            with os.fdopen(fd,'rb') as stream:
+                info=os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):raise ValueError('regular recovery copy required')
+                current=stream.read(SPOOL_FILE_BYTES+1)
+            if current!=expected:return
+            # Writers replace under the same owner lock. Also refuse a file
+            # changed by anything outside that protocol during this read.
+            current_info=self.path.lstat()
+            if (current_info.st_dev,current_info.st_ino)!=(info.st_dev,info.st_ino):return
+            self.path.unlink()
+
     def spool(self):
-        import base64,json,os,tempfile,logging,fcntl
+        import os,tempfile,logging
         temporary=None
         try:
             self.root.mkdir(mode=0o700,parents=True,exist_ok=True)
             if self.root.resolve()!=self.root:raise ValueError('recovery root changed')
-            raw=json.dumps({'version':1,'identity':self.identity,'kind':'diagnostic-only-not-execution-replay',
-                'operations':[[kind,key,base64.b64encode(data).decode('ascii')] for kind,key,data in self.operations]}).encode()
+            raw=self.snapshot(self.operations)
             if len(raw)>SPOOL_FILE_BYTES:raise ValueError('diagnostic spool file ceiling')
             # Same-owner children share the ceiling. The lock spans capacity
             # accounting and replacement, never any database/provider work.
-            fd=os.open(self.root.parent/'.capacity.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
-            with os.fdopen(fd,'a') as lock:
-                fcntl.flock(lock,fcntl.LOCK_EX)
+            with self.capacity_lock():
                 sizes=[size for path,size in _recovery_files(self.root.parent,include_temporary=True)]
                 if len(sizes)>=SPOOL_TOTAL_FILES or sum(sizes)+len(raw)>SPOOL_TOTAL_BYTES:
                     raise ValueError('diagnostic spool owner ceiling')
@@ -162,13 +190,18 @@ class _AnswerBatch:
     def flush(self):
         import logging
         if not self.operations:return
+        operations=list(self.operations)
         try:
-            self.documents.diagnostic_many(self.operations)
-            self.path.unlink(missing_ok=True)
+            expected=self.snapshot(operations)
+            self.documents.diagnostic_many(operations)
         except Exception:
             # Diagnostics must never turn success into failure, or mask Stop.
             # The local spool is not permission for paid replay or stale writes.
             logging.getLogger(__name__).warning('diagnostic.flush_failed recovery=local',exc_info=False)
+            return
+        try:self.cleanup_confirmed(expected)
+        except Exception:
+            logging.getLogger(__name__).warning('diagnostic.cleanup_deferred notes=confirmed_saved recovery=local',exc_info=False)
 
 @contextmanager
 def answer_batch(recovery_root,identity):
