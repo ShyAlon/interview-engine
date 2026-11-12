@@ -135,3 +135,41 @@ def test_cross_owner_invisible_under_rls():
     assert other.heartbeat(claim, ttl=60) is False
     # A's own connection is unharmed by B's failed attempts.
     assert store_a.claim(sid, A, 'integration#1', ttl=60) is not None
+
+
+def test_diagnostic_cleanup_follows_real_fenced_commit_and_keeps_stopped_copy(tmp_path,monkeypatch):
+    """The actual migrated adapter commits before local cleanup can start."""
+    import uuid
+    from interview_engine.pg_session_store import PgSessionStore
+    from interview_engine.pg_documents import InterviewDocuments
+    from interview_engine import document_diagnostics as module
+    sid='diagnostic-'+uuid.uuid4().hex;tid=sid
+    with psycopg.connect(_STATE['dsn'],autocommit=True) as admin:
+        admin.execute("INSERT INTO tasks(task_id,title,state,created_at,updated_at,owner_id) VALUES (%s,'Diagnostics','running',0,0,%s)",(tid,A))
+    store=PgSessionStore(managed_pool(app_conn(A).info.dsn),claims=(A,SESSION[A]))
+    store.create(sid,tid,A);claim=store.claim(sid,A,'diagnostic-test',ttl=60)
+    with psycopg.connect(_STATE['dsn'],autocommit=True) as admin:
+        admin.execute('UPDATE tasks SET engine_session_id=%s WHERE task_id=%s',(sid,tid))
+    docs=InterviewDocuments(store,claim,tid)
+    root=tmp_path/'recovery';cleanup=[]
+    original=module._AnswerBatch.cleanup_confirmed
+    def confirmed(batch,expected):
+        # This read borrows a new fenced connection after the write transaction
+        # has ended. Seeing the bytes proves commit, not an in-memory mock.
+        assert docs.read('interview/run.log')==b'committed notes\n'
+        cleanup.append(True)
+        return original(batch,expected)
+    monkeypatch.setattr(module._AnswerBatch,'cleanup_confirmed',confirmed)
+    with module.answer_batch(root,{'operation_id':'saved','session_id':sid}):
+        with module.bind(docs,tmp_path/'session'):
+            module.append(tmp_path/'session/interview/run.log','committed notes\n')
+    assert cleanup==[True] and not list(root.glob('*.json'))
+    store.stop(sid,A)
+    with module.answer_batch(root,{'operation_id':'stopped','session_id':sid}):
+        with module.bind(docs,tmp_path/'session'):
+            module.append(tmp_path/'session/interview/run.log','not committed after stop\n')
+    assert cleanup==[True] and len(list(root.glob('*.json')))==1
+    with psycopg.connect(_STATE['dsn'],autocommit=True) as admin:
+        saved=admin.execute('SELECT * FROM public.requi_document_parts(%s,%s,%s)',(sid,1,'interview/run.log'))
+        columns=[column.name for column in saved.description]
+        assert docs._decode_parts([dict(zip(columns,row)) for row in saved.fetchall()])==b'committed notes\n'
