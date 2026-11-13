@@ -44,7 +44,7 @@ else
 fi
 PYTHON=.venv/bin/python
 # Install the checked-in exact private contract wheel before resolving extras.
-"$PYTHON" -m pip install vendor/vmodel_contracts-0.28.0-py3-none-any.whl vendor/requi_child_contract-0.3.0-py3-none-any.whl
+"$PYTHON" -m pip install vendor/vmodel_contracts-0.29.0-py3-none-any.whl vendor/requi_child_contract-0.3.0-py3-none-any.whl
 "$PYTHON" -m pip install -e '.[dev]'
 # ENGINE_TEST_SCOPE=gate runs only the deterministic non-Postgres fast core
 # (classify_tests.py); anything else runs the whole suite.

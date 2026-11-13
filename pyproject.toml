@@ -11,7 +11,7 @@ license = { text = "Proprietary" }
 authors = [{ name = "Shy Alon" }]
 dynamic = ["version"]
 dependencies = [
-  "vmodel-contracts==0.28.0",
+  "vmodel-contracts==0.29.0",
   "requi-child-contract==0.3.0",
   "fastapi>=0.110",
   "uvicorn>=0.29",
@@ -43,4 +43,4 @@ allow-direct-references = true
 
 [tool.uv.sources]
 requi-child-contract = { path = "vendor/requi_child_contract-0.3.0-py3-none-any.whl" }
-vmodel-contracts = { path = "vendor/vmodel_contracts-0.28.0-py3-none-any.whl" }
+vmodel-contracts = { path = "vendor/vmodel_contracts-0.29.0-py3-none-any.whl" }
