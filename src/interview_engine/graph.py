@@ -1087,7 +1087,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
 
         raw_paths: dict[str, str] = {}
         def call_json(system_text: str, body: str, label: str, detail: str,
-                      validate=None, item_completed=None, item_total=None) -> dict | list:
+                      validate=None, item_completed=None, item_total=None, call_metadata=None) -> dict | list:
             """Contract-last structured call with one parse/shape feedback retry."""
             if progress is not None:
                 progress.emit(ProgressEvent("conops", label, "started", _time.time(), None, detail,item_completed,item_total))
@@ -1103,7 +1103,7 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                         "Correct it and return only the requested JSON value."))
                 messages.append(HumanMessage(content=reminder))
                 t0 = _time.time()
-                resp = model_config.invoke_checked(conops_model(), messages, "conops")
+                resp = model_config.invoke_checked(conops_model(), messages, "conops", metadata=call_metadata)
                 usage_log.record("conops", model_config.for_stage("conops").provider,
                                  model_config.for_stage("conops").model,
                                  (getattr(resp, "usage_metadata", None) or {}), duration_s=_time.time()-t0)
@@ -1161,7 +1161,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     soft = kind == "scenario" and field_name == "exceptions"  # shallow answers are retried and reported, never fatal
                     if not isinstance(value, dict) or value.get(field_name) is None or (not soft and value.get(field_name) in ("", [])):
                         raise ValueError(f"expected object with non-empty field {field_name!r}, got {str(value)[:250]}")
-                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}", field_contract,item_completed=index-1,item_total=total)
+                raw=call_json(CONOPS_SYSTEM,body,label,f"field {field_name}; item {index} of {total}", field_contract,item_completed=index-1,item_total=total,
+                    call_metadata={"item":f"{kind}:{index}","fields":[field_name]})
                 try:
                     # A field call is cleaned against a synthetic missing-field
                     # error contract: normalize wrapper, whitelist, take only it.
@@ -1192,7 +1193,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     f"CODE-DERIVED FIELDS (do not rewrite): {_json.dumps(candidate)}\n"
                     f"VALIDATED INTENT: {_json.dumps(intent)}\nTRANSCRIPT:\n{transcript}\n{prompt}",
                     f"Building CONOPS scenario {index}/{total}",f"scenario {index} of {total}",
-                    scenario_contract,item_completed=index-1,item_total=total)
+                    scenario_contract,item_completed=index-1,item_total=total,
+                    call_metadata={"item":f"scenario:{index}","fields":list(missing)})
                 for field_name in missing:
                     if field_name not in raw:continue
                     try:
@@ -1276,7 +1278,8 @@ def build_graph(usage_log: UsageLog, checkpointer=None, progress: ProgressBus | 
                     + (f"It must be genuinely distinct from prior concepts: {_json.dumps(prior)}. " if prior else "")
                     + "Return one JSON object with name, summary, advantages and disadvantages. Advantages and disadvantages must each be a non-empty list of concise strings grounded in the intended operation. Do not include architecture components or any CONOPS container.",
                     f"Planning CONOPS concept option {option_index}/2",
-                    f"one complete option; prior option names: {prior}", option_identity_contract)
+                    f"one complete option; prior option names: {prior}", option_identity_contract,
+                    call_metadata={"item":f"concept option:{option_index}","fields":["name","summary","advantages","disadvantages"]})
                 name=raw["name"].strip()
                 identity={"concept_id":canonical_concept_id(name),"name":name,"summary":raw["summary"].strip()}
                 # Only the two requested list fields can supplement code-owned

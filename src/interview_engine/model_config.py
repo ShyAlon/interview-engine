@@ -647,7 +647,7 @@ def _llm_turn_line(event,session_id,*,stage,attempt,item,provider,model,dur_ms=N
     except Exception:
         pass
 
-def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
+def invoke_checked(chat_model, messages, stage: str, item: str | None = None, *, metadata: dict | None = None):
     """Invoke under guardrails, retrying one provider-empty completion.
 
     DeepSeek documents occasional empty content in JSON mode. Treat that as a
@@ -677,7 +677,7 @@ def invoke_checked(chat_model, messages, stage: str, item: str | None = None):
             _set_model_timeout(chat_model, effective_timeout)
             _turn_ok=False
             try:
-                resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,item=item,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens)), effective_timeout, stage)
+                resp = _run_with_deadline(lambda: __import__("interview_engine.attempt_admission",fromlist=["checked_model_invoke"]).checked_model_invoke(chat_model,messages,stage=stage,item=item,provider=cfg.provider,model=cfg.model,max_output_tokens=_max_tokens_limit(cfg.max_tokens),**({"metadata":metadata} if metadata is not None else {})), effective_timeout, stage)
                 _turn_ok=True
             finally:
                 if _turn_session:_llm_turn_line("llm.turn.end",_turn_session,stage=stage,attempt=attempt,item=item,provider=cfg.provider,model=cfg.model,dur_ms=int((time.monotonic()-t0)*1000),outcome="ok" if _turn_ok else "error")
