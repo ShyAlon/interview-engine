@@ -140,7 +140,7 @@ def test_same_schema_wheel_and_fixture_as_delivery():
     from pathlib import Path
     import zipfile,requi_child_contract
     root=Path(__file__).parents[1]
-    wheel=root/'vendor/requi_child_contract-0.3.0-py3-none-any.whl'
+    wheel=root/'vendor/requi_child_contract-0.4.0-py3-none-any.whl'
     with zipfile.ZipFile(wheel) as z:assert z.read('requi_child_contract/__init__.py')==Path(requi_child_contract.__file__).read_bytes()
     delivery=root.parent/'delivery-api'
     if not delivery.is_dir():pytest.skip('explicit sibling delivery source required')

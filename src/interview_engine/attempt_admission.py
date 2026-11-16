@@ -203,14 +203,14 @@ def _model_params_snapshot(chat_model, _depth=0):
     return snap
 
 
-def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_tokens,item=None):
+def checked_model_invoke(chat_model,messages,*,stage,provider,model,max_output_tokens,item=None,metadata=None):
     from .wire_binding import wire_model
     if wire_model(chat_model,stage=stage,provider=provider,model=model):
         from .stop_fence import check_execution
         check_execution()
         try:
             from .child_cursor import broker_invocation
-            with broker_invocation(stage,item):response=chat_model.invoke(messages)
+            with broker_invocation(stage,item,metadata=metadata):response=chat_model.invoke(messages)
         except Exception as exc:
             # OpenAI wraps transport control exceptions as connection errors.
             # Preserve Stop identity rather than presenting a provider outage.
